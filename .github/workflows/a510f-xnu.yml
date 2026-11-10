@@ -112,11 +112,36 @@ jobs:
             echo "::notice title=kernel built::$(basename "$f") $(stat -f %z "$f") bytes%0A$(file "$f" | cut -c1-200)"
           fi
 
-      # The instruction check runs on Linux afterwards (a510f-kernel-check,
-      # triggered by this workflow finishing).
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: a510f-xnu-kernel
           path: out/
           if-no-files-found: warn
+
+  # Instruction check on Linux: the macOS runner is scarce and the scan only
+  # needs the kernel file. Fails on anything the SM-A510F's Cortex-A53
+  # cannot execute and names the function it is in.
+  isa-check:
+    needs: build
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: a510f-xnu-kernel
+          path: kernel
+
+      - name: Check the kernel for instructions the A53 lacks
+        run: |
+          sudo apt-get install -y -q python3-numpy > /dev/null
+          f=$(ls kernel/kernel.* 2>/dev/null | grep -v -e '\.dSYM' -e SHA256 | head -1 || true)
+          [ -n "$f" ] || { echo "::error title=kernel ISA check::no kernel was built"; exit 1; }
+          rc=0
+          python3 a510f/tools/macho_isa_scan.py "$f" > isa.txt 2>&1 || rc=$?
+          cat isa.txt
+          level=notice; [ "$rc" = 0 ] || level=error
+          echo "::$level title=kernel ISA check (exit $rc) $(basename "$f") $(sha256sum "$f" | cut -c1-16)::$(grep -v '^__' isa.txt | tail -40 | cut -c1-300 | sed ':a;N;$!ba;s/\n/%0A/g')"
+          exit $rc

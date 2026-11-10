@@ -1,13 +1,10 @@
 name: a510f-kernel-check
 
-# Scan a built A510F kernel (a510f-xnu artifact) for instructions the
-# SM-A510F's Cortex-A53 cannot run, and name the function each one is in.
-# Runs on Linux after every a510f-xnu run, or by hand for a given run id.
+# Scan an earlier A510F kernel (a510f-xnu artifact of a given run) for
+# instructions the SM-A510F's Cortex-A53 cannot run. New a510f-xnu runs do
+# this themselves in their isa-check job.
 
 on:
-  workflow_run:
-    workflows: [a510f-xnu]
-    types: [completed]
   workflow_dispatch:
     inputs:
       run_id:
@@ -25,15 +22,13 @@ permissions:
 
 env:
   # newest checked-in reference kernel for push-triggered runs
-  RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id || '42798747388' }}
+  RUN_ID: ${{ inputs.run_id || '42798747388' }}
 
 jobs:
   check:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: a510f
 
       - uses: actions/download-artifact@v4
         with:
