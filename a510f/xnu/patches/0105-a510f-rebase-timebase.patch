@@ -1,0 +1,24 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index bafab60..82c8fc7 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -358,6 +358,19 @@ arm_init(
+ 	BootArgs = args = &const_boot_args;
+ 
+ 	cpu_data_init(&BootCpuData);
++#if defined(SWEET)
++	/*
++	 * A510F: S-Boot hands over CNTVCT_EL0 near 2^63 (mach_absolute_time
++	 * 0xbd9316b97414c5be at the fourth boot's panic), and recount keeps
++	 * RCT_PR_IDLING in bit 63 of mach time (recount.c:964 assertion). Rebase
++	 * mach time to start near 0 before anything reads it, the way
++	 * wake-from-sleep rebases it: cpu_timebase_init() copies
++	 * rtclock_base_abstime into every CPU's cpu_base_timebase, and the
++	 * commpage publishes it to user space.
++	 */
++	rtclock_base_abstime = 0ULL - ml_get_hwclock();
++	BootCpuData.cpu_base_timebase = rtclock_base_abstime;
++#endif
+ #if defined(HAS_APPLE_PAC)
+ 	/* bootstrap cpu process dependent key for kernel has been loaded by start.s */
+ 	BootCpuData.rop_key = ml_default_rop_pid();

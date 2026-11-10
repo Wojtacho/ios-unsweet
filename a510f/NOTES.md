@@ -224,6 +224,23 @@ Fix (patch 0104): iOS zone sizes (24GB VA, 8GB max) for arm64 builds without
 ARM_LARGE_MEMORY; kmem_range_init prints every claim's size before such a
 panic.
 
+## 2026-11-10: fourth boot (a510f-xnu run 42820603306, commit d13ae1c)
+
+Observed (photo): the iOS zone sizes fixed kmem_range_init. Full panic
+report on screen: zone map 0xfffffff07a000000-0xfffffff67a000000 (24GB) with
+PGZ/VM/RO/GEN0-3/DATA ranges, metadata and bitmaps; panicked task pid 0,
+thread tid 101 with a 16-frame backtrace; stackshot succeeded; "Kernel text
+base: 0xfffffff007004000". Panic: `recount.c:964 Assertion failed:
+(snap->rsn_time_mach & RCT_PR_IDLING) == 0`. `mach_absolute_time:
+0xbd9316b97414c5be`: S-Boot leaves CNTVCT_EL0 near 2^63, and recount keeps
+its idle flag in bit 63 of mach time.
+
+Fix (patch 0105): right after cpu_data_init in arm_init, set
+rtclock_base_abstime = -CNTVCT (copied to cpu_base_timebase by
+cpu_timebase_init and published in the commpage), so mach time starts near 0.
+The decrementer uses CNTV_TVAL (relative), so the offset does not affect
+timer programming.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
