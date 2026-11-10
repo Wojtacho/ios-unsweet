@@ -312,6 +312,31 @@ alive` repeating (5 s heartbeat). No panic.
 load, ad-hoc code signature, syscalls, devfs /dev/console, select timeouts.
 Not yet tested: dyld and the iOS dyld shared cache (need the real root).
 
+## 2026-11-10: ninth boot: first eMMC probe (a510f-xnu run 42839347239, commit ca69966)
+
+Patch 0106 (bsd/dev/sweet_mmc.c, read-only polled-PIO DesignWare MMC
+driver for dwmmc0 0x13540000; mmcprobe=1 prints host state + GPT in
+IOFindBSDRoot; rd=mmcroot0 roots on GPT partition mmcroot=, default
+USERDATA). boot-args `... rd=md0 mmcprobe=1`.
+
+Observed: `SWEET MMC: verid 0x270a hcon 0x8e42541 ctrl 0x10 bmod 0x282
+clkena 0x1 clkdiv 0x1`, `ctype 0x10000 uhs 0x10000 status 0x8906 fifoth
+0x20100010 tmout 0xffffffff intmask 0x0`, `CMD13 ok, R1 0x900 (state 4, 4 =
+transfer)`, `read lba 1 x1 failed, rintsts 0x424`, `probe FAILED (5)`; then
+md0 root and PID 1 heartbeat as before.
+
+Reading: DesignWare 2.70a, 64-bit FIFO (HCON H_DATA_WIDTH 2), S-Boot used
+the IDMAC (BMOD 0x282) in 8-bit DDR (CTYPE/UHS bit 16). The card answers
+(transfer state). 0x424 = CMD_DONE | RXDR | HTO: read data reached the FIFO
+but was never popped. The LineageOS a5xelte config sets
+CONFIG_MMC_DW_FORCE_32BIT_SFR_RW: Samsung reads a 64-bit FIFO entry as two
+32-bit reads (DATA, DATA + 4); the driver used one 64-bit load.
+
+Fix (commit cc1142b): two 32-bit FIFO reads per entry, drain before error
+checks, HTO non-fatal while data flows, failure trace, LBA 1 bytes printed.
+Fallback if PIO keeps failing: the IDMAC (64-bit descriptors of 32 words on
+this SoC, FMP fields; DBADDRL 0x88/DBADDRU 0x8c/IDSTS 0x90/IDINTEN 0x94).
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
