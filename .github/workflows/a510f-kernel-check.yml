@@ -42,5 +42,5 @@ jobs:
           python3 a510f/tools/macho_isa_scan.py "$f" > isa.txt 2>&1 || rc=$?
           cat isa.txt
           level=notice; [ "$rc" = 0 ] || level=error
-          echo "::$level title=kernel ISA check (exit $rc) $(basename "$f") $(sha256sum "$f" | cut -c1-16)::$(tail -12 isa.txt | cut -c1-400 | sed ':a;N;$!ba;s/\n/%0A/g')"
+          echo "::$level title=kernel ISA check (exit $rc) $(basename "$f") $(sha256sum "$f" | cut -c1-16)::$(grep -v '^__' isa.txt | tail -40 | cut -c1-300 | sed ':a;N;$!ba;s/\n/%0A/g')"
           exit $rc
