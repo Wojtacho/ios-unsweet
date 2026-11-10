@@ -508,6 +508,27 @@ mmcroot=SYSTEM..USERDATA mmcrw=1 rootrw=1 plus sweet's iOS set
 (unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin
 launchd_unsecure_cache=1 wdt=-1); console left on (no sweetfb_noconsole).
 
+## 2026-11-10: writing the iOS root to the phone (TWRP, not Odin)
+
+Odin: "Get PIT for mapping" ok, then `system.img FAIL!` at once, no message
+on the download screen (SYSTEM STATUS stayed Official, FRP OFF, Secure
+Download Enabled). Tests on HIDDEN with the same 60 MiB content as sparse
+(with FILL), sparse without FILL and raw: all three FAIL. S-Boot rejects
+non-Samsung images for these partitions whatever the format (RECOVERY is
+accepted).
+
+TWRP for a5xelte: 3.7.0_9-0 (Android 9 base) hangs on the logo with this
+Nougat bootloader; **3.2.3-0 works** (adb as root, /dev/block/mmcblk0p20..23
+= SYSTEM/CACHE/HIDDEN/USERDATA, starts 507904/6651904/7061504/7184384, sizes
+match). `adb exec-in "dd of=..."` from Windows lost the last ~26 KB; what
+works: 256 MiB raw chunks generated from the sparse tar, `adb push` to
+/tmp (tmpfs 914 MiB), sha256 check, dd seek, read-back sha256 (scripts in
+E:\Claude	wrp-write, ~31 s/chunk for SYSTEM, ~70 s for USERDATA). All four
+partitions verified on the phone against the raw images:
+SYSTEM 91f2bc0e..., CACHE 3537d735..., HIDDEN 614939a2..., USERDATA
+b8693563... Android is gone; RECOVERY holds TWRP 3.2.3 until the kernel tar
+is flashed back.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
