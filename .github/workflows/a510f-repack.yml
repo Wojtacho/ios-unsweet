@@ -1,0 +1,62 @@
+name: a510f-repack
+
+# Fast path for boot-args changes: take the kernel of the newest successful
+# a510f-xnu run and only rebuild the recovery image (shim, ADT, payload with
+# a510f/boot-args.txt). A few minutes instead of a full kernel build.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [a510f]
+    paths:
+      - "a510f/boot-args.txt"
+      - ".github/workflows/a510f-repack.yml"
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  repack:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find the newest successful kernel build
+        id: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh run list -R "$GITHUB_REPOSITORY" -w a510f-xnu.yml -b a510f -s success -L 1 \
+                 --json databaseId -q '.[0].databaseId')
+          [ -n "$id" ] || { echo "::error::no successful a510f-xnu run"; exit 1; }
+          echo "run_id=$id" >> "$GITHUB_OUTPUT"
+          echo "kernel from a510f-xnu run $id"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: a510f-xnu-kernel
+          run-id: ${{ steps.src.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: kernel
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc gcc-aarch64-linux-gnu device-tree-compiler \
+            libfdt-dev libssl-dev cpio
+
+      - name: Build recovery image
+        run: |
+          set -o pipefail
+          f=$(ls kernel/kernel.* | grep -v -e '\.dSYM' -e SHA256 | head -1)
+          bash a510f/build.sh xnu "$f" "$(head -1 a510f/boot-args.txt)" 2>&1 | tee boot.log
+          echo "::notice title=repacked::kernel from a510f-xnu run ${{ steps.src.outputs.run_id }}%0Aboot-args: $(head -1 a510f/boot-args.txt)%0A$(grep 'recovery.img:' boot.log | cut -c1-200)%0A$(ls -l a510f/out/a510f-xnu-recovery.tar | awk '{print $5" bytes"}')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a510f-xnu-recovery
+          path: |
+            a510f/out/a510f-xnu-recovery.tar
+            a510f/out/shim/a510f.adt
+          if-no-files-found: error
