@@ -15,6 +15,7 @@ on:
     branches: [a510f]
     paths:
       - "a510f/xnu/**"
+      - "a510f/tools/macho_isa_scan.py"
       - "xnu/patches/**"
       - ".github/workflows/a510f-xnu.yml"
 
@@ -83,7 +84,8 @@ jobs:
                       seen.add(key)
                       errs.append(f'{key[0]}:{key[1]}: {key[2]}'[:300])
           other = [l.strip()[:300] for l in clean.splitlines()
-                   if re.search(r'(^|\s)(error|Error \d+|ld: |Undefined symbols|patch.*(failed|does not apply))', l)][-25:]
+                   if re.search(r'(^|\s)(error:|Error \d+|ld: |Undefined symbols|patch.*(failed|does not apply))', l)
+                   and 'No syntax errors' not in l][-25:]
           print(f'{len(errs)} distinct compile errors')
           for i in range(0, min(len(errs), 160), 20):
               print(f'::error title=compile errors {i + 1}-{min(i + 20, len(errs))} of {len(errs)}::' + '%0A'.join(errs[i:i + 20]))
@@ -106,6 +108,14 @@ jobs:
             f=$(ls out/kernel.* | grep -v '\.dSYM' | head -1)
             echo "::notice title=kernel built::$(basename "$f") $(stat -f %z "$f") bytes%0A$(file "$f" | cut -c1-200)"
           fi
+
+      - name: Check the kernel for instructions the A53 lacks
+        run: |
+          python3 -m pip install -q --break-system-packages numpy 2>/dev/null || python3 -m pip install -q numpy
+          f=$(ls out/kernel.* | grep -v '\.dSYM' | head -1)
+          set -o pipefail
+          python3 a510f/tools/macho_isa_scan.py "$f" | tee isa.txt
+          echo "::notice title=kernel ISA check::$(tail -2 isa.txt | tr '\n' ' ')"
 
       - uses: actions/upload-artifact@v4
         if: always()
