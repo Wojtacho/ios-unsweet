@@ -126,6 +126,38 @@ Verdict: 16 KB pages are **not a blocker in principle**. The kernel side is a
 supported configuration; the work is a new A510F machine config modelled on
 BCM2837 plus porting sweet's SWEET-specific patches to it.
 
+## 2026-11-10: first 4 KB / Cortex-A53 kernel build (a510f-xnu run 42803068442, commit 7a9c842)
+
+Result: `kernel.development.sweet`, 17,203,280 bytes, Mach-O arm64,
+sha256 d355129c9203d687...; the Linux `isa-check` job found **no
+A53-incompatible instructions** in 2,290,622 instructions (2,271 LL/SC
+exclusives; the one LSE-shaped word is the SHA-256 `K256` table in
+`__hib_text`, data).
+
+How it is built (`.github/workflows/a510f-xnu.yml`):
+- sweet's 77 patches + `a510f/xnu/make-a510f-variant.sh` on the copied 0004:
+  no `__ARM_16K_PG__`, `__ARM64_PMAP_SUBPAGE_L1__` instead of
+  `__ARM_PAN_AVAILABLE__`, `-mcpu=cortex-a53`. Machine config name stays
+  SWEET, so the board code is still sweet's (GICv3, UFS, Goodix...).
+- `a510f/xnu/patches/0100`: 4K commpage nesting static_assert skipped on
+  macOS-platform builds (the 1GB nesting region is reserved by the VM, as
+  the 16K branch documents). The only compile error of the 4 KB build.
+- `a510f/xnu/patches/0101`: commpage PFZ FIFO trylocks (user-visible
+  OSAtomicFifoEnqueue/Dequeue) use LDAXR/STXR when `__ARM_FEATURE_ATOMICS`
+  is off; they were unconditional `casa`.
+- `a510f/xnu/patch-dxb-build.sh`: libfirehose_kernel is built by xcodebuild
+  outside xnu's makefiles; build only its arm64 slice with
+  `-mcpu=cortex-a53`.
+- Runner: `macos-15-intel`. macos-14 is retired; arm64 macOS runners
+  repeatedly never picked the job up. Xcode 16.0 builds xnu-8796 here
+  (sweet chose macos-14 for Xcode 15's iig; not needed so far).
+
+Lessons (observed, with run ids in git log):
+- `-march=armv8-a` alone left Apple clang's default CPU (apple-m1) in
+  charge: 875 LSE + 209 LDAPR in the kernel. Use `-mcpu`.
+- Run logs need a GitHub login; workflows publish errors as annotations,
+  readable via the check-runs API or the run page.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
