@@ -76,6 +76,56 @@ Reading:
 - Conclusion: **atomics are not a blocker.** The 16 KB page granule is now
   the main open problem.
 
+## 2026-11-10: 4 KB pages in xnu-8796 (source study, xnu-8796.141.3)
+
+Finding: **xnu-8796 still carries a 4 KB-page arm64 configuration**, and it
+is for a Cortex-A53: `MACHINE_CONFIG=BCM2837` (Raspberry Pi 3).
+
+- `makedefs/MakeInc.def`: `SUPPORTED_ARM64_MACHINE_CONFIGS = BCM2837 T6000
+  T8101 T8103 VMAPPLE`; `MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837`
+  (no `-mcpu`, i.e. plain ARMv8.0).
+- `pexpert/pexpert/arm64/BCM2837.h` defines `__ARM_ARCH__ 8`,
+  `__ARM_VMSA__ 8`, `__ARM64_PMAP_SUBPAGE_L1__ 1`, `NO_MONITOR`, and **no
+  `__ARM_16K_PG__`** (H13.h and VMAPPLE.h define it). sweet's patch 0004
+  defines it for SWEET.
+- Without `__ARM_16K_PG__`: `ARM_PGSHIFT 12` (proc_reg.h) and
+  `PAGE_SHIFT_CONST 12` (mach/arm/vm_param.h), so the VM, pmap and user
+  `vm_page_size` are all 4 KB. The pmap, TLB and proc_reg code keep full
+  `#else` 4 KB branches (4K L0-L3 table geometry).
+- Shared cache sliding is page-size independent: `PAGE_SIZE_FOR_SR_SLIDE`
+  is 4096 everywhere (vm_shared_region.h), so the iOS 16 cache's slide info
+  is usable.
+
+Atomics, confirmed in the kernel source:
+- `osfmk/arm/commpage/commpage.c` sets `kHasFeatLSE` (= `kHasARMv81Atomics`)
+  only when `ID_AA64ISAR0_EL1.Atomic >= 8.1`; RDM and FP16 bits likewise come
+  from the ID registers. On the A53 they stay clear, so libdispatch,
+  pthread, platform and malloc take their LL/SC paths.
+- The only explicit LSE in the kernel (`casa` in
+  `hw_lck_ticket_reserve_orig_allow_invalid`, machine_routines_asm.s) is
+  under `#if defined(__ARM_ARCH_8_2__)`. sweet builds with
+  `-march=armv8.2-a+crypto`; an A510F config must use `-march=armv8-a+crc+crypto`
+  so neither this nor compiler-generated atomics use LSE.
+
+sweet patches that assume 16 KB (from grepping `xnu/patches`):
+- 0004 (machine config: defines `__ARM_16K_PG__`): new A510F config instead.
+- 0010 (early framebuffer block mapping assumes the 16K bootstrap table
+  layout, `+ 2*PGBYTES`, 32 MB L2 block): rewrite for 4K (2 MB L2 blocks).
+- 0011 (physmap padding) is written in `ARM_TT_*` terms: should follow.
+- Other hits (0028 `DMA_BOUNCE 0x4000`, 0046, 0058, 0060, 0073) are buffer
+  or MMIO sizes, not page-size assumptions.
+
+Risks still open (cannot be settled from source):
+- iOS 16 userland never shipped on 4 KB-page hardware (the last 4 KB arm64
+  iOS was iOS 12 on A7/A8). Code that reads `vm_page_size` adapts; anything
+  hard-coding 16 KB will show up only at run time.
+- Whether the BCM2837 config still builds cleanly with this toolchain.
+  Apple's open-source releases do list it; nothing here shows it booting.
+
+Verdict: 16 KB pages are **not a blocker in principle**. The kernel side is a
+supported configuration; the work is a new A510F machine config modelled on
+BCM2837 plus porting sweet's SWEET-specific patches to it.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
