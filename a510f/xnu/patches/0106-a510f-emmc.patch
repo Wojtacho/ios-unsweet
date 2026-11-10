@@ -12,10 +12,10 @@ index 6630131..bf2377a 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
 new file mode 100644
-index 0000000..4803a8b
+index 0000000..bad2a53
 --- /dev/null
 +++ b/bsd/dev/sweet_mmc.c
-@@ -0,0 +1,985 @@
+@@ -0,0 +1,997 @@
 +/*
 + * A510F (Samsung Galaxy A5 2016, Exynos 7580) internal eMMC.
 + *
@@ -76,6 +76,12 @@ index 0000000..4803a8b
 +#define MMC_HCON        0x070
 +#define MMC_UHS_REG     0x074
 +#define MMC_BMOD        0x080
++/* Exynos SMU ("eMMC protector"): per-sector-range access control (Linux dw_mmc-exynos.h) */
++#define MMC_MPSECURITY  0x1010
++#define MMC_MPSBEGIN0   0x1200
++#define MMC_MPSEND0     0x1204
++#define MMC_MPSCTRL0    0x120c
++#define MPSCTRL_LINUX   0x71u   /* SECURE_WRITE | NON_SECURE_READ | NON_SECURE_WRITE | VALID */
 +
 +#define CTRL_RESET      (1u << 0)
 +#define CTRL_FIFO_RESET (1u << 1)
@@ -710,49 +716,55 @@ index 0000000..4803a8b
 +			    lba, r1, nz, orig[0], orig[1], orig[2], orig[3], orig[4], orig[5], orig[6], orig[7]);
 +			printf("SWEET MMC: wtest pattern %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
 +			    pat[0], pat[1], pat[2], pat[3], pat[4], pat[5], pat[6], pat[7], pat[8], pat[9], pat[10], pat[11]);
-+			/* EXT_CSD (CMD8) and write-protect status of the test sector (CMD30/31). */
++			/* EXT_CSD, kept to recognise stale FIFO contents in what gets written. */
 +			uint8_t *ext = mmc_alloc(MMC_SECTOR);
-+			uint32_t er1 = 0, p30r1 = 0, p31r1 = 0;
++			uint32_t er1 = 0;
 +			int e = mmc_rdata(8, 0, MMC_SECTOR, 1, ext, &er1);
-+			uint32_t sec = (uint32_t)ext[212] | ext[213] << 8 | ext[214] << 16 | (uint32_t)ext[215] << 24;
-+			printf("SWEET MMC: EXT_CSD %d R1 0x%x rev %u sec_count %u (%u MiB) part_cfg 0x%x user_wp 0x%x boot_wp 0x%x boot_wp_st 0x%x\n",
-+			    e, er1, ext[192], sec, sec >> 11, ext[179], ext[171], ext[173], ext[174]);
-+			printf("SWEET MMC: EXT_CSD erase_grp_def %u hc_wp_grp %u hc_erase_grp %u secure_wp 0x%x cache_ctrl %u cache_size %u part_attr 0x%x part_setting %u\n",
-+			    ext[175], ext[221], ext[224], ext[231], ext[33],
-+			    (uint32_t)ext[249] | ext[250] << 8 | ext[251] << 16 | (uint32_t)ext[252] << 24,
-+			    ext[156], ext[155]);
-+			uint8_t wp[8] = { 0 };
-+			int p30 = mmc_rdata(30, (uint32_t)lba, 4, 1, wp, &p30r1);
-+			printf("SWEET MMC: CMD30 %d R1 0x%x: %02x %02x %02x %02x\n", p30, p30r1, wp[0], wp[1], wp[2], wp[3]);
-+			memset(wp, 0, sizeof(wp));
-+			int p31 = mmc_rdata(31, (uint32_t)lba, 8, 1, wp, &p31r1);
-+			printf("SWEET MMC: CMD31 %d R1 0x%x: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-+			    p31, p31r1, wp[0], wp[1], wp[2], wp[3], wp[4], wp[5], wp[6], wp[7]);
-+			kfree_data(ext, MMC_SECTOR);
++			unsigned extnz = 0;
++			for (unsigned i = 0; i < MMC_SECTOR; i++) {
++				extnz += ext[i] != 0;
++			}
++			printf("SWEET MMC: EXT_CSD %d R1 0x%x rev %u, %u non-zero bytes\n", e, er1, ext[192], extnz);
++			printf("SWEET MMC: SMU security 0x%x begin0 0x%x end0 0x%x ctrl0 0x%x\n",
++			    mmc_rd(MMC_MPSECURITY), mmc_rd(MMC_MPSBEGIN0), mmc_rd(MMC_MPSEND0), mmc_rd(MMC_MPSCTRL0));
 +			int good = -1;
-+			for (uint32_t mode = 0; !r1 && mode < 2 && good < 0; mode++) {
++			for (uint32_t t = 0; !r1 && t < 3 && good < 0; t++) {
++				/* try 0: as left by S-Boot; then open the SMU like Linux, try both FIFO modes */
++				uint32_t mode = t == 2 ? 1 : 0;
++				if (t == 1) {
++					mmc_wr(MMC_MPSBEGIN0, 0);
++					mmc_wr(MMC_MPSEND0, 0xffffffffu);
++					mmc_wr(MMC_MPSCTRL0, MPSCTRL_LINUX);
++					printf("SWEET MMC: SMU set: security 0x%x begin0 0x%x end0 0x%x ctrl0 0x%x\n",
++					    mmc_rd(MMC_MPSECURITY), mmc_rd(MMC_MPSBEGIN0), mmc_rd(MMC_MPSEND0), mmc_rd(MMC_MPSCTRL0));
++				}
 +				sm.fifo_wmode = mode;
++				/* Refill the FIFO RAM with EXT_CSD so stale data is recognisable. */
++				(void)mmc_rdata(8, 0, MMC_SECTOR, 1, back, NULL);
 +				int w = mmc_write(lba, 1, pat);
-+				uint32_t st = 0;
-+				int c = mmc_cmd(13 | CMD_R1, 1u << 16, &st);
 +				memset(back, 0xee, MMC_SECTOR);
 +				int r = mmc_read(lba, 1, back);
-+				unsigned bad = 0, first = MMC_SECTOR, eqorig = 0;
++				unsigned bad = 0, eqorig = 0, eqext = 0, nzf = MMC_SECTOR, nzl = 0;
 +				for (unsigned i = 0; i < MMC_SECTOR; i++) {
-+					if (back[i] != pat[i]) {
-+						bad++;
-+						first = MIN(first, i);
-+					}
++					bad += back[i] != pat[i];
 +					eqorig += back[i] == orig[i];
++					eqext += back[i] == ext[i];
++					if (back[i]) {
++						nzf = MIN(nzf, i);
++						nzl = i;
++					}
 +				}
-+				printf("SWEET MMC: wtest mode %u write %d (CMD24 R1 0x%x, rintsts 0x%x) CMD13 0x%x(%d) read %d: %u bad from %u, %u = old\n",
-+				    mode, w, sm.wr_r1, sm.wr_seen, st, c, r, bad, first, eqorig);
-+				printf("SWEET MMC: wtest back %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-+				    back[0], back[1], back[2], back[3], back[4], back[5], back[6], back[7], back[8], back[9], back[10], back[11]);
++				unsigned o = nzf < MMC_SECTOR ? nzf & ~7u : 0;
++				printf("SWEET MMC: try %u mode %u write %d R1 0x%x int 0x%x read %d: %u bad, %u =old, %u =EXT_CSD, nz %u..%u\n",
++				    t, mode, w, sm.wr_r1, sm.wr_seen, r, bad, eqorig, eqext, nzf, nzl);
++				printf("SWEET MMC:   @%u: %02x %02x %02x %02x %02x %02x %02x %02x (ext %02x %02x %02x %02x)\n",
++				    o, back[o], back[o + 1], back[o + 2], back[o + 3], back[o + 4], back[o + 5], back[o + 6], back[o + 7],
++				    ext[o], ext[o + 1], ext[o + 2], ext[o + 3]);
 +				if (!w && !r && bad == 0) {
 +					good = (int)mode;
 +				}
 +			}
++			kfree_data(ext, MMC_SECTOR);
 +			sm.fifo_wmode = good == 1 ? 1 : 0;
 +			int w2 = r1 ? -1 : mmc_write(lba, 1, orig);
 +			int r3 = w2 ? -1 : mmc_read(lba, 1, back);

@@ -423,6 +423,31 @@ PARTITION_CONFIG[179], USER_WP[171], BOOT_WP[173/174], ERASE_GROUP_DEF[175],
 HC_WP_GRP_SIZE[221], HC_ERASE_GRP_SIZE[224], SECURE_WP_INFO[231], cache) and
 CMD30/CMD31 write-protect status of the test sector's group.
 
+## 2026-11-10: thirteenth boot: not write protection (a510f-xnu run 42857637985)
+
+(The user first re-flashed the previous image by mistake; that boot repeated
+the twelfth.) Observed: `EXT_CSD 0 R1 0x900 rev 7 sec_count 30777344 (15028
+MiB) part_cfg 0x48 user_wp 0x11 boot_wp 0x11 boot_wp_st 0x5`, `erase_grp_def
+0 hc_wp_grp 1 hc_erase_grp 8 [231]=0x55 cache_ctrl 0 cache_size 4096`,
+`CMD30 0 R1 0x900: 00 00 00 00`, `CMD31 ... 00 x8` (test group not
+protected; only the boot partitions are power-on protected). Writes: `CMD24
+R1 0x900, rintsts 0x1c` (CMD_DONE|DATA_OVER|TXDR, no errors), read back
+`511 bad, 424 = old`, first 12 bytes zero, both FIFO modes; `restore FAILED`.
+The last USERDATA sector now holds 88 non-zero bytes (harmless: USERDATA is
+to be overwritten anyway).
+
+Theory: the CPU's FIFO writes never reach the FIFO RAM; the card gets
+whatever the last read left there (all-zero test sector before, EXT_CSD this
+time: ~88 non-zero bytes beyond offset 12 fits). Suspect the Exynos SMU
+(dw_mmc-exynos "eMMC protector", MPSBEGIN0/MPSEND0/MPSCTRL0 at 0x1200..,
+MPSECURITY 0x1010): Linux sets MPSCTRL0 = 0x71 (secure write, non-secure
+read/write, valid) before writes work.
+
+Next boot: print the SMU registers; try 0 as left by S-Boot, then set
+BEGIN0=0 END0=~0 CTRL0=0x71 and try FIFO modes 0 and 1. Before each write
+the FIFO RAM is refilled with EXT_CSD (CMD8) and the read-back is compared
+with the pattern, the old sector and EXT_CSD (non-zero span, 8 bytes).
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
