@@ -36,6 +36,46 @@ Observations vs. guesses:
 - Guess: PSCI SYSTEM_OFF is likely unsupported too (PSCI_VERSION is).
   Power-off timing not yet reported.
 
+Power-off: the phone switched itself off ~60 s after the rows appeared, so
+the probe ran to the end (PSCI SYSTEM_OFF or the PS_HOLD fallback; not
+distinguished).
+
+## 2026-11-10: iOS 16 instruction scan (run 42790485292, commit 776368e)
+
+`a510f-isa-scan` workflow, `a510f/tools/dsc_isa_scan.py`: iPhone X iOS
+16.7.16 (20H392) main dyld shared cache from the SystemOS cryptex
+(`087-86593-047.dmg`), code sections only, exact encodings.
+
+| | count |
+|---|---|
+| images scanned | 2647 |
+| instructions | 387,147,500 |
+| LL/SC exclusives (ARMv8.0 atomics) | 823,085 |
+| **LSE atomics** | **990** in 21 images (CAS 346, CASP 15, LD*/SWP 629) |
+| FP16 arithmetic | 1530 (1417 in libBNNS, 74 in ActionKit) |
+| RDMA (SQRDMLAH/SH) | 50 (33 in ActionKit) |
+| LDAPR | 1 |
+| DC CVAP | 0 |
+
+LSE by image: libdispatch 697, libsystem_pthread 86, libsystem_platform 81,
+ActionKit 73, libsystem_malloc 20, the rest 1-6 each (libsystem_m,
+libSparse, MediaToolbox, AudioCodecs, corecrypto, MobileGestalt, dyld, ...).
+
+Reading:
+- The compiler baseline for this userland is ARMv8.0: libobjc, libswiftCore,
+  Foundation, CoreFoundation, UIKitCore, libc++ and JavaScriptCore have
+  **zero** LSE and use LL/SC throughout.
+- LSE sits only in the hand-tuned atomics of libdispatch / pthread /
+  platform / malloc, which also carry LL/SC paths. Guess (to verify in xnu
+  `cpu_capabilities.h` and libplatform): these pick LSE at run time from a
+  commpage capability bit the kernel sets from ID_AA64ISAR0. On the A53 that
+  bit stays clear and the LL/SC paths run, at no cost.
+- Whatever still executes LSE/FP16/RDMA can be trapped (undefined
+  instruction) and emulated in the kernel. Only niche code (Shortcuts'
+  ActionKit, BNNS neural-net kernels) has more than a handful of sites.
+- Conclusion: **atomics are not a blocker.** The 16 KB page granule is now
+  the main open problem.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
