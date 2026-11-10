@@ -72,9 +72,10 @@ jobs:
           img="ipsw/${{ steps.manifest.outputs.path }}"
           ls -l "$img" > /tmp/diag 2>&1 || fail "image missing"
           head -c 64 "$img" | od -A x -t x1z | head -4 >> /tmp/diag
-          ln -s "$(realpath "$img")" /tmp/sysos.dmg
+          # Mount the file itself: root may not follow a runner-owned symlink
+          # in sticky /tmp (fs.protected_symlinks), and the name ends in .dmg.
           sudo mkdir -p /mnt/sysos
-          sudo apfs-fuse /tmp/sysos.dmg /mnt/sysos >> /tmp/diag 2>&1 || fail "apfs-fuse mount failed"
+          sudo apfs-fuse "$(realpath "$img")" /mnt/sysos >> /tmp/diag 2>&1 || fail "apfs-fuse mount failed"
           sudo find /mnt/sysos -maxdepth 4 >> /tmp/diag 2>&1
           dir=$(sudo find /mnt/sysos -name dyld_shared_cache_arm64 -printf '%h\n' | head -1)
           [ -n "$dir" ] || fail "no dyld_shared_cache_arm64 found"
