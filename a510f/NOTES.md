@@ -496,6 +496,18 @@ ustar 8 GiB member limit (tar refused). Fix: remove all localizations except
 Base/en/English/en_*, then zero the free space (deleted data would otherwise
 stay in the sparse image).
 
+Third run (42874386788) succeeded after making the rm tolerant (Linux
+hfsplus cannot remove a few non-ASCII WorkflowKit th.lproj entries): `used
+11615 MiB (before trimming 11898)`, system.img 3013191816, cache.img
+196694364, hidden.img 62824544, userdata.img 8572587812 bytes (17 MB under
+the 8 GiB ustar limit), tar 11845304320 bytes, root.img sha256
+847bdd50e51737a4..., artifact a510f-ios-root-odin (zip 6097950620 bytes).
+
+First eMMC-root boot-args (repack of a510f-xnu run 42866358361): rd=mmcroot0
+mmcroot=SYSTEM..USERDATA mmcrw=1 rootrw=1 plus sweet's iOS set
+(unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin
+launchd_unsecure_cache=1 wdt=-1); console left on (no sweetfb_noconsole).
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
