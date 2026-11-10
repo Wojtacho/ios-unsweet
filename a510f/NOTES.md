@@ -470,6 +470,25 @@ control. The GPT header (LBA 1) is left in FIFO RAM before each write as the
 stale marker; read-back is compared with pattern, EXT_CSD (old) and GPT.
 The sector is then written back to zeros (its original content).
 
+## 2026-11-10: fifteenth boot: eMMC writes work (a510f-xnu run 42866358361)
+
+Observed: `FIFO mode 0: put 16, status 0x8906 fcnt 0 -> 0x48902 fcnt 2,
+read 00000000 00000000 00010000 00000200 -> fcnt 2` (mode 1 the same, first
+word 6098d746): CPU writes do count (2 entries for 16 bytes); idle reads
+from DATA do not pop. `try 0 (on TXDR, mode 0) write 0 R1 0x900 int 0x1c
+read 0: 0 bad`, back `5a db 72 a7 5e df 76 a3` = pattern. `write test: try
+0 OK, zeroed OK, flush 0`, `probe done (0)`.
+
+**Milestone: eMMC writes work.** Fix: send CMD24/25 first and push data as
+the FIFO drains (Linux order). Data put in the FIFO before the command is
+lost while the count still says it is there, so the card got stale FIFO
+RAM. 2x32-bit FIFO writes (mode 0) are right. wr_prefill stays 0.
+
+Next: `.github/workflows/a510f-iosroot.yml` builds the iOS root on GitHub
+(mkiosroot.sh at 14776 MiB + sweet-root-tweaks.py), splits it at the
+SYSTEM/CACHE/HIDDEN/USERDATA boundaries into sparse system.img, cache.img,
+hidden.img, userdata.img in one ustar Odin tar (members must stay < 8 GiB).
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.

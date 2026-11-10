@@ -1,0 +1,159 @@
+name: a510f-iosroot
+
+# Builds the iOS 16 root (tools/mkiosroot.sh + tools/sweet-root-tweaks.py)
+# for the A510F, sized to the contiguous GPT span SYSTEM..USERDATA
+# (14776 MiB, mmcroot=SYSTEM..USERDATA), splits it at the partition
+# boundaries and packs the pieces as Android sparse images in one Odin tar
+# (AP slot). Only Apple's IPSW is downloaded; nothing from Apple is stored in
+# the repo, and the artifact is only kept for a few days.
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "Upload the Odin tar (several GB)"
+        type: boolean
+        default: true
+  push:
+    branches: [a510f]
+    paths:
+      - "tools/mkiosroot.sh"
+      - "tools/sweet-root-tweaks.py"
+      - ".github/workflows/a510f-iosroot.yml"
+
+concurrency:
+  group: a510f-iosroot-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # iPhone10,3 / iPhone10,6, iOS 16.7.16 (20H392): the userland sweet runs.
+  IPSW_URL: https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw
+  # GPT of the phone (MiB): SYSTEM 3000, CACHE 200, HIDDEN 60, USERDATA 11516,
+  # contiguous from LBA 507904 (a510f/NOTES.md, tenth boot).
+  PARTS: "system:3000 cache:200 hidden:60 userdata:11516"
+  W: /mnt/w
+
+defaults:
+  run:
+    # Logs need a GitHub login: keep a copy for the failure annotation.
+    shell: bash --noprofile --norc -c "exec > >(tee -a /tmp/steplog) 2>&1; set -eo pipefail; . {0}"
+
+jobs:
+  root:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo mkdir -p "$W" && sudo chown "$(id -u):$(id -g)" "$W"
+          df -h / /mnt
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q fuse3 cmake g++ libfuse3-dev zlib1g-dev libbz2-dev \
+            libattr1-dev hfsprogs rsync android-sdk-libsparse-utils
+          sudo modprobe hfsplus || { sudo apt-get install -y -q "linux-modules-extra-$(uname -r)" && sudo modprobe hfsplus; }
+          git clone -q --recursive https://github.com/sgan81/apfs-fuse /tmp/apfs-fuse
+          git -C /tmp/apfs-fuse log -1 --format='apfs-fuse %h %cs'
+          cmake -S /tmp/apfs-fuse -B /tmp/apfs-fuse/build -DCMAKE_BUILD_TYPE=Release
+          make -C /tmp/apfs-fuse/build -j"$(nproc)"
+          sudo install /tmp/apfs-fuse/build/apfs-fuse /tmp/apfs-fuse/build/apfs-dump /usr/local/bin/
+
+      - name: Find the OS and cryptex images in the IPSW
+        id: manifest
+        run: |
+          python3 tools/remotezip.py "$IPSW_URL" BuildManifest.plist "$W/ipsw"
+          python3 - "$W/ipsw/BuildManifest.plist" >> "$GITHUB_OUTPUT" <<'EOF'
+          import plistlib, sys
+          m = plistlib.load(open(sys.argv[1], 'rb'))
+          want = {'OS': 'os', 'Cryptex1,SystemOS': 'sysos', 'Cryptex1,AppOS': 'appos'}
+          got = {}
+          for ident in m['BuildIdentities']:
+              for k, v in want.items():
+                  e = ident['Manifest'].get(k)
+                  if e and 'Path' in e.get('Info', {}) and v not in got:
+                      got[v] = e['Info']['Path']
+          assert len(got) == 3, got
+          for v, p in got.items():
+              print(f'{v}={p}')
+              print(f'{v} -> {p}', file=sys.stderr)
+          EOF
+
+      - name: Download the images
+        run: |
+          for p in "${{ steps.manifest.outputs.os }}" "${{ steps.manifest.outputs.sysos }}" "${{ steps.manifest.outputs.appos }}"; do
+            python3 tools/remotezip.py "$IPSW_URL" "$p" "$W/ipsw"
+          done
+          ls -l "$W/ipsw"
+          df -h /mnt
+
+      - name: Build the HFS+ root (SYSTEM..USERDATA size)
+        run: |
+          total=0
+          for p in $PARTS; do total=$((total + ${p#*:})); done
+          echo "span ${total} MiB"
+          bash tools/mkiosroot.sh "$W/ipsw/${{ steps.manifest.outputs.os }}" \
+            "$W/ipsw/${{ steps.manifest.outputs.sysos }}" \
+            "$W/ipsw/${{ steps.manifest.outputs.appos }}" \
+            "$W/root.img" "${total}M" 2>&1 | grep -v '^linked ' | tail -40
+          rm -rf "$W/ipsw"
+
+      - name: Apply the SWEET root tweaks
+        run: |
+          sudo mkdir -p /mnt/iosroot
+          sudo mount -t hfsplus -o loop,force "$W/root.img" /mnt/iosroot
+          sudo python3 tools/sweet-root-tweaks.py /mnt/iosroot
+          df -m /mnt/iosroot | tee /tmp/df
+          sudo umount /mnt/iosroot
+          fsck.hfsplus -f -y "$W/root.img" | grep -v 'Illegal name' || true
+          fsck.hfsplus -f -n "$W/root.img"
+
+      - name: Split at the partition boundaries, sparse, Odin tar
+        run: |
+          cd "$W"
+          off=0
+          files=()
+          : > /tmp/sizes
+          for p in $PARTS; do
+            name=${p%%:*} mib=${p#*:}
+            dd if=root.img of="$name.raw" bs=1M skip="$off" count="$mib" status=none
+            img2simg "$name.raw" "$name.img"
+            rm -f "$name.raw"
+            echo "$name.img $(stat -c %s "$name.img") bytes (${mib} MiB partition, from MiB $off)" | tee -a /tmp/sizes
+            off=$((off + mib))
+            files+=("$name.img")
+          done
+          [ "$off" -eq "$(( $(stat -c %s root.img) >> 20 ))" ] || { echo "::error::split ${off} MiB != image"; exit 1; }
+          sha256sum root.img | cut -c1-16 > /tmp/rootsha
+          rm -f root.img
+          # ustar: Odin's tar reader; refuses members over 8 GiB instead of
+          # writing an extension header Odin may not understand.
+          tar --format=ustar -cf a510f-ios-root.tar "${files[@]}"
+          rm -f "${files[@]}"
+          ls -l a510f-ios-root.tar
+          {
+            echo "used: $(awk 'NR==2{print $3" MiB of "$2" MiB"}' /tmp/df)"
+            cat /tmp/sizes
+            echo "tar: $(stat -c %s a510f-ios-root.tar) bytes, root.img sha256 $(cat /tmp/rootsha)..."
+          } > /tmp/msg
+          echo "::notice title=iOS root::$(sed ':a;N;$!ba;s/\n/%0A/g' /tmp/msg)"
+
+      - name: Upload the Odin tar
+        if: github.event_name == 'push' || inputs.upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: a510f-ios-root-odin
+          path: /mnt/w/a510f-ios-root.tar
+          compression-level: 1
+          retention-days: 5
+
+      - name: Report a failure
+        if: failure()
+        run: |
+          tail -45 /tmp/steplog | cut -c1-200 > /tmp/msg || true
+          df -h / /mnt >> /tmp/msg || true
+          echo "::error title=iOS root build failed::$(sed ':a;N;$!ba;s/\n/%0A/g' /tmp/msg)"
