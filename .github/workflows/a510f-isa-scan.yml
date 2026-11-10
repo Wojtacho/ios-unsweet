@@ -30,14 +30,14 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q python3-numpy fuse3
-          if ! sudo apt-get install -y -q apfs-fuse; then
-            sudo apt-get install -y -q cmake g++ libfuse3-dev zlib1g-dev libbz2-dev libattr1-dev
-            git clone -q --recursive https://github.com/sgan81/apfs-fuse /tmp/apfs-fuse
-            cmake -S /tmp/apfs-fuse -B /tmp/apfs-fuse/build -DCMAKE_BUILD_TYPE=Release
-            make -C /tmp/apfs-fuse/build -j"$(nproc)"
-            sudo install /tmp/apfs-fuse/build/apfs-fuse /usr/local/bin/
-          fi
+          sudo apt-get install -y -q python3-numpy fuse3 cmake g++ libfuse3-dev \
+            zlib1g-dev libbz2-dev libattr1-dev
+          # Current apfs-fuse: the 2020 Ubuntu package predates iOS 16 images.
+          git clone -q --recursive https://github.com/sgan81/apfs-fuse /tmp/apfs-fuse
+          git -C /tmp/apfs-fuse log -1 --format='apfs-fuse %h %cs'
+          cmake -S /tmp/apfs-fuse -B /tmp/apfs-fuse/build -DCMAKE_BUILD_TYPE=Release
+          make -C /tmp/apfs-fuse/build -j"$(nproc)"
+          sudo install /tmp/apfs-fuse/build/apfs-fuse /tmp/apfs-fuse/build/apfs-dump /usr/local/bin/
           command -v apfs-fuse
 
       - name: Find the SystemOS cryptex in the IPSW
@@ -63,12 +63,21 @@ jobs:
 
       - name: Copy out the dyld shared cache
         run: |
+          # Logs need a GitHub login: surface failures as public annotations.
+          fail() {
+            { echo "$1"; cat /tmp/diag 2>/dev/null; } | head -40 > /tmp/msg
+            echo "::error title=copy-out::$(sed ':a;N;$!ba;s/\n/%0A/g' /tmp/msg)"
+            exit 1
+          }
           img="ipsw/${{ steps.manifest.outputs.path }}"
+          ls -l "$img" > /tmp/diag 2>&1 || fail "image missing"
+          head -c 64 "$img" | od -A x -t x1z | head -4 >> /tmp/diag
           ln -s "$(realpath "$img")" /tmp/sysos.dmg
           sudo mkdir -p /mnt/sysos
-          sudo apfs-fuse -o allow_other /tmp/sysos.dmg /mnt/sysos
+          sudo apfs-fuse /tmp/sysos.dmg /mnt/sysos >> /tmp/diag 2>&1 || fail "apfs-fuse mount failed"
+          sudo find /mnt/sysos -maxdepth 4 >> /tmp/diag 2>&1
           dir=$(sudo find /mnt/sysos -name dyld_shared_cache_arm64 -printf '%h\n' | head -1)
-          [ -n "$dir" ] || { echo "no dyld_shared_cache_arm64 found" >&2; sudo find /mnt/sysos -maxdepth 6 | head -50; exit 1; }
+          [ -n "$dir" ] || fail "no dyld_shared_cache_arm64 found"
           echo "cache dir: $dir"
           mkdir -p dsc
           sudo sh -c "cp \"$dir\"/dyld_shared_cache_arm64* dsc/"
