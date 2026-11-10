@@ -18,18 +18,43 @@ index 17a98e8..5ca8baa 100644
  
  
  CFLAGS_ARM64	= -Darm64 -DARM64 -D__ARM64__ -DLP64 -DPAGE_SIZE_FIXED -DVM_KERNEL_LINK_ADDRESS=$(ARM64_LINK_ADDR) \
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 42362c5..bafab60 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -544,6 +544,7 @@ arm_init(
+ 	sweet_early_mark(20, "kprintf startup complete");
+ 	if (serial_exists) {
+ 		sweet_early_disable();
++		sweet_early_unmap_final();
+ 	}
+ 
+ 	serialmode = 0;
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
-index 06bb568..9fa64ef 100644
+index 06bb568..94768c6 100644
 --- a/osfmk/arm64/arm_vm_init.c
 +++ b/osfmk/arm64/arm_vm_init.c
-@@ -1837,16 +1837,22 @@ static void
+@@ -1837,17 +1837,57 @@ static void
  sweet_early_map_final(void)
  {
  	const vm_map_address_t va = SWEET_EARLY_FB_VA;
 -	assert(va + ARM_TT_L2_SIZE <= gVirtBase);
+-	tt_entry_t l1 = cpu_tte[(va & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT];
 +	const unsigned int nblocks = (SWEET_FB_SIZE + ARM_TT_L2_SIZE - 1) / ARM_TT_L2_SIZE;
 +	assert(va + nblocks * ARM_TT_L2_SIZE <= gVirtBase);
- 	tt_entry_t l1 = cpu_tte[(va & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT];
++	tt_entry_t *l1p = &cpu_tte[(va & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT];
++	if (*l1p == ARM_TTE_EMPTY) {
++		/*
++		 * A510F: without ARM_LARGE_MEMORY nothing has built an L2 table
++		 * at VM_MIN_KERNEL_ADDRESS yet (first boot panicked here). Add
++		 * one; sweet_early_unmap_final() empties it again before the VM
++		 * allocates in this range.
++		 */
++		vm_offset_t pt = alloc_ptpage(TRUE);
++		bzero((void *)pt, ARM_PGBYTES);
++		*l1p = (kvtophys(pt) & ARM_TTE_TABLE_MASK) | ARM_TTE_TYPE_TABLE | ARM_TTE_VALID;
++	}
++	tt_entry_t l1 = *l1p;
  	assert((l1 & (ARM_TTE_VALID | ARM_TTE_TYPE_MASK)) == (ARM_TTE_VALID | ARM_TTE_TYPE_TABLE));
  	tt_entry_t *l2 = (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK);
  	tt_entry_t *slot = &l2[(va & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT];
@@ -48,9 +73,32 @@ index 06bb568..9fa64ef 100644
 +		    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
 +		    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
 +	}
++	__asm__ volatile("dsb ishst" ::: "memory");
++}
++
++/*
++ * A510F: drop the framebuffer alias once the early console is disabled
++ * (fbcon has taken over), before the VM can hand out VAs in this range.
++ */
++void
++sweet_early_unmap_final(void)
++{
++	const vm_map_address_t va = SWEET_EARLY_FB_VA;
++	const unsigned int nblocks = (SWEET_FB_SIZE + ARM_TT_L2_SIZE - 1) / ARM_TT_L2_SIZE;
++	tt_entry_t l1 = cpu_tte[(va & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT];
++	if ((l1 & (ARM_TTE_VALID | ARM_TTE_TYPE_MASK)) != (ARM_TTE_VALID | ARM_TTE_TYPE_TABLE)) {
++		return;
++	}
++	tt_entry_t *slot = (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK) +
++	    ((va & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT);
++	for (unsigned int i = 0; i < nblocks; i++) {
++		slot[i] = ARM_TTE_EMPTY;
++	}
  	__asm__ volatile("dsb ishst" ::: "memory");
++	flush_mmu_tlb();
  }
  #endif
+ 
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
 index 023086f..b09e193 100644
 --- a/osfmk/arm64/start.s
@@ -121,6 +169,26 @@ index 6928957..f97b5af 100644
  #define EARLY_SCALE 2u
  #define EARLY_CELL_W (8u * EARLY_SCALE)
  #define EARLY_CELL_H (16u * EARLY_SCALE)
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+index d7a25f2..ac7e9ac 100644
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -12,6 +12,7 @@ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_disable(void);
++void sweet_early_unmap_final(void);	/* arm_vm_init.c */
+ #else
+ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ {
+@@ -19,6 +20,7 @@ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ 	(void)label;
+ }
+ static inline void sweet_early_disable(void) {}
++static inline void sweet_early_unmap_final(void) {}
+ #endif
+ 
+ #endif
 diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
 index 013ffb1..046231e 100644
 --- a/pexpert/pexpert/arm64/SWEET.h
