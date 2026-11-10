@@ -9,8 +9,11 @@
 #   - no __ARM_16K_PG__: 4 KB pages, as xnu's own Cortex-A53 config BCM2837
 #   - no __ARM_PAN_AVAILABLE__ (PAN is ARMv8.1); BCM2837's
 #     __ARM64_PMAP_SUBPAGE_L1__ in its place
-#   - -march=armv8-a+crc+crypto instead of armv8.2-a: no LSE atomics from the
-#     compiler and no __ARM_ARCH_8_2__ paths (machine_routines_asm.s casa)
+#   - -mcpu=cortex-a53 instead of -march=armv8.2-a: no LSE/RCpc from the
+#     compiler and no __ARM_ARCH_8_2__ paths (machine_routines_asm.s casa).
+#     -march alone is not enough: Apple clang keeps its default CPU
+#     (apple-m1 for macOS targets) and emitted 875 LSE + 209 LDAPR
+#     (a510f-kernel-check run 42798173229).
 # The machine config keeps the name SWEET so sweet's stage scripts, MASTER
 # config and kernel name still apply; the board code is still sweet's.
 set -euo pipefail
@@ -36,6 +39,6 @@ edit '+#define __ARM_16K_PG__            1' \
 edit '+#define __ARM_PAN_AVAILABLE__     1' \
      '+#define __ARM64_PMAP_SUBPAGE_L1__ 1 /* A510F: as BCM2837; no PAN on A53 */'
 edit '+MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto' \
-     '+MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8-a+crc+crypto'
+     '+MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -mcpu=cortex-a53'
 
 grep -nE '16K_PG|PAN_AVAILABLE|SUBPAGE_L1|march=' "$p"
