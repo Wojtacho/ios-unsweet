@@ -19,6 +19,9 @@ BAD = ('lse', 'ldapr', 'rdma', 'fp16', 'dc_cvap')
 HIT_PATTERNS = [('ldapr', PATTERNS['ldapr'])] + [
     (k, PATTERNS[k]) for k in ('lse_cas', 'lse_casp', 'lse_amo', 'rdma', 'fp16', 'dc_cvap')]
 LC_SYMTAB = 0x2
+# Data tables that live in code sections; their words are not instructions.
+# K256: the SHA-256 round constants in __hib_text (0x78a5636f is one).
+DATA_SYMBOLS = {'K256'}
 
 
 def symbols(data, symoff, nsyms, stroff):
@@ -60,7 +63,7 @@ def main():
     print('total', total)
     # Where: each incompatible instruction with the function it sits in.
     addrs = [v for v, _ in syms]
-    hits = 0
+    hits, real = 0, {}
     for name, addr, words in sects:
         for feat, pats in HIT_PATTERNS:
             mask = np.zeros(words.size, dtype=bool)
@@ -69,15 +72,23 @@ def main():
             for i in np.nonzero(mask)[0]:
                 a = addr + 4 * int(i)
                 j = bisect.bisect_right(addrs, a) - 1
-                where = f'{syms[j][1]}+0x{a - syms[j][0]:x}' if j >= 0 else '?'
+                sym = syms[j][1] if j >= 0 else '?'
+                where = f'{sym}+0x{a - syms[j][0]:x}' if j >= 0 else '?'
+                data_table = sym.lstrip('_') in DATA_SYMBOLS
+                if not data_table:
+                    key = 'lse' if feat.startswith('lse') else feat
+                    real[key] = real.get(key, 0) + 1
                 hits += 1
                 if hits <= 60:
-                    print(f'  {feat:8} 0x{a:x} {int(words[i]):08x} {where}')
+                    print(f'  {feat:8} 0x{a:x} {int(words[i]):08x} {where}'
+                          + ('  (data table, ignored)' if data_table else ''))
                 if feat == 'ldapr':
                     words = words.copy()
                     words[i] = 0	# do not report it again as lse_amo
-    print(f'{len(syms)} symbols; {hits} incompatible instruction(s) located')
-    bad = {k: total[k] for k in BAD if total[k]}
+    print(f'{len(syms)} symbols; {hits} match(es) located')
+    # Exit status from located hits outside data tables (needs symbols);
+    # without a symbol table fall back to the raw counts.
+    bad = real if syms else {k: total[k] for k in BAD if total[k]}
     print('A53-incompatible:', bad or 'none')
     sys.exit(1 if bad else 0)
 

@@ -1,15 +1,18 @@
 name: a510f-kernel-check
 
-# Scan an already built A510F kernel (a510f-xnu artifact) for instructions the
-# SM-A510F's Cortex-A53 cannot run. Runs on Linux, so it does not wait for
-# the scarce macOS runners.
+# Scan a built A510F kernel (a510f-xnu artifact) for instructions the
+# SM-A510F's Cortex-A53 cannot run, and name the function each one is in.
+# Runs on Linux after every a510f-xnu run, or by hand for a given run id.
 
 on:
+  workflow_run:
+    workflows: [a510f-xnu]
+    types: [completed]
   workflow_dispatch:
     inputs:
       run_id:
         description: a510f-xnu run whose a510f-xnu-kernel artifact to check
-        default: "42798747388"
+        required: true
   push:
     branches: [a510f]
     paths:
@@ -20,16 +23,22 @@ permissions:
   actions: read
   contents: read
 
+env:
+  # newest checked-in reference kernel for push-triggered runs
+  RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id || '42798747388' }}
+
 jobs:
   check:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: a510f
 
       - uses: actions/download-artifact@v4
         with:
           name: a510f-xnu-kernel
-          run-id: ${{ inputs.run_id || '42798747388' }}
+          run-id: ${{ env.RUN_ID }}
           github-token: ${{ github.token }}
           path: kernel
 
@@ -38,9 +47,10 @@ jobs:
           sudo apt-get install -y -q python3-numpy > /dev/null
           ls -la kernel
           f=$(ls kernel/kernel.* | grep -v -e '\.dSYM' -e SHA256 | head -1)
+          [ -n "$f" ] || { echo "::error title=kernel ISA check::no kernel in run $RUN_ID"; exit 1; }
           rc=0
           python3 a510f/tools/macho_isa_scan.py "$f" > isa.txt 2>&1 || rc=$?
           cat isa.txt
           level=notice; [ "$rc" = 0 ] || level=error
-          echo "::$level title=kernel ISA check (exit $rc) $(basename "$f") $(sha256sum "$f" | cut -c1-16)::$(grep -v '^__' isa.txt | tail -40 | cut -c1-300 | sed ':a;N;$!ba;s/\n/%0A/g')"
+          echo "::$level title=kernel ISA check (exit $rc) run $RUN_ID $(basename "$f") $(sha256sum "$f" | cut -c1-16)::$(grep -v '^__' isa.txt | tail -40 | cut -c1-300 | sed ':a;N;$!ba;s/\n/%0A/g')"
           exit $rc

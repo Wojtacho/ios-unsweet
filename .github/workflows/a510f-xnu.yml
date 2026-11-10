@@ -49,8 +49,8 @@ jobs:
           bash a510f/xnu/make-a510f-variant.sh dxb/patches
           # A510F-only patches, numbered after sweet's
           cp a510f/xnu/patches/*.patch dxb/patches/
-          sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
-          grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
+          # libfirehose_kernel: add the plain arm64 slice, built for cortex-a53
+          bash a510f/xnu/patch-dxb-build.sh dxb
 
       - name: Deps
         run: |
@@ -112,17 +112,8 @@ jobs:
             echo "::notice title=kernel built::$(basename "$f") $(stat -f %z "$f") bytes%0A$(file "$f" | cut -c1-200)"
           fi
 
-      - name: Check the kernel for instructions the A53 lacks
-        run: |
-          python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -q numpy > isa.txt 2>&1 || true
-          f=$(ls out/kernel.* | grep -v '\.dSYM' | head -1)
-          rc=0
-          /tmp/venv/bin/python a510f/tools/macho_isa_scan.py "$f" >> isa.txt 2>&1 || rc=$?
-          cat isa.txt
-          level=notice; [ "$rc" = 0 ] || level=error
-          echo "::$level title=kernel ISA check (exit $rc)::$(tail -12 isa.txt | cut -c1-400 | sed ':a;N;$!ba;s/\n/%0A/g')"
-          exit $rc
-
+      # The instruction check runs on Linux afterwards (a510f-kernel-check,
+      # triggered by this workflow finishing).
       - uses: actions/upload-artifact@v4
         if: always()
         with:
