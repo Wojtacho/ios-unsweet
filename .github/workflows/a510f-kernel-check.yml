@@ -1,0 +1,46 @@
+name: a510f-kernel-check
+
+# Scan an already built A510F kernel (a510f-xnu artifact) for instructions the
+# SM-A510F's Cortex-A53 cannot run. Runs on Linux, so it does not wait for
+# the scarce macOS runners.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: a510f-xnu run whose a510f-xnu-kernel artifact to check
+        default: "42792829063"
+  push:
+    branches: [a510f]
+    paths:
+      - ".github/workflows/a510f-kernel-check.yml"
+      - "a510f/tools/macho_isa_scan.py"
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: a510f-xnu-kernel
+          run-id: ${{ inputs.run_id || '42792829063' }}
+          github-token: ${{ github.token }}
+          path: kernel
+
+      - name: Check
+        run: |
+          sudo apt-get install -y -q python3-numpy > /dev/null
+          ls -la kernel
+          f=$(ls kernel/kernel.* | grep -v -e '\.dSYM' -e SHA256 | head -1)
+          rc=0
+          python3 a510f/tools/macho_isa_scan.py "$f" > isa.txt 2>&1 || rc=$?
+          cat isa.txt
+          level=notice; [ "$rc" = 0 ] || level=error
+          echo "::$level title=kernel ISA check (exit $rc) $(basename "$f") $(sha256sum "$f" | cut -c1-16)::$(tail -12 isa.txt | cut -c1-400 | sed ':a;N;$!ba;s/\n/%0A/g')"
+          exit $rc
