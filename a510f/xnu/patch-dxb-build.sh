@@ -7,7 +7,9 @@
 # xcodebuild, outside xnu's makefiles, so the kernel's -mcpu flag never
 # reaches it: Apple clang then targets apple-m1 and emits LSE/LDAPR
 # (a510f-kernel-check run 42801602322 located 12 of 13 hits in
-# firehose_buffer_*). Build its plain arm64 slice for cortex-a53.
+# firehose_buffer_*). Build only the plain arm64 slice the A510F kernel links,
+# for cortex-a53. (xcodebuild does not take OTHER_CFLAGS[arch=...] on the
+# command line: it split at the first '=' and passed 'arm64]=-mkernel'.)
 set -euo pipefail
 
 f="$1/build.sh"
@@ -16,8 +18,8 @@ import sys
 path = sys.argv[1]
 s = open(path).read()
 old = 'xcodebuild install -target libfirehose_kernel -sdk macosx ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"'
-new = ('xcodebuild install -target libfirehose_kernel -sdk macosx ARCHS="x86_64 arm64e arm64" '
-       'VALID_ARCHS="x86_64 arm64e arm64" \'OTHER_CFLAGS[arch=arm64]=$(inherited) -mcpu=cortex-a53\'')
+new = ('xcodebuild install -target libfirehose_kernel -sdk macosx ARCHS="arm64" '
+       'VALID_ARCHS="arm64" \'OTHER_CFLAGS=$(inherited) -mcpu=cortex-a53\'')
 assert s.count(old) == 1, 'libfirehose_kernel xcodebuild line not found'
 open(path, 'w').write(s.replace(old, new))
 EOF
