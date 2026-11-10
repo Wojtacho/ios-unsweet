@@ -59,7 +59,11 @@ def build():
     root.children = [c for c in root.children if c.name != 'sweet-ufs']
     for i, cpu in enumerate(child(root, 'cpus').children):
         setprop(cpu, 'reg', struct.pack('<I', MPIDR[i]))
-        setprop(cpu, 'compatible', mkadt.cstr('arm,cortex-a53') + mkadt.cstr('ARM,v8'))
+        # 'qcom,kryo470' stays: sweet's SweetCPU driver matches it
+        # (IONameMatch in KernelConfigTables.cpp). Without a CPU driver the
+        # boot CPU never registers with IOKit and the kernel waits silently
+        # (sixth boot: output stopped after SWEET FB, no panic).
+        setprop(cpu, 'compatible', mkadt.cstr('arm,cortex-a53') + mkadt.cstr('qcom,kryo470') + mkadt.cstr('ARM,v8'))
         setprop(cpu, 'cluster-core-id', struct.pack('<I', i % 4))
         setprop(cpu, 'clock-frequency', struct.pack('<I', CPU_HZ))
         setprop(cpu, 'l2-cache-id', struct.pack('<I', i // 4))

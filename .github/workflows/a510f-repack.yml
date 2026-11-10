@@ -10,6 +10,8 @@ on:
     branches: [a510f]
     paths:
       - "a510f/boot-args.txt"
+      - "a510f/tools/mkadt_a510f.py"
+      - "a510f/shim/**"
       - ".github/workflows/a510f-repack.yml"
 
 permissions:
