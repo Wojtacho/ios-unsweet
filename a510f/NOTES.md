@@ -379,6 +379,14 @@ Driver changes:
 
 Boot-args for the eleventh boot add `mmcrw=1 mmcwtest=1` (still rd=md0).
 
+Decision (user: "Do what is the best"): the iOS root goes on the contiguous
+span `mmcroot=SYSTEM..USERDATA` (LBA 507904 to the end of USERDATA, ~14.4
+GiB), so the untrimmed ~12 GB image fits with room to spare. Android no
+longer boots afterwards; going back means flashing the stock firmware
+(A510FXXS8CSF3) with Odin. The eleventh boot's image is repacked with
+`mmcroot=SYSTEM..USERDATA`, so its write test also checks the range parsing
+(it still touches only the last sector of USERDATA and restores it).
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
