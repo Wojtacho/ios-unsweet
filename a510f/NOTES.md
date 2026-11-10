@@ -204,6 +204,26 @@ Fix (commit bc2409f, patch 0103): GIC-400 (GICv2) through GICD/GICC MMIO
 (per-CPU init, IRQ ack/EOI, SGIs via GICD_SGIR) and power-off 60 s after a
 panic (PSCI SYSTEM_OFF, then PS_HOLD).
 
+## 2026-11-10: third boot (a510f-xnu run 42814550274, commit bc2409f)
+
+Observed (photo), new after the GIC: `SWEET GIC: GICv2 cpu 0 ctlr 0x1 en0
+0x800feff` (GICC Grp1 enabled; SGIs 0-15 and INTID 27 enabled), `Darwin
+Kernel Version 22.6.0 ... xnu-8796.141.3`, `pmap_startup() init/release time:
+42065 microsec`, `vm_page_bootstrap: 243454 free pages, 13314 wired pages`
+(4K pages: ~950MB managed), `VM bootstrap: 73 maps, 153 entries and 128 holes
+available`, `Maximum number of VM swap files: 100`, then `panic: kmem_range_init:
+vm_map_locate_space failing for claim kmem_data_range @vm_kern.c:3645`.
+Also printed: "iBoot didn't extract panic log from previous session crash".
+**The 60 s auto power-off worked** (user report).
+
+Cause: zalloc.c sizes the zone map for XNU_PLATFORM_MacOSX (128GB VA,
+32GB max); without ARM_LARGE_MEMORY the kernel VA is the iOS layout
+(~112GB), so the claims cannot fit.
+
+Fix (patch 0104): iOS zone sizes (24GB VA, 8GB max) for arm64 builds without
+ARM_LARGE_MEMORY; kmem_range_init prints every claim's size before such a
+panic.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
