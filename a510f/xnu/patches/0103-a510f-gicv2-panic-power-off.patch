@@ -1,0 +1,273 @@
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 2545cf9..1aa173a 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -220,13 +220,8 @@ SweetCPU::signalCPU(IOCPU *target)
+ 	if (aff0 >= 16) {
+ 		panic("SWEET CPU: SGI target requires unsupported range selector");
+ 	}
+-	uint64_t sgi = (((mpidr >> 32) & 0xff) << 48) |
+-	    (((mpidr >> 16) & 0xff) << 32) |
+-	    (((mpidr >> 8) & 0xff) << 16) |
+-	    ((uint64_t)SWEET_IPI_SGI << 24) | (1ULL << aff0);
+-	__builtin_arm_dsb(DSB_ISHST);
+-	__builtin_arm_wsr64("ICC_SGI1R_EL1", sgi);
+-	__builtin_arm_isb(ISB_SY);
++	/* A510F: GIC-400, SGIs through GICD_SGIR (pexpert/arm/pe_fiq.c). */
++	sweet_gic_sgi(mpidr, SWEET_IPI_SGI);
+ }
+ 
+ kern_return_t
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 24f1abc..0c5cec1 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1861,8 +1861,9 @@ sleh_irq(arm_saved_state_t *state)
+ 	 * sweet: TrustZone owns GIC Group 0, so the timer and IPIs that other
+ 	 * ARM64 targets take as FIQs arrive here as Group 1 IRQs.
+ 	 */
+-	uint64_t iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
+-	uint32_t intid = (uint32_t)(iar & 0xFFFFFF);
++	/* A510F: GIC-400, memory-mapped CPU interface (pexpert/arm/pe_fiq.c). */
++	uint64_t iar = sweet_gic_ack();
++	uint32_t intid = (uint32_t)(iar & SWEET_GIC_INTID_MASK);
+ 
+ 	if (intid >= 1020 && intid <= 1023) {
+ 		return; /* spurious */
+@@ -1873,11 +1874,11 @@ sleh_irq(arm_saved_state_t *state)
+ 		INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_TIMER);
+ 		rtclock_intr(TRUE);
+ 		INTERRUPT_MASKED_DEBUG_END();
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		sweet_gic_eoi(iar);
+ 	} else if (intid < 16) {
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_IPI);
+ 		/* Ack before handling so an IPI raised meanwhile is not lost */
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		sweet_gic_eoi(iar);
+ 		__builtin_arm_isb(ISB_SY);
+ 		cpu_signal_handler();
+ 	} else {
+@@ -1888,7 +1889,7 @@ sleh_irq(arm_saved_state_t *state)
+ 			    cdp->interrupt_nub,
+ 			    intid);
+ 		}
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		sweet_gic_eoi(iar);
+ 	}
+ 	__builtin_arm_isb(ISB_SY);
+ #else
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+index 437adb1..d3793bb 100644
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -1158,6 +1158,9 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+ void
+ panic_spin_forever(void)
+ {
++#if defined(SWEET)
++	sweet_panic_power_off();
++#endif
+ 	for (;;) {
+ #if defined(__arm__) || defined(__arm64__)
+ 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
+@@ -1171,6 +1174,9 @@ panic_spin_forever(void)
+ static void
+ kdp_machine_reboot_type(unsigned int type, uint64_t debugger_flags)
+ {
++#if defined(SWEET)
++	sweet_panic_power_off();
++#endif
+ 	if ((type == kPEPanicRestartCPU) && (debugger_flags & DEBUGGER_OPTION_SKIP_PANICEND_CALLOUTS)) {
+ 		PEHaltRestart(kPEPanicRestartCPUNoCallouts);
+ 	} else {
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+index 6089db9..4c64e5c 100644
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -50,6 +50,105 @@ _gic_write32(vm_offset_t addr, uint32_t value)
+ #define gicr_write32(offset, data) (_gic_write32(gicr_pe_base + (offset), (data)))
+ #define gicr_read64(offset) (_gic_read64(gicr_pe_base + (offset)))
+ 
++#if defined(SWEET_GIC_V2)
++/* gicr_base holds the GICv2 CPU interface (GICC) mapping on the A510F. */
++#define gicc_base gicr_base
++static vm_offset_t sweet_pmu_base;
++
++unsigned long long
++sweet_gic_ack(void)
++{
++	return _gic_read32(gicc_base + GICC_IAR_V2);
++}
++
++void
++sweet_gic_eoi(unsigned long long iar)
++{
++	_gic_write32(gicc_base + GICC_EOIR_V2, (uint32_t)iar);
++}
++
++void
++sweet_gic_sgi(unsigned long long target_mpidr, unsigned int sgi_id)
++{
++	uint64_t self = __builtin_arm_rsr64("MPIDR_EL1") & (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK);
++	uint64_t target = target_mpidr & (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK);
++	uint32_t sgir;
++
++	if (target == self) {
++		sgir = GICD_SGIR_TARGET_SELF | sgi_id;
++	} else {
++		/* GIC-400 CPU interface n = cluster * 4 + core (2 x 4 Cortex-A53) */
++		unsigned int iface = (unsigned int)(((target >> 8) & 0xff) * 4 + (target & 0xff));
++		sgir = GICD_SGIR_TARGET_LIST | ((1U << iface) << 16) | sgi_id;
++	}
++	__builtin_arm_dsb(DSB_ISHST);
++	_gic_write32(gicd_base + GICD_SGIR_V2, sgir);
++	__builtin_arm_isb(ISB_SY);
++}
++
++static void
++sweet_gic_v2_init_cpu(void)
++{
++	/* Banked per CPU: SGIs/PPIs 0-31. Group writes are WI from non-secure. */
++	_gic_write32(gicd_base + GICD_IGROUPR0_V2, 0xFFFFFFFF);
++	for (unsigned int i = 0; i < 32; i += 4) {
++		_gic_write32(gicd_base + GICD_IPRIORITYR_V2 + i, 0xA0A0A0A0);
++	}
++	_gic_write32(gicd_base + GICD_ISENABLER0_V2, (1U << sweet_vtimer_intid) | (1U << SWEET_IPI_SGI));
++	_gic_write32(gicc_base + GICC_PMR_V2, 0xFF);
++	_gic_write32(gicc_base + GICC_BPR_V2, 0);
++	_gic_write32(gicd_base + GICD_CTLR, _gic_read32(gicd_base + GICD_CTLR) | GICD_CTLR_ENABLEGRP1);
++	uint32_t ctlr = _gic_read32(gicc_base + GICC_CTLR_V2);
++	ctlr &= ~GICC_CTLR_EOIMODE_NS;
++	ctlr |= GICC_CTLR_ENABLEGRP1_NS;
++	_gic_write32(gicc_base + GICC_CTLR_V2, ctlr);
++	__builtin_arm_dsb(DSB_SY);
++	kprintf("SWEET GIC: GICv2 cpu %u ctlr 0x%x en0 0x%x\n", (unsigned)(__builtin_arm_rsr64("MPIDR_EL1") & 0xffff),
++	    _gic_read32(gicc_base + GICC_CTLR_V2), _gic_read32(gicd_base + GICD_ISENABLER0_V2));
++}
++#endif /* SWEET_GIC_V2 */
++
++/*
++ * A510F: every panic path ends in kdp_machine_reboot_type() or
++ * panic_spin_forever() (osfmk/kern/debug.c). Keep the message on screen for
++ * a while, then switch the phone off instead of spinning: PSCI SYSTEM_OFF,
++ * then the Exynos PS_HOLD line (the firmware is PSCI 0.1-style).
++ */
++void
++sweet_panic_power_off(void)
++{
++#if defined(SWEET_PMU_BASE)
++	static volatile int entered;
++	if (!entered) {
++		entered = 1;
++		uint64_t freq = __builtin_arm_rsr64("CNTFRQ_EL0") & 0xffffffff;
++		if (freq == 0) {
++			freq = 26000000;
++		}
++		__builtin_arm_isb(ISB_SY);
++		uint64_t end = __builtin_arm_rsr64("CNTVCT_EL0") + freq * SWEET_PANIC_OFF_SECONDS;
++		for (;;) {
++			__builtin_arm_isb(ISB_SY);
++			if (__builtin_arm_rsr64("CNTVCT_EL0") >= end) {
++				break;
++			}
++		}
++		register uint64_t x0 __asm__("x0") = 0x84000008; /* PSCI SYSTEM_OFF */
++		__asm__ volatile ("smc #0" : "+r"(x0) : : "x1", "x2", "x3", "x4", "x5", "x6", "x7",
++		    "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++#if defined(SWEET_GIC_V2)
++		if (sweet_pmu_base) {
++			uint32_t v = _gic_read32(sweet_pmu_base + SWEET_PMU_PS_HOLD);
++			_gic_write32(sweet_pmu_base + SWEET_PMU_PS_HOLD, v & ~SWEET_PS_HOLD_OUTPUT_HIGH);
++		}
++#endif
++	}
++#endif
++	for (;;) {
++		__builtin_arm_wfe();
++	}
++}
++
+ static vm_offset_t
+ find_gicr_pe_base()
+ {
+@@ -141,8 +240,16 @@ pe_init_fiq()
+ 		}
+ 
+ 		gicr_size = gicr_size_prop;
++#if defined(SWEET_GIC_V2)
++		sweet_pmu_base = ml_io_map(SWEET_PMU_BASE, SWEET_PMU_SIZE);
++#endif
+ 	}
+ 
++#if defined(SWEET_GIC_V2)
++	sweet_gic_v2_init_cpu();
++	return;
++#endif
++
+ 	// Find the redistributor for this processor
+ 	vm_offset_t gicr_pe_base = find_gicr_pe_base();
+ 
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index 046231e..0a71513 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -44,6 +44,49 @@
+ #define SWEET_FB_STRIDE           4320
+ #define SWEET_FB_SIZE             0x800000
+ 
++/*
++ * A510F: Exynos 7580 GIC-400 (GICv2) with a memory-mapped CPU interface
++ * (no ICC_* system registers). The ADT /arm-io/gic reg is GICD, GICC: the
++ * GICC takes the slot of sweet's GICR. Secure firmware owns Group 0; the
++ * timer and SGIs are Group 1 IRQs, as on sweet.
++ */
++#define SWEET_GIC_V2              1
++#define SWEET_GIC_INTID_MASK      0x3FF
++#define GICD_IGROUPR0_V2          0x080
++#define GICD_ISENABLER0_V2        0x100
++#define GICD_IPRIORITYR_V2        0x400
++#define GICD_SGIR_V2              0xF00
++#define GICD_SGIR_TARGET_LIST     (0U << 24)
++#define GICD_SGIR_TARGET_SELF     (2U << 24)
++#define GICC_CTLR_V2              0x00
++#define GICC_PMR_V2               0x04
++#define GICC_BPR_V2               0x08
++#define GICC_IAR_V2               0x0C
++#define GICC_EOIR_V2              0x10
++#define GICC_CTLR_ENABLEGRP1_NS   0x1
++#define GICC_CTLR_EOIMODE_NS      (1U << 9)
++
++/* Exynos 7580 PMU: clearing PS_HOLD_CONTROL bit 8 cuts the power. */
++#define SWEET_PMU_BASE            0x10460000
++#define SWEET_PMU_SIZE            0x4000
++#define SWEET_PMU_PS_HOLD         0x330C
++#define SWEET_PS_HOLD_OUTPUT_HIGH (1U << 8)
++#define SWEET_PANIC_OFF_SECONDS   60
++
++#ifndef ASSEMBLER
++#ifdef __cplusplus
++extern "C" {
++#endif
++/* pexpert/arm/pe_fiq.c */
++unsigned long long sweet_gic_ack(void);
++void sweet_gic_eoi(unsigned long long iar);
++void sweet_gic_sgi(unsigned long long target_mpidr, unsigned int sgi_id);
++void sweet_panic_power_off(void) __attribute__((noreturn));
++#ifdef __cplusplus
++}
++#endif
++#endif /* ! ASSEMBLER */
++
+ #ifndef ASSEMBLER
+ #define PLATFORM_PANIC_LOG_DISABLED
+ #endif /* ! ASSEMBLER */
+@@ -53,7 +96,7 @@
+  * virt, hyp) instead of the usual 13/14/11/10: the virtual timer XNU uses
+  * (CNTV) is INTID 16 + 3 = 19.
+  */
+-#define SWEET_VTIMER_INTID        19
++#define SWEET_VTIMER_INTID        27      /* A510F: PPI 11, standard numbering */
+ #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
+ 
+ #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
