@@ -31,7 +31,8 @@ env:
 
 jobs:
   build:
-    runs-on: macos-14
+    # macos-14 runners are retired; xnu.yml chose them for Xcode 15's iig.
+    runs-on: macos-15
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -54,7 +55,7 @@ jobs:
           XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
           echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
           sudo xcode-select -s "$XC"
-          xcodebuild -version
+          echo "::notice title=toolchain::$(sw_vers -productVersion) / available: $(ls -d /Applications/Xcode_*.app | xargs -n1 basename | tr '\n' ' ') / using $(basename "$XC") / $(xcodebuild -version | tr '\n' ' ')"
 
       - name: Build
         working-directory: dxb
