@@ -1,0 +1,110 @@
+name: a510f-isa-scan
+
+# Counts instructions a Cortex-A53 cannot run (LSE atomics, FP16, ...) in the
+# iPhone X iOS 16 dyld shared cache. Downloads only the SystemOS cryptex
+# image from Apple's IPSW; nothing from Apple is stored in the repo.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [a510f]
+    paths:
+      - "a510f/tools/dsc_isa_scan.py"
+      - ".github/workflows/a510f-isa-scan.yml"
+
+concurrency:
+  group: a510f-isa-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # iPhone10,3 / iPhone10,6, iOS 16.7.16 (20H392): the userland sweet runs.
+  IPSW_URL: https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q python3-numpy fuse3
+          if ! sudo apt-get install -y -q apfs-fuse; then
+            sudo apt-get install -y -q cmake g++ libfuse3-dev zlib1g-dev libbz2-dev libattr1-dev
+            git clone -q --recursive https://github.com/sgan81/apfs-fuse /tmp/apfs-fuse
+            cmake -S /tmp/apfs-fuse -B /tmp/apfs-fuse/build -DCMAKE_BUILD_TYPE=Release
+            make -C /tmp/apfs-fuse/build -j"$(nproc)"
+            sudo install /tmp/apfs-fuse/build/apfs-fuse /usr/local/bin/
+          fi
+          command -v apfs-fuse
+
+      - name: Find the SystemOS cryptex in the IPSW
+        id: manifest
+        run: |
+          python3 tools/remotezip.py "$IPSW_URL" BuildManifest.plist ipsw
+          path=$(python3 - <<'EOF'
+          import plistlib
+          m = plistlib.load(open('ipsw/BuildManifest.plist', 'rb'))
+          for ident in m['BuildIdentities']:
+              e = ident['Manifest'].get('Cryptex1,SystemOS')
+              if e and 'Path' in e.get('Info', {}):
+                  print(e['Info']['Path'])
+                  break
+          EOF
+          )
+          [ -n "$path" ] || { echo "no Cryptex1,SystemOS in manifest" >&2; exit 1; }
+          echo "SystemOS image: $path"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      - name: Download SystemOS image
+        run: python3 tools/remotezip.py "$IPSW_URL" "${{ steps.manifest.outputs.path }}" ipsw
+
+      - name: Copy out the dyld shared cache
+        run: |
+          img="ipsw/${{ steps.manifest.outputs.path }}"
+          ln -s "$(realpath "$img")" /tmp/sysos.dmg
+          sudo mkdir -p /mnt/sysos
+          sudo apfs-fuse -o allow_other /tmp/sysos.dmg /mnt/sysos
+          dir=$(sudo find /mnt/sysos -name dyld_shared_cache_arm64 -printf '%h\n' | head -1)
+          [ -n "$dir" ] || { echo "no dyld_shared_cache_arm64 found" >&2; sudo find /mnt/sysos -maxdepth 6 | head -50; exit 1; }
+          echo "cache dir: $dir"
+          mkdir -p dsc
+          sudo sh -c "cp \"$dir\"/dyld_shared_cache_arm64* dsc/"
+          sudo chown -R "$(id -u)" dsc
+          ls -l dsc
+          sudo umount /mnt/sysos
+          rm -f "$img"
+
+      - name: Scan
+        run: python3 a510f/tools/dsc_isa_scan.py dsc isa-scan.json
+
+      - name: Report
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          r = json.load(open('isa-scan.json'))
+          t = r['total']
+          short = lambda p: p['path'].rsplit('/', 1)[-1]
+          def note(title, lines):
+              print(f'::notice title={title}::' + '%0A'.join(lines))
+          note('totals', [f"images={r['images']} images_with_lse={r['images_with_lse']}"] +
+               [f'{k}={v}' for k, v in t.items()])
+          note('core libs (lse/llsc/fp16/insns)', [
+              f"{short(p)}: {p['lse']}/{p['llsc']}/{p['fp16']}/{p['insns']}" for p in r['core_libs']])
+          for i in range(0, 60, 20):
+              chunk = r['top_lse'][i:i + 20]
+              if chunk:
+                  note(f'top LSE {i + 1}-{i + len(chunk)} (lse cas/casp/amo)', [
+                      f"{p['lse']} {p['lse_cas']}/{p['lse_casp']}/{p['lse_amo']} {p['path']}" for p in chunk])
+          note('top FP16', [f"{p['fp16']} {p['path']}" for p in r['top_fp16']])
+          note('top RDMA', [f"{p['rdma']} {p['path']}" for p in r['top_rdma']])
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as s:
+              s.write('```\n' + json.dumps({k: r[k] for k in ('images', 'images_with_lse', 'total')}, indent=1) + '\n```\n')
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a510f-isa-scan
+          path: isa-scan.json
