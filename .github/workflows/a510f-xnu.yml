@@ -1,0 +1,112 @@
+name: a510f-xnu
+
+# xnu-8796 with sweet's patch set turned into the A510F variant
+# (a510f/xnu/make-a510f-variant.sh): 4 KB pages, ARMv8.0, no PAN.
+# Same toolchain setup as xnu.yml. Compile errors are also published as
+# annotations, since run logs need a GitHub login.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_config:
+        description: RELEASE / DEVELOPMENT / DEBUG
+        default: DEVELOPMENT
+  push:
+    branches: [a510f]
+    paths:
+      - "a510f/xnu/**"
+      - "xnu/patches/**"
+      - ".github/workflows/a510f-xnu.yml"
+
+concurrency:
+  group: a510f-xnu-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DXB_REPO: https://github.com/blacktop/darwin-xnu-build
+  DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
+  MACOS_VERSION: "13.5"
+  KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
+  MACHINE_CONFIG: SWEET
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch build script and patches (A510F variant)
+        run: |
+          git init -q dxb
+          git -C dxb fetch -q --depth 1 "$DXB_REPO" "$DXB_SHA"
+          git -C dxb checkout -q FETCH_HEAD
+          cp xnu/patches/*.patch xnu/patches/*.sh dxb/patches/
+          bash a510f/xnu/make-a510f-variant.sh dxb/patches
+          sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
+          grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
+
+      - name: Deps
+        run: |
+          brew install jq gum bash cmake ninja
+          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
+          sudo chmod +x /usr/local/bin/xcodes
+          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+
+      - name: Build
+        working-directory: dxb
+        env:
+          MAKEFLAGS: -k
+        run: |
+          set -o pipefail
+          bash build.sh 2>&1 | tee ../build.log
+
+      - name: Report
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import re
+          log = open('build.log', errors='replace').read() if __import__('os').path.exists('build.log') else ''
+          clean = re.sub(r'\x1b\[[0-9;]*m', '', log)
+          errs, seen = [], set()
+          for line in clean.splitlines():
+              m = re.search(r'([\w./-]+\.(?:c|cpp|h|s|S|hpp)):(\d+):\d+: (?:fatal )?error: (.*)', line)
+              if m:
+                  key = (m.group(1).split('/xnu/')[-1], m.group(2), m.group(3))
+                  if key not in seen:
+                      seen.add(key)
+                      errs.append(f'{key[0]}:{key[1]}: {key[2]}'[:300])
+          other = [l.strip()[:300] for l in clean.splitlines()
+                   if re.search(r'(^|\s)(error|Error \d+|ld: |Undefined symbols|patch.*(failed|does not apply))', l)][-25:]
+          print(f'{len(errs)} distinct compile errors')
+          for i in range(0, min(len(errs), 160), 20):
+              print(f'::error title=compile errors {i + 1}-{min(i + 20, len(errs))} of {len(errs)}::' + '%0A'.join(errs[i:i + 20]))
+          if not errs and other:
+              print('::error title=other failures (last lines)::' + '%0A'.join(other))
+          tail = [l[:250] for l in clean.splitlines() if l.strip()][-15:]
+          print('::notice title=build log tail::' + '%0A'.join(tail))
+          EOF
+          ls -la dxb/fakeroot/System/Library/Kernels/ 2>/dev/null || echo "no kernel produced"
+
+      - name: Collect
+        if: always()
+        run: |
+          mkdir -p out
+          cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
+          cp build.log out/ 2>/dev/null || true
+          (cd out && shasum -a 256 kernel.* > SHA256SUMS) 2>/dev/null || true
+          ls -la out
+          if ls out/kernel.* >/dev/null 2>&1; then
+            f=$(ls out/kernel.* | grep -v '\.dSYM' | head -1)
+            echo "::notice title=kernel built::$(basename "$f") $(stat -f %z "$f") bytes%0A$(file "$f" | cut -c1-200)"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: a510f-xnu-kernel
+          path: out/
+          if-no-files-found: warn
