@@ -358,6 +358,27 @@ Next: iOS root candidate is USERDATA (11.5 GB, erases Android data; SYSTEM
 is only 3 GB). Needed: eMMC writes (rootrw), a root image that fits, a way
 to write it to the phone, and more RAM for iOS.
 
+## 2026-11-10: eMMC write support (patch 0106, renamed 0106-a510f-emmc.patch)
+
+User approved USERDATA for the iOS root (Android user data is erased).
+sweet's iOS root image has ~12 GB used, USERDATA is 11.5 GB: either trim the
+image or use the contiguous SYSTEM..USERDATA span (~14.4 GiB, also erases
+Android SYSTEM; not approved yet).
+
+Driver changes:
+- CMD24/CMD25 polled-PIO writes (two 32-bit FIFO writes per 64-bit entry,
+  pre-filled before the command, refilled while the card takes data), wait
+  for DATA_OVER, ACD (multi-block) and !DATA_BUSY; CMD6 FLUSH_CACHE on
+  DKIOCSYNCHRONIZE. Only with boot-arg `mmcrw=1`; otherwise EROFS as before.
+- `mmcroot=` takes a name or a range `A..B`; any range covering a partition
+  other than SYSTEM/CACHE/HIDDEN/USERDATA is refused (EPERM).
+- `mmcwtest=1` (with mmcprobe=1 mmcrw=1): read the last sector of the
+  mmcroot range, write a pattern, read back, write the original back, read
+  back, flush; prints `write test LBA ...: read 0 write 0 verify OK restore
+  OK flush 0`.
+
+Boot-args for the eleventh boot add `mmcrw=1 mmcwtest=1` (still rd=md0).
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.

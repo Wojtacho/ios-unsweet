@@ -12,23 +12,28 @@ index 6630131..bf2377a 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
 new file mode 100644
-index 0000000..f292254
+index 0000000..4de6b91
 --- /dev/null
 +++ b/bsd/dev/sweet_mmc.c
-@@ -0,0 +1,683 @@
+@@ -0,0 +1,917 @@
 +/*
-+ * A510F (Samsung Galaxy A5 2016, Exynos 7580) internal eMMC, read-only.
++ * A510F (Samsung Galaxy A5 2016, Exynos 7580) internal eMMC.
 + *
 + * The Synopsys DesignWare MMC host at SWEET_MMC_BASE ("samsung,exynos7580-
 + * dw-mshc", dwmmc0) is left running by S-Boot, which loaded our boot image
 + * through it: clocks, bus width/timing and the card (selected, transfer
 + * state) are reused as they are. This driver switches the host to polled
-+ * PIO (no DMA, no interrupts) and only ever sends CMD13, CMD17, CMD18 and
-+ * CMD12: nothing is written to the card.
++ * PIO (no DMA, no interrupts). Commands: CMD13, CMD17/18 (read), CMD12 and,
++ * only with boot-arg mmcrw=1, CMD24/25 (write) and CMD6 cache flush.
 + *
-+ *  - boot-arg mmcprobe=1: print the host state and the GPT (IOFindBSDRoot).
-+ *  - one GPT partition by name (boot-arg mmcroot=, default USERDATA) is the
-+ *    BSD disk mmcroot0 (rmmcroot0); root on it with rd=mmcroot0.
++ *  - boot-arg mmcprobe=1: print the host state and the GPT (IOFindBSDRoot);
++ *    with mmcrw=1 mmcwtest=1 also write/verify/restore the last sector of
++ *    the mmcroot range.
++ *  - mmcroot= (default USERDATA) names one GPT partition or a range "A..B"
++ *    (first sector of A to last sector of B). It may only cover SYSTEM,
++ *    CACHE, HIDDEN and USERDATA: anything else (EFS/IMEI, modem, bootloader,
++ *    BOOT, RECOVERY ...) is refused. It is the BSD disk mmcroot0
++ *    (rmmcroot0); root on it with rd=mmcroot0. Writes never leave it.
 + *
 + * Layout and GPT handling follow sweet's bsd/dev/sweet_ufs.c.
 + */
@@ -82,6 +87,7 @@ index 0000000..f292254
 +#define INT_RESP_ERR    (1u << 1)
 +#define INT_CMD_DONE    (1u << 2)
 +#define INT_DATA_OVER   (1u << 3)
++#define INT_TXDR        (1u << 4)
 +#define INT_RXDR        (1u << 5)
 +#define INT_RCRC        (1u << 6)
 +#define INT_DCRC        (1u << 7)
@@ -101,6 +107,7 @@ index 0000000..f292254
 +#define CMD_STOP_ABORT  (1u << 14)
 +#define CMD_PRV_DAT_WAIT (1u << 13)
 +#define CMD_SEND_STOP   (1u << 12)
++#define CMD_DAT_WR      (1u << 10)
 +#define CMD_DAT_EXP     (1u << 9)
 +#define CMD_RESP_CRC    (1u << 8)
 +#define CMD_RESP_EXP    (1u << 6)
@@ -109,10 +116,12 @@ index 0000000..f292254
 +#define STATUS_DATA_BUSY (1u << 9)
 +#define STATUS_FCNT(s)  (((s) >> 17) & 0x1fff)
 +
++#define FIFO_DEPTH      64u                     /* dwmmc0 fifo-depth = <0x40> */
 +#define MMC_SECTOR      512u
 +#define MAX_XFER_BLOCKS 256u                    /* 128 KiB per CMD18 */
 +#define CMD_TIMEOUT_NS  (100ull * NSEC_PER_MSEC)
 +#define DATA_TIMEOUT_NS (2ull * NSEC_PER_SEC)
++#define BUSY_TIMEOUT_NS (5ull * NSEC_PER_SEC)   /* card programming after a write */
 +
 +static struct {
 +	vm_offset_t regs;
@@ -124,7 +133,8 @@ index 0000000..f292254
 +	int bmajor, cmajor;
 +	dev_t bdev;
 +	bool ready;
-+	char name[37];
++	bool writable;                          /* boot-arg mmcrw=1 */
++	char name[80];
 +} sm;
 +
 +static LCK_GRP_DECLARE(sweet_mmc_grp, "sweet_mmc");
@@ -318,6 +328,122 @@ index 0000000..f292254
 +	return got == total ? 0 : EIO;
 +}
 +
++/* Copy up to want bytes from src into the FIFO's free entries. */
++static uint32_t
++mmc_fill(const uint8_t *src, uint32_t want)
++{
++	uint32_t used = STATUS_FCNT(mmc_rd(MMC_STATUS)), put = 0;
++	uint32_t room = used < FIFO_DEPTH ? FIFO_DEPTH - used : 0;
++	volatile uint8_t *fifo = (volatile uint8_t *)(sm.regs + sm.data_off);
++	while (room-- && put < want) {
++		if (sm.fifo_bytes == 8) {
++			/* 32-bit SFR accesses only, as for reads */
++			uint32_t v[2] = { 0, 0 };
++			memcpy(v, src + put, MIN(8u, want - put));
++			*(volatile uint32_t *)fifo = v[0];
++			*(volatile uint32_t *)(fifo + 4) = v[1];
++			put += 8;
++		} else {
++			uint32_t v = 0;
++			memcpy(&v, src + put, MIN(4u, want - put));
++			*(volatile uint32_t *)fifo = v;
++			put += 4;
++		}
++	}
++	return MIN(put, want);
++}
++
++/* Write nblk 512-byte sectors from src at lba (card address). */
++static int
++mmc_write(uint64_t lba, uint32_t nblk, const uint8_t *src)
++{
++	if (nblk == 0) {
++		return 0;
++	}
++	if (!sm.writable || nblk > MAX_XFER_BLOCKS || lba + nblk > UINT32_MAX) {
++		return EINVAL;
++	}
++	if (!mmc_wait_clear(MMC_STATUS, STATUS_DATA_BUSY, BUSY_TIMEOUT_NS)) {
++		return EBUSY;
++	}
++	int error = mmc_reset_fifo();
++	if (error) {
++		return error;
++	}
++	mmc_wr(MMC_RINTSTS, 0xffffffff);
++	mmc_wr(MMC_BLKSIZ, MMC_SECTOR);
++	mmc_wr(MMC_BYTCNT, nblk * MMC_SECTOR);
++	uint32_t total = nblk * MMC_SECTOR;
++	/* The host accepts FIFO data before the command starts. */
++	uint32_t put = mmc_fill(src, total);
++	uint32_t cmd = CMD_DAT_EXP | CMD_DAT_WR | CMD_R1 | CMD_PRV_DAT_WAIT |
++	    (nblk > 1 ? (25 | CMD_SEND_STOP) : 24);
++	mmc_wr(MMC_CMDARG, (uint32_t)lba);
++	mmc_wr(MMC_CMD, cmd | CMD_START | CMD_USE_HOLD);
++	if (!mmc_wait_clear(MMC_CMD, CMD_START, CMD_TIMEOUT_NS)) {
++		mmc_abort();
++		return ETIMEDOUT;
++	}
++	uint32_t seen = 0;
++	uint64_t end = deadline_after(BUSY_TIMEOUT_NS);
++	for (;;) {
++		uint32_t s = mmc_rd(MMC_RINTSTS);
++		seen |= s;
++		uint32_t before = put;
++		put += mmc_fill(src + put, total - put);
++		/* HTO on a write = FIFO ran empty: not fatal while we keep filling. */
++		if ((s & INT_HTO) && put != before) {
++			mmc_wr(MMC_RINTSTS, INT_HTO);
++			s &= ~INT_HTO;
++		}
++		if (s & (INT_CMD_ERR | INT_DATA_ERR)) {
++			printf("SWEET MMC: write lba %llu x%u failed, rintsts 0x%x, %u/%u bytes\n",
++			    lba, nblk, s, put, total);
++			mmc_abort();
++			return EIO;
++		}
++		if (s & INT_TXDR) {
++			mmc_wr(MMC_RINTSTS, INT_TXDR);
++		}
++		if (s & INT_DATA_OVER) {
++			break;
++		}
++		if (mach_absolute_time() > end) {
++			printf("SWEET MMC: write lba %llu x%u timed out, %u/%u bytes, rintsts 0x%x\n",
++			    lba, nblk, put, total, s);
++			mmc_abort();
++			return ETIMEDOUT;
++		}
++	}
++	if (nblk > 1) {
++		uint64_t stop_end = deadline_after(CMD_TIMEOUT_NS);
++		while (!((seen |= mmc_rd(MMC_RINTSTS)) & INT_ACD)) {
++			if (mach_absolute_time() > stop_end) {
++				break;
++			}
++		}
++	}
++	/* Wait while the card programs the data (DAT0 busy). */
++	bool idle = mmc_wait_clear(MMC_STATUS, STATUS_DATA_BUSY, BUSY_TIMEOUT_NS);
++	mmc_wr(MMC_RINTSTS, 0xffffffff);
++	if (!idle) {
++		printf("SWEET MMC: write lba %llu x%u: card still busy\n", lba, nblk);
++		return ETIMEDOUT;
++	}
++	return put == total ? 0 : EIO;
++}
++
++/* CMD6 SWITCH: EXT_CSD[32] FLUSH_CACHE = 1 (ignored by cards without a cache). */
++static int
++mmc_flush(void)
++{
++	if (!sm.writable) {
++		return 0;
++	}
++	(void)mmc_cmd(6 | CMD_R1, (3u << 24) | (32u << 16) | (1u << 8), NULL);
++	return mmc_wait_clear(MMC_STATUS, STATUS_DATA_BUSY, BUSY_TIMEOUT_NS) ? 0 : ETIMEDOUT;
++}
++
 +/* Reuse the host S-Boot left running; polled PIO from here on. */
 +static int
 +mmc_take_over_host(bool verbose)
@@ -377,9 +503,31 @@ index 0000000..f292254
 +	return (uint8_t *)kalloc_data(size, Z_WAITOK | Z_ZERO);
 +}
 +
++/* Partitions mmcroot may cover. Everything else holds firmware/IMEI/boot. */
++static bool
++mmc_root_allowed(const char *name)
++{
++	return strcmp(name, "SYSTEM") == 0 || strcmp(name, "CACHE") == 0 ||
++	       strcmp(name, "HIDDEN") == 0 || strcmp(name, "USERDATA") == 0;
++}
++
++static void
++mmc_entry_name(const uint8_t *e, char name[37])
++{
++	unsigned c;
++	for (c = 0; c < 36; c++) {
++		uint16_t ch = (uint16_t)(e[56 + 2 * c] | e[57 + 2 * c] << 8);
++		if (ch == 0 || ch > 0x7f) {
++			break;
++		}
++		name[c] = (char)ch;
++	}
++	name[c] = 0;
++}
++
 +/*
 + * Walk the GPT. With want == NULL print every partition; otherwise record
-+ * the partition named want.
++ * the partition (or "A..B" range) named want.
 + */
 +static int
 +mmc_gpt(const char *want)
@@ -420,6 +568,25 @@ index 0000000..f292254
 +	error = want ? ENOENT : 0;
 +	int shown = 0;
 +	char line[160] = "";
++	char lo[37] = "", hi[37] = "";
++	bool found_lo = false, found_hi = false;
++	uint64_t lo_first = 0, hi_last = 0;
++	if (want) {
++		const char *dots = NULL;
++		for (const char *q = want; *q && q[1]; q++) {
++			if (q[0] == '.' && q[1] == '.') {
++				dots = q;
++				break;
++			}
++		}
++		if (dots) {
++			strlcpy(lo, want, MIN(sizeof(lo), (size_t)(dots - want) + 1));
++			strlcpy(hi, dots + 2, sizeof(hi));
++		} else {
++			strlcpy(lo, want, sizeof(lo));
++			strlcpy(hi, want, sizeof(hi));
++		}
++	}
 +	for (uint32_t i = 0; i < nent; i++) {
 +		const uint8_t *e = b + i * esz;
 +		uint64_t first, last;
@@ -429,15 +596,7 @@ index 0000000..f292254
 +			continue;
 +		}
 +		char name[37];
-+		unsigned c;
-+		for (c = 0; c < 36; c++) {
-+			uint16_t ch = (uint16_t)(e[56 + 2 * c] | e[57 + 2 * c] << 8);
-+			if (ch == 0 || ch > 0x7f) {
-+				break;
-+			}
-+			name[c] = (char)ch;
-+		}
-+		name[c] = 0;
++		mmc_entry_name(e, name);
 +		if (want == NULL) {
 +			/* Three per line: NAME lba+size(MiB) */
 +			char item[56];
@@ -450,20 +609,44 @@ index 0000000..f292254
 +			}
 +			continue;
 +		}
-+		if (strcmp(name, want) != 0 || last < first) {
-+			continue;
++		if (strcmp(name, lo) == 0) {
++			lo_first = first;
++			found_lo = true;
 +		}
-+		sm.first_lba = first;
-+		sm.nsect = last - first + 1;
-+		strlcpy(sm.name, name, sizeof(sm.name));
-+		error = 0;
-+		break;
++		if (strcmp(name, hi) == 0) {
++			hi_last = last;
++			found_hi = true;
++		}
 +	}
 +	if (want == NULL && line[0]) {
 +		printf("SWEET MMC: %s\n", line);
 +	}
-+	if (want && error) {
-+		printf("SWEET MMC: no GPT partition named \"%s\"\n", want);
++	if (want && found_lo && found_hi && hi_last >= lo_first) {
++		/* Refuse a range that touches anything but the iOS-root partitions. */
++		error = 0;
++		for (uint32_t i = 0; i < nent; i++) {
++			const uint8_t *e = b + i * esz;
++			uint64_t first, last;
++			memcpy(&first, e + 32, 8);
++			memcpy(&last, e + 40, 8);
++			if ((first == 0 && last == 0) || last < lo_first || first > hi_last) {
++				continue;
++			}
++			char name[37];
++			mmc_entry_name(e, name);
++			if (!mmc_root_allowed(name)) {
++				printf("SWEET MMC: refusing \"%s\": it covers %s\n", want, name);
++				error = EPERM;
++			}
++		}
++		if (!error) {
++			sm.first_lba = lo_first;
++			sm.nsect = hi_last - lo_first + 1;
++			strlcpy(sm.name, want, sizeof(sm.name));
++		}
++	}
++	if (want && error == ENOENT) {
++		printf("SWEET MMC: no GPT partition (range) \"%s\"\n", want);
 +	}
 +out:
 +	kfree_data(b, MAX_XFER_BLOCKS * MMC_SECTOR);
@@ -481,6 +664,41 @@ index 0000000..f292254
 +	if (!error) {
 +		error = mmc_gpt(NULL);
 +	}
++	uint32_t rw = 0, wtest = 0;
++	PE_parse_boot_argn("mmcrw", &rw, sizeof(rw));
++	PE_parse_boot_argn("mmcwtest", &wtest, sizeof(wtest));
++	if (!error && rw == 1 && wtest == 1) {
++		char want[64] = "USERDATA";
++		PE_parse_boot_argn("mmcroot", want, sizeof(want));
++		error = mmc_gpt(want);
++		if (!error) {
++			printf("SWEET MMC: range \"%s\": first LBA %llu, %llu MiB\n",
++			    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20);
++			/* Last sector of the range: save, write a pattern, verify, restore. */
++			uint64_t lba = sm.first_lba + sm.nsect - 1;
++			uint8_t *orig = mmc_alloc(MMC_SECTOR), *pat = mmc_alloc(MMC_SECTOR),
++			    *back = mmc_alloc(MMC_SECTOR);
++			for (unsigned i = 0; i < MMC_SECTOR; i++) {
++				pat[i] = (uint8_t)(0xa5 ^ i ^ (lba >> (8 * (i & 3))));
++			}
++			sm.writable = true;
++			int r1 = mmc_read(lba, 1, orig);
++			int w1 = r1 ? -1 : mmc_write(lba, 1, pat);
++			int r2 = w1 ? -1 : mmc_read(lba, 1, back);
++			bool same = !r2 && memcmp(pat, back, MMC_SECTOR) == 0;
++			int w2 = r1 ? -1 : mmc_write(lba, 1, orig);
++			int r3 = w2 ? -1 : mmc_read(lba, 1, back);
++			bool restored = !r3 && memcmp(orig, back, MMC_SECTOR) == 0;
++			int fl = mmc_flush();
++			sm.writable = false;
++			printf("SWEET MMC: write test LBA %llu: read %d write %d verify %s restore %s flush %d\n",
++			    lba, r1, w1, same ? "OK" : "FAILED", restored ? "OK" : "FAILED", fl);
++			error = (same && restored) ? 0 : EIO;
++			kfree_data(orig, MMC_SECTOR);
++			kfree_data(pat, MMC_SECTOR);
++			kfree_data(back, MMC_SECTOR);
++		}
++	}
 +	lck_mtx_unlock(&sweet_mmc_lock);
 +	printf("SWEET MMC: probe %s (%d)\n", error ? "FAILED" : "done", error);
 +}
@@ -491,7 +709,7 @@ index 0000000..f292254
 +	if (!sm.ready) {
 +		return ENXIO;
 +	}
-+	return (flags & FWRITE) ? EROFS : 0;
++	return ((flags & FWRITE) && !sm.writable) ? EROFS : 0;
 +}
 +
 +static int
@@ -509,8 +727,9 @@ index 0000000..f292254
 +	uint32_t count = buf_count(bp);
 +	uint64_t part_bytes = sm.nsect * MMC_SECTOR;
 +
++	bool rd = (buf_flags(bp) & B_READ) != 0;
 +	buf_setresid(bp, count);
-+	if (!(buf_flags(bp) & B_READ)) {
++	if (!rd && !sm.writable) {
 +		error = EROFS;
 +		goto done;
 +	}
@@ -530,7 +749,9 @@ index 0000000..f292254
 +	lck_mtx_lock(&sweet_mmc_lock);
 +	for (uint32_t done = 0; done < count;) {
 +		uint32_t nblk = MIN((count - done) / MMC_SECTOR, MAX_XFER_BLOCKS);
-+		error = mmc_read(sm.first_lba + (off + done) / MMC_SECTOR, nblk, (uint8_t *)vaddr + done);
++		uint64_t lba = sm.first_lba + (off + done) / MMC_SECTOR;
++		error = rd ? mmc_read(lba, nblk, (uint8_t *)vaddr + done) :
++		    mmc_write(lba, nblk, (const uint8_t *)vaddr + done);
 +		if (error) {
 +			break;
 +		}
@@ -574,13 +795,19 @@ index 0000000..f292254
 +		*o = sm.nsect * MMC_SECTOR / sm.secsize;
 +		return 0;
 +	case DKIOCISWRITABLE:
-+		*f = 0;
++		*f = sm.writable ? 1 : 0;
 +		return 0;
++	case DKIOCSYNCHRONIZE: {
++		lck_mtx_lock(&sweet_mmc_lock);
++		int error = mmc_flush();
++		lck_mtx_unlock(&sweet_mmc_lock);
++		return error;
++	}
 +	case DKIOCGETMAXBLOCKCOUNTREAD:
 +		*o = MAX_XFER_BLOCKS * MMC_SECTOR / sm.secsize;
 +		return 0;
 +	case DKIOCGETMAXBLOCKCOUNTWRITE:
-+		*o = 0;
++		*o = sm.writable ? MAX_XFER_BLOCKS * MMC_SECTOR / sm.secsize : 0;
 +		return 0;
 +	case DKIOCGETMAXSEGMENTCOUNTREAD:
 +	case DKIOCGETMAXSEGMENTCOUNTWRITE:
@@ -616,9 +843,12 @@ index 0000000..f292254
 +}
 +
 +static int
-+sweet_mmc_write(__unused dev_t dev, __unused struct uio *uio, __unused int ioflag)
++sweet_mmc_write(dev_t dev, struct uio *uio, __unused int ioflag)
 +{
-+	return EROFS;
++	if (!sm.writable) {
++		return EROFS;
++	}
++	return physio(sweet_mmc_strategy, NULL, dev, B_WRITE, minphys, uio, (int)sm.secsize);
 +}
 +
 +static const struct bdevsw sweet_mmc_bdevsw = {
@@ -652,7 +882,9 @@ index 0000000..f292254
 +sweet_mmc_init(void)
 +{
 +	char want[64] = "USERDATA";
++	uint32_t rw = 0;
 +	PE_parse_boot_argn("mmcroot", want, sizeof(want));
++	PE_parse_boot_argn("mmcrw", &rw, sizeof(rw));
 +	sm.secsize = DEV_BSIZE;
 +
 +	lck_mtx_lock(&sweet_mmc_lock);
@@ -676,9 +908,11 @@ index 0000000..f292254
 +	sm.bdev = makedev(sm.bmajor, 0);
 +	devfs_make_node(sm.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "mmcroot0");
 +	devfs_make_node(makedev(sm.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rmmcroot0");
++	sm.writable = (rw == 1);
 +	sm.ready = true;
-+	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, read-only\n",
-+	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20);
++	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
++	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
++	    sm.writable ? "read-write" : "read-only");
 +	return 0;
 +}
 +
