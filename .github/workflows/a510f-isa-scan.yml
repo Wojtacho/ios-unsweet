@@ -77,7 +77,10 @@ jobs:
           sudo mkdir -p /mnt/sysos
           sudo apfs-fuse "$(realpath "$img")" /mnt/sysos >> /tmp/diag 2>&1 || fail "apfs-fuse mount failed"
           sudo find /mnt/sysos -maxdepth 4 >> /tmp/diag 2>&1
-          dir=$(sudo find /mnt/sysos -name dyld_shared_cache_arm64 -printf '%h\n' | head -1)
+          # The main cache, not the small /System/DriverKit one.
+          sudo find /mnt/sysos -name dyld_shared_cache_arm64 >> /tmp/diag 2>&1
+          dir=$(sudo find /mnt/sysos -name dyld_shared_cache_arm64 -printf '%h\n' \
+                | grep -v DriverKit | grep 'Library/Caches/com.apple.dyld' | head -1)
           [ -n "$dir" ] || fail "no dyld_shared_cache_arm64 found"
           echo "cache dir: $dir"
           mkdir -p dsc
