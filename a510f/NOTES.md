@@ -405,6 +405,24 @@ followed by CMD13 (R1 error bits) and a read-back with mismatch count, first
 bad offset, how many bytes still equal the old data, and the first 12 bytes.
 The working mode is kept for later writes.
 
+## 2026-11-10: twelfth boot: writes are silently dropped (a510f-xnu run 42853742044)
+
+Observed (photo): `wtest LBA 30769151 read 0, 0 non-zero bytes` (sector all
+zeros), pattern `5a db 72 a7 ...`; mode 0 and mode 1 both: `write 0 R1
+0x900(0) read 0: 512 bad from 0, 512 = old`, back all zeros. `FIFO write
+mode -1 FAILED, restore OK, flush 0`.
+
+So the transfer completes (DATA_OVER, card back in tran/ready, no error
+bits in CMD13) but nothing reaches the media: not FIFO mangling (mode 1
+would differ) but most likely write protection the card reports only in the
+CMD24 R1 (error bits are clear-on-read, so CMD13 afterwards is clean) or a
+protection S-Boot set (USER_WP power-on / temporary WP groups).
+
+Next boot prints: CMD24's own R1 and RINTSTS bits, EXT_CSD (rev, SEC_COUNT,
+PARTITION_CONFIG[179], USER_WP[171], BOOT_WP[173/174], ERASE_GROUP_DEF[175],
+HC_WP_GRP_SIZE[221], HC_ERASE_GRP_SIZE[224], SECURE_WP_INFO[231], cache) and
+CMD30/CMD31 write-protect status of the test sector's group.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.

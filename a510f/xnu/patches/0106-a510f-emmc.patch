@@ -12,10 +12,10 @@ index 6630131..bf2377a 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
 new file mode 100644
-index 0000000..d2ef747
+index 0000000..4803a8b
 --- /dev/null
 +++ b/bsd/dev/sweet_mmc.c
-@@ -0,0 +1,952 @@
+@@ -0,0 +1,985 @@
 +/*
 + * A510F (Samsung Galaxy A5 2016, Exynos 7580) internal eMMC.
 + *
@@ -127,7 +127,8 @@ index 0000000..d2ef747
 +	vm_offset_t regs;
 +	uint32_t data_off;                      /* FIFO window */
 +	uint32_t fifo_bytes;                    /* FIFO entry width */
-+	uint32_t fifo_wmode;                    /* 64-bit FIFO writes: 0 = 2x32-bit, 1 = 1x64-bit */
++	uint32_t fifo_wmode;
++	uint32_t wr_r1, wr_seen;                /* last write: CMD24/25 R1, RINTSTS seen */                    /* 64-bit FIFO writes: 0 = 2x32-bit, 1 = 1x64-bit */
 +	bool host_ok;
 +	uint64_t first_lba, nsect;              /* partition, in 512-byte sectors */
 +	uint32_t secsize;                       /* logical sector size for the BSD layer */
@@ -242,16 +243,11 @@ index 0000000..d2ef747
 +	return MIN(got, want);
 +}
 +
-+/* Read nblk 512-byte sectors at lba (card address) into dst. */
++/* Data-in command: nblk blocks of blksz bytes into dst (*r1 = its R1). */
 +static int
-+mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
++mmc_rdata(uint32_t op, uint32_t arg, uint32_t blksz, uint32_t nblk, uint8_t *dst, uint32_t *r1)
 +{
-+	if (nblk == 0) {
-+		return 0;
-+	}
-+	if (nblk > MAX_XFER_BLOCKS || lba + nblk > UINT32_MAX) {
-+		return EINVAL;
-+	}
++	uint64_t lba = arg;
 +	if (!mmc_wait_clear(MMC_STATUS, STATUS_DATA_BUSY, DATA_TIMEOUT_NS)) {
 +		return EBUSY;
 +	}
@@ -260,17 +256,16 @@ index 0000000..d2ef747
 +		return error;
 +	}
 +	mmc_wr(MMC_RINTSTS, 0xffffffff);
-+	mmc_wr(MMC_BLKSIZ, MMC_SECTOR);
-+	mmc_wr(MMC_BYTCNT, nblk * MMC_SECTOR);
-+	uint32_t cmd = CMD_DAT_EXP | CMD_R1 | CMD_PRV_DAT_WAIT |
-+	    (nblk > 1 ? (18 | CMD_SEND_STOP) : 17);
-+	mmc_wr(MMC_CMDARG, (uint32_t)lba);
++	mmc_wr(MMC_BLKSIZ, blksz);
++	mmc_wr(MMC_BYTCNT, nblk * blksz);
++	uint32_t cmd = CMD_DAT_EXP | CMD_R1 | CMD_PRV_DAT_WAIT | op;
++	mmc_wr(MMC_CMDARG, arg);
 +	mmc_wr(MMC_CMD, cmd | CMD_START | CMD_USE_HOLD);
 +	if (!mmc_wait_clear(MMC_CMD, CMD_START, CMD_TIMEOUT_NS)) {
 +		return ETIMEDOUT;
 +	}
 +
-+	uint32_t total = nblk * MMC_SECTOR, got = 0, seen = 0;
++	uint32_t total = nblk * blksz, got = 0, seen = 0;
 +	uint64_t end = deadline_after(DATA_TIMEOUT_NS);
 +	/* First few (rintsts, status, bytes) samples, printed if the read fails. */
 +	uint32_t trace[8][3];
@@ -325,8 +320,25 @@ index 0000000..d2ef747
 +			}
 +		}
 +	}
++	if (r1) {
++		*r1 = mmc_rd(MMC_RESP0);
++	}
 +	mmc_wr(MMC_RINTSTS, 0xffffffff);
 +	return got == total ? 0 : EIO;
++}
++
++/* Read nblk 512-byte sectors at lba (card address) into dst. */
++static int
++mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
++{
++	if (nblk == 0) {
++		return 0;
++	}
++	if (nblk > MAX_XFER_BLOCKS || lba + nblk > UINT32_MAX) {
++		return EINVAL;
++	}
++	return mmc_rdata(nblk > 1 ? (18 | CMD_SEND_STOP) : 17, (uint32_t)lba,
++	           MMC_SECTOR, nblk, dst, NULL);
 +}
 +
 +/* Copy up to want bytes from src into the FIFO's free entries. */
@@ -428,6 +440,8 @@ index 0000000..d2ef747
 +			}
 +		}
 +	}
++	sm.wr_r1 = mmc_rd(MMC_RESP0);
++	sm.wr_seen = seen;
 +	/* Wait while the card programs the data (DAT0 busy). */
 +	bool idle = mmc_wait_clear(MMC_STATUS, STATUS_DATA_BUSY, BUSY_TIMEOUT_NS);
 +	mmc_wr(MMC_RINTSTS, 0xffffffff);
@@ -696,6 +710,25 @@ index 0000000..d2ef747
 +			    lba, r1, nz, orig[0], orig[1], orig[2], orig[3], orig[4], orig[5], orig[6], orig[7]);
 +			printf("SWEET MMC: wtest pattern %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
 +			    pat[0], pat[1], pat[2], pat[3], pat[4], pat[5], pat[6], pat[7], pat[8], pat[9], pat[10], pat[11]);
++			/* EXT_CSD (CMD8) and write-protect status of the test sector (CMD30/31). */
++			uint8_t *ext = mmc_alloc(MMC_SECTOR);
++			uint32_t er1 = 0, p30r1 = 0, p31r1 = 0;
++			int e = mmc_rdata(8, 0, MMC_SECTOR, 1, ext, &er1);
++			uint32_t sec = (uint32_t)ext[212] | ext[213] << 8 | ext[214] << 16 | (uint32_t)ext[215] << 24;
++			printf("SWEET MMC: EXT_CSD %d R1 0x%x rev %u sec_count %u (%u MiB) part_cfg 0x%x user_wp 0x%x boot_wp 0x%x boot_wp_st 0x%x\n",
++			    e, er1, ext[192], sec, sec >> 11, ext[179], ext[171], ext[173], ext[174]);
++			printf("SWEET MMC: EXT_CSD erase_grp_def %u hc_wp_grp %u hc_erase_grp %u secure_wp 0x%x cache_ctrl %u cache_size %u part_attr 0x%x part_setting %u\n",
++			    ext[175], ext[221], ext[224], ext[231], ext[33],
++			    (uint32_t)ext[249] | ext[250] << 8 | ext[251] << 16 | (uint32_t)ext[252] << 24,
++			    ext[156], ext[155]);
++			uint8_t wp[8] = { 0 };
++			int p30 = mmc_rdata(30, (uint32_t)lba, 4, 1, wp, &p30r1);
++			printf("SWEET MMC: CMD30 %d R1 0x%x: %02x %02x %02x %02x\n", p30, p30r1, wp[0], wp[1], wp[2], wp[3]);
++			memset(wp, 0, sizeof(wp));
++			int p31 = mmc_rdata(31, (uint32_t)lba, 8, 1, wp, &p31r1);
++			printf("SWEET MMC: CMD31 %d R1 0x%x: %02x %02x %02x %02x %02x %02x %02x %02x\n",
++			    p31, p31r1, wp[0], wp[1], wp[2], wp[3], wp[4], wp[5], wp[6], wp[7]);
++			kfree_data(ext, MMC_SECTOR);
 +			int good = -1;
 +			for (uint32_t mode = 0; !r1 && mode < 2 && good < 0; mode++) {
 +				sm.fifo_wmode = mode;
@@ -712,8 +745,8 @@ index 0000000..d2ef747
 +					}
 +					eqorig += back[i] == orig[i];
 +				}
-+				printf("SWEET MMC: wtest mode %u write %d R1 0x%x(%d) read %d: %u bad from %u, %u = old\n",
-+				    mode, w, st, c, r, bad, first, eqorig);
++				printf("SWEET MMC: wtest mode %u write %d (CMD24 R1 0x%x, rintsts 0x%x) CMD13 0x%x(%d) read %d: %u bad from %u, %u = old\n",
++				    mode, w, sm.wr_r1, sm.wr_seen, st, c, r, bad, first, eqorig);
 +				printf("SWEET MMC: wtest back %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
 +				    back[0], back[1], back[2], back[3], back[4], back[5], back[6], back[7], back[8], back[9], back[10], back[11]);
 +				if (!w && !r && bad == 0) {
