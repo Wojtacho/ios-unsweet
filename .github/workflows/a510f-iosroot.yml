@@ -107,7 +107,21 @@ jobs:
           sudo mkdir -p /mnt/iosroot
           sudo mount -t hfsplus -o loop,force "$W/root.img" /mnt/iosroot
           sudo python3 tools/sweet-root-tweaks.py /mnt/iosroot
+          df -m /mnt/iosroot | tee /tmp/df0
+          # Odin's ustar members must stay under 8 GiB, and USERDATA holds
+          # most of the files: drop every localization but English/Base
+          # (bundles fall back to en/Base), then zero the free space so the
+          # sparse images skip it (deleted files leave their data behind).
+          sudo find /mnt/iosroot -depth -type d -name '*.lproj' \
+            ! -name 'Base.lproj' ! -name 'en.lproj' ! -name 'English.lproj' \
+            ! -name 'en_*.lproj' ! -name 'en-*.lproj' -print0 |
+            sudo xargs -0 -r rm -rf
+          df -m /mnt/iosroot
+          sudo dd if=/dev/zero of=/mnt/iosroot/.zero bs=4M status=none || true
+          sudo rm -f /mnt/iosroot/.zero
+          sync
           df -m /mnt/iosroot | tee /tmp/df
+          echo "used before trimming: $(awk 'NR==2{print $3}' /tmp/df0) MiB"
           sudo umount /mnt/iosroot
           fsck.hfsplus -f -y "$W/root.img" | grep -v 'Illegal name' || true
           fsck.hfsplus -f -n "$W/root.img"
@@ -136,7 +150,7 @@ jobs:
           rm -f "${files[@]}"
           ls -l a510f-ios-root.tar
           {
-            echo "used: $(awk 'NR==2{print $3" MiB of "$2" MiB"}' /tmp/df)"
+            echo "used: $(awk 'NR==2{print $3" MiB of "$2" MiB"}' /tmp/df) (before trimming $(awk 'NR==2{print $3}' /tmp/df0) MiB)"
             cat /tmp/sizes
             echo "tar: $(stat -c %s a510f-ios-root.tar) bytes, root.img sha256 $(cat /tmp/rootsha)..."
           } > /tmp/msg

@@ -489,6 +489,13 @@ Next: `.github/workflows/a510f-iosroot.yml` builds the iOS root on GitHub
 SYSTEM/CACHE/HIDDEN/USERDATA boundaries into sparse system.img, cache.img,
 hidden.img, userdata.img in one ustar Odin tar (members must stay < 8 GiB).
 
+First a510f-iosroot run (42870936111): root built and tweaked fine, `11887
+MiB used of 14776`; sparse pieces system.img 3035970408, cache.img
+196694364, hidden.img 62824544, userdata.img 8849785560 bytes: over the
+ustar 8 GiB member limit (tar refused). Fix: remove all localizations except
+Base/en/English/en_*, then zero the free space (deleted data would otherwise
+stay in the sparse image).
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
