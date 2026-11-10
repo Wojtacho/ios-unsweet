@@ -262,6 +262,34 @@ Reading: the GICv2 timer interrupt and the rebased timebase work (the
 scheduler and 1 s telemetry run). Expected next: waiting for the root
 device (no storage driver for the eMMC, no iOS root on the phone yet).
 
+## 2026-11-10: sixth/seventh boot: kernel waits for the root device
+
+Sixth boot (repack run 42834299958, boot-args `... sweetkeys=0 sweettouch=0
+sweetusb=0`): same silent stop after `SWEET FB`, and the keys/touch
+"disabled" lines never printed: boot stopped before those drivers. Cause:
+SweetCPU is matched with IONameMatch 'qcom,kryo470'; the A510F ADT CPU
+nodes only said arm,cortex-a53, so CPU 0 never registered with IOKit.
+
+Seventh boot (repack run 42836001379, commit 1e8a69d: CPU nodes compatible
+'arm,cortex-a53', 'qcom,kryo470', 'ARM,v8'; kernel from a510f-xnu run
+42828923119). Observed (two photos):
+- `SWEET CPU: requested=1 selected=1 (limit=8)`, `cpu_start() cpu: 0`,
+  `SWEET CPU: cpu=0 entered initCPU mpidr=0x0 EL1 IRQs=1`, `... came alive;
+  SGI1 OK`, `SWEET CPU: 1/1 CPUs initialized, SGI1 verified` (GICv2 SGI
+  delivery works), `ml_processor_register ... cpu_number 0 is type 0`.
+- BSD: copyright banner, `MAC Framework successfully initialized`, buffer
+  headers, ktriage, SWEET AMFI policy, SWEET permissive Sandbox, `SWEET HFS:
+  hfs-627.100.6 registered`, mcache/mbinit (64 MB pool), DLIL SUM16 self-test
+  PASSED, Skywalk self-tests all PASSED, lo0/gif0/stf0 attached.
+- Last: `Waiting on <dict ID="0"><key>IOProviderClass</key><string
+  ID="1">IOMedia</string><key>Content</key><string
+  ID="2">Apple_HFS</string></dict>`: IOFindBSDRoot waiting for an HFS root.
+
+**Milestone: the A510F completes XNU kernel startup up to the root mount.**
+
+Next: a block device for the root (eMMC host driver, or a RAM-disk root for a
+first userland test) and an iOS root filesystem image.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
