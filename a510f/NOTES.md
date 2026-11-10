@@ -290,6 +290,28 @@ Seventh boot (repack run 42836001379, commit 1e8a69d: CPU nodes compatible
 Next: a block device for the root (eMMC host driver, or a RAM-disk root for a
 first userland test) and an iOS root filesystem image.
 
+## 2026-11-10: eighth boot: user space PID 1 on the A510F
+
+Image: a510f-repack run 42837467623 (commit 0641695): kernel from a510f-xnu
+run 42828923119, boot-args `debug=0xc serial=3 cpus=1 keepsyms=1
+-enable_kprintf_spam sweetkeys=0 sweettouch=0 sweetusb=0 rd=md0`, RAM disk =
+sweet's static init (`tools/sweet-init.S` built with Ubuntu clang
+`-target arm64-apple-ios16.0`, wrapped by `tools/mkinit.py`), passed via
+`a510f/build.sh xnu KERNEL CMDLINE ROOTFS` -> `mkpayload.py --ramdisk`.
+
+Observed (two photos): `"RAMDisk" not a kext`, `Added memory device
+md0/rmd0 (01000000/12000000) at FFFFFFF0084AC000 0 for 0000000000008000`,
+`BSD root: md0, major 1, minor 0`, `Serial keyboard started`,
+`vm_free_delayed_pages: initialized 0 free pages`, `VM Swap Subsystem is ON`,
+`load_init_program: attempting to load
+/usr/appleinternal/sbin/launchd.development`, then `/sbin/launchd`,
+**`*** SWEET userspace: init running as PID 1 ***`** and `SWEET init: still
+alive` repeating (5 s heartbeat). No panic.
+
+**Milestone: EL0 user space runs on the Cortex-A53 with 4K pages**: Mach-O
+load, ad-hoc code signature, syscalls, devfs /dev/console, select timeouts.
+Not yet tested: dyld and the iOS dyld shared cache (need the real root).
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
