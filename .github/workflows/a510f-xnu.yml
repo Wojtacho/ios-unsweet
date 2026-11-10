@@ -33,7 +33,9 @@ env:
 jobs:
   build:
     # macos-14 runners are retired; xnu.yml chose them for Xcode 15's iig.
-    runs-on: macos-15
+    # Intel image: the arm64 macOS runners are short on capacity (jobs were
+    # never picked up); clang cross-compiles the arm64 kernel either way.
+    runs-on: macos-15-intel
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
