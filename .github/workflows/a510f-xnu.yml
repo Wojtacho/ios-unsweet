@@ -89,7 +89,8 @@ jobs:
           print(f'{len(errs)} distinct compile errors')
           for i in range(0, min(len(errs), 160), 20):
               print(f'::error title=compile errors {i + 1}-{min(i + 20, len(errs))} of {len(errs)}::' + '%0A'.join(errs[i:i + 20]))
-          if not errs and other:
+          built = __import__('os').path.isdir('dxb/fakeroot/System/Library/Kernels')
+          if not errs and other and not built:
               print('::error title=other failures (last lines)::' + '%0A'.join(other))
           tail = [l[:250] for l in clean.splitlines() if l.strip()][-15:]
           print('::notice title=build log tail::' + '%0A'.join(tail))
@@ -111,11 +112,14 @@ jobs:
 
       - name: Check the kernel for instructions the A53 lacks
         run: |
-          python3 -m pip install -q --break-system-packages numpy 2>/dev/null || python3 -m pip install -q numpy
+          python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -q numpy > isa.txt 2>&1 || true
           f=$(ls out/kernel.* | grep -v '\.dSYM' | head -1)
-          set -o pipefail
-          python3 a510f/tools/macho_isa_scan.py "$f" | tee isa.txt
-          echo "::notice title=kernel ISA check::$(tail -2 isa.txt | tr '\n' ' ')"
+          rc=0
+          /tmp/venv/bin/python a510f/tools/macho_isa_scan.py "$f" >> isa.txt 2>&1 || rc=$?
+          cat isa.txt
+          level=notice; [ "$rc" = 0 ] || level=error
+          echo "::$level title=kernel ISA check (exit $rc)::$(tail -12 isa.txt | cut -c1-400 | sed ':a;N;$!ba;s/\n/%0A/g')"
+          exit $rc
 
       - uses: actions/upload-artifact@v4
         if: always()
