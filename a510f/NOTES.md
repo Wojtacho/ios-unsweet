@@ -552,6 +552,26 @@ Prime suspect: 4K pages (sweet's kernel is 16K; the cache is laid out for
 panic) and srtrace=N (shared_region_trace_level as a tunable; 2 = info).
 Next boot: initpanicdelay=600 srtrace=2.
 
+## 2026-11-10: seventeenth boot: 16K code signatures rejected (run 42903079644)
+
+Observed (initpanicdelay kept it on screen): libignition 1 runs (`ignition
+level insufficient` for preboot/cryptex/graft, expected at level 1), `dylib_cache:
+opened shared cache directory: /System/Library/Caches/com.apple.dyld`,
+`goodbye: ignition sequence complete`, then `shared_region: ... check_np
+... vm_shared_region_start_address() failed` (no region yet, normal), `hfs:
+set hardlink bit ... inoid=979983975` (the cache file), **`disallowing
+unsupported code signature page shift: 14`**, `unable to create a validated
+cs_blob object: 85`, `dyld cache '(null)' not loaded: code signature
+registration for shared cache failed`, then the libSystem error and `SWEET:
+initproc failed to start; panic in 600 s`.
+
+Cause: cs_validate_codedirectory() only takes 4K or native (here 4K) hash
+pages; iOS signs with 16K. 0108: accept pageSize 14 when PAGE_SHIFT < 14,
+and in cs_validate_hash() accept 4K pages covered by a 16K hash page
+unverified (they cannot be hashed alone; the stock code would panic "offset
+not aligned to cshash boundary"). Logged once: `SWEET: accepting 16384-byte
+code signature pages unverified (4096-byte VM pages)`. srtrace dropped.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.

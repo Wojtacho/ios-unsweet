@@ -1,0 +1,39 @@
+diff --git a/bsd/kern/ubc_subr.c b/bsd/kern/ubc_subr.c
+index 9b553be..6e62a33 100644
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -371,7 +371,14 @@ cs_validate_codedirectory(const CS_CodeDirectory *cd, size_t length)
+ 	if (ntohl(cd->magic) != CSMAGIC_CODEDIRECTORY) {
+ 		return EBADEXEC;
+ 	}
+-	if ((cd->pageSize != PAGE_SHIFT_4K) && (cd->pageSize != PAGE_SHIFT)) {
++	/*
++	 * A510F: the Cortex-A53 kernel runs with 4K pages, but iOS (and its
++	 * dyld shared cache) is signed with 16K hash pages: accept those too.
++	 * cs_validate_hash() cannot check a single 4K page against a 16K hash
++	 * and accepts such pages unverified.
++	 */
++	if ((cd->pageSize != PAGE_SHIFT_4K) && (cd->pageSize != PAGE_SHIFT) &&
++	    !(PAGE_SHIFT < 14 && cd->pageSize == 14)) {
+ 		printf("disallowing unsupported code signature page shift: %u\n", cd->pageSize);
+ 		return EBADEXEC;
+ 	}
+@@ -5726,6 +5733,18 @@ cs_validate_hash(
+ 			if (hashtype->cs_digest_size > sizeof(actual_hash)) {
+ 				panic("hash size too large");
+ 			}
++			if (blob->csb_hash_pageshift > PAGE_SHIFT) {
++				/* A510F: 16K hash page, 4K VM page: cannot hash it alone. */
++				static bool sweet_cs_large_logged = false;
++				if (!sweet_cs_large_logged) {
++					sweet_cs_large_logged = true;
++					printf("SWEET: accepting %u-byte code signature pages unverified (%u-byte VM pages)\n",
++					    1U << blob->csb_hash_pageshift, (unsigned)PAGE_SIZE);
++				}
++				*bytes_processed = PAGE_SIZE;
++				*tainted = 0;
++				return TRUE;
++			}
+ 			if (offset & ((1U << blob->csb_hash_pageshift) - 1)) {
+ 				panic("offset not aligned to cshash boundary");
+ 			}
