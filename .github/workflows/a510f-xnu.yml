@@ -170,12 +170,23 @@ jobs:
           sudo apt-get install -y -q gcc gcc-aarch64-linux-gnu device-tree-compiler \
             libfdt-dev libssl-dev cpio
 
+      # Same image as a510f-repack: boot-args from a510f/boot-args.txt and,
+      # with rd=md0, sweet's test init as the RAM-disk root.
+      - name: Build the RAM-disk root (sweet's test init) if rd=md0
+        run: |
+          if grep -qw 'rd=md0' a510f/boot-args.txt; then
+            sudo apt-get install -y -q clang > /dev/null
+            clang -target arm64-apple-ios16.0 -c tools/sweet-init.S -o init.o
+            python3 tools/mkinit.py init.o rootfs.bin
+          fi
+
       - name: Build shim + payload recovery image
         run: |
           set -o pipefail
           f=$(ls kernel/kernel.* | grep -v -e '\.dSYM' -e SHA256 | head -1)
-          bash a510f/build.sh xnu "$f" 2>&1 | tee boot.log
-          echo "::notice title=boot image::$(grep -E 'recovery.img:|SWEETXNU|segs|entry|phys' boot.log | tail -8 | cut -c1-200 | sed ':a;N;$!ba;s/\n/%0A/g')%0A$(ls -l a510f/out/a510f-xnu-recovery.tar | awk '{print $5" bytes "$9}')"
+          root=""; [ -f rootfs.bin ] && root=rootfs.bin
+          bash a510f/build.sh xnu "$f" "$(head -1 a510f/boot-args.txt)" $root 2>&1 | tee boot.log
+          echo "::notice title=boot image::boot-args: $(head -1 a510f/boot-args.txt)%0Aramdisk root: ${root:-none}%0A$(grep -E 'recovery.img:' boot.log | tail -2 | cut -c1-200 | sed ':a;N;$!ba;s/\n/%0A/g')%0A$(ls -l a510f/out/a510f-xnu-recovery.tar | awk '{print $5" bytes "$9}')"
 
       - uses: actions/upload-artifact@v4
         with:

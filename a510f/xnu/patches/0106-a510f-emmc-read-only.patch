@@ -1,0 +1,718 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 6630131..bf2377a 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -105,6 +105,7 @@ bsd/dev/random/randomdev.c		standard
+ 
+ bsd/dev/memdev.c			standard
+ bsd/dev/sweet_ufs.c			standard
++bsd/dev/sweet_mmc.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
+new file mode 100644
+index 0000000..e36fa74
+--- /dev/null
++++ b/bsd/dev/sweet_mmc.c
+@@ -0,0 +1,650 @@
++/*
++ * A510F (Samsung Galaxy A5 2016, Exynos 7580) internal eMMC, read-only.
++ *
++ * The Synopsys DesignWare MMC host at SWEET_MMC_BASE ("samsung,exynos7580-
++ * dw-mshc", dwmmc0) is left running by S-Boot, which loaded our boot image
++ * through it: clocks, bus width/timing and the card (selected, transfer
++ * state) are reused as they are. This driver switches the host to polled
++ * PIO (no DMA, no interrupts) and only ever sends CMD13, CMD17, CMD18 and
++ * CMD12: nothing is written to the card.
++ *
++ *  - boot-arg mmcprobe=1: print the host state and the GPT (IOFindBSDRoot).
++ *  - one GPT partition by name (boot-arg mmcroot=, default USERDATA) is the
++ *    BSD disk mmcroot0 (rmmcroot0); root on it with rd=mmcroot0.
++ *
++ * Layout and GPT handling follow sweet's bsd/dev/sweet_ufs.c.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <pexpert/arm64/board_config.h>
++#if defined(SWEET_MMC_BASE)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/buf.h>
++#include <sys/conf.h>
++#include <sys/disk.h>
++#include <sys/errno.h>
++#include <sys/proc.h>
++#include <sys/uio.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/locks.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <libkern/libkern.h>
++
++/* osfmk/arm/machine_routines.h, not exported to the BSD layer */
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++#define MMC_CTRL        0x000
++#define MMC_CLKDIV      0x008
++#define MMC_CLKENA      0x010
++#define MMC_TMOUT       0x014
++#define MMC_CTYPE       0x018
++#define MMC_BLKSIZ      0x01c
++#define MMC_BYTCNT      0x020
++#define MMC_INTMASK     0x024
++#define MMC_CMDARG      0x028
++#define MMC_CMD         0x02c
++#define MMC_RESP0       0x030
++#define MMC_RINTSTS     0x044
++#define MMC_STATUS      0x048
++#define MMC_FIFOTH      0x04c
++#define MMC_VERID       0x06c
++#define MMC_HCON        0x070
++#define MMC_UHS_REG     0x074
++#define MMC_BMOD        0x080
++
++#define CTRL_RESET      (1u << 0)
++#define CTRL_FIFO_RESET (1u << 1)
++#define CTRL_INT_ENABLE (1u << 4)
++#define CTRL_DMA_ENABLE (1u << 5)
++#define CTRL_USE_IDMAC  (1u << 25)
++#define BMOD_IDMAC_EN   (1u << 7)
++
++#define INT_RESP_ERR    (1u << 1)
++#define INT_CMD_DONE    (1u << 2)
++#define INT_DATA_OVER   (1u << 3)
++#define INT_RXDR        (1u << 5)
++#define INT_RCRC        (1u << 6)
++#define INT_DCRC        (1u << 7)
++#define INT_RTO         (1u << 8)
++#define INT_DRTO        (1u << 9)
++#define INT_HTO         (1u << 10)
++#define INT_FRUN        (1u << 11)
++#define INT_HLE         (1u << 12)
++#define INT_SBE         (1u << 13)
++#define INT_ACD         (1u << 14)
++#define INT_EBE         (1u << 15)
++#define INT_CMD_ERR     (INT_RESP_ERR | INT_RCRC | INT_RTO | INT_HLE)
++#define INT_DATA_ERR    (INT_DCRC | INT_DRTO | INT_HTO | INT_FRUN | INT_SBE | INT_EBE)
++
++#define CMD_START       (1u << 31)
++#define CMD_USE_HOLD    (1u << 29)
++#define CMD_STOP_ABORT  (1u << 14)
++#define CMD_PRV_DAT_WAIT (1u << 13)
++#define CMD_SEND_STOP   (1u << 12)
++#define CMD_DAT_EXP     (1u << 9)
++#define CMD_RESP_CRC    (1u << 8)
++#define CMD_RESP_EXP    (1u << 6)
++#define CMD_R1          (CMD_RESP_EXP | CMD_RESP_CRC)
++
++#define STATUS_DATA_BUSY (1u << 9)
++#define STATUS_FCNT(s)  (((s) >> 17) & 0x1fff)
++
++#define MMC_SECTOR      512u
++#define MAX_XFER_BLOCKS 256u                    /* 128 KiB per CMD18 */
++#define CMD_TIMEOUT_NS  (100ull * NSEC_PER_MSEC)
++#define DATA_TIMEOUT_NS (2ull * NSEC_PER_SEC)
++
++static struct {
++	vm_offset_t regs;
++	uint32_t data_off;                      /* FIFO window */
++	uint32_t fifo_bytes;                    /* FIFO entry width */
++	bool host_ok;
++	uint64_t first_lba, nsect;              /* partition, in 512-byte sectors */
++	uint32_t secsize;                       /* logical sector size for the BSD layer */
++	int bmajor, cmajor;
++	dev_t bdev;
++	bool ready;
++	char name[37];
++} sm;
++
++static LCK_GRP_DECLARE(sweet_mmc_grp, "sweet_mmc");
++static LCK_MTX_DECLARE(sweet_mmc_lock, &sweet_mmc_grp);
++
++static inline uint32_t
++mmc_rd(uint32_t off)
++{
++	return *(volatile uint32_t *)(sm.regs + off);
++}
++
++static inline void
++mmc_wr(uint32_t off, uint32_t v)
++{
++	*(volatile uint32_t *)(sm.regs + off) = v;
++}
++
++static uint64_t
++deadline_after(uint64_t ns)
++{
++	uint64_t abs;
++	nanoseconds_to_absolutetime(ns, &abs);
++	return mach_absolute_time() + abs;
++}
++
++static bool
++mmc_wait_clear(uint32_t off, uint32_t bits, uint64_t ns)
++{
++	uint64_t end = deadline_after(ns);
++	while (mmc_rd(off) & bits) {
++		if (mach_absolute_time() > end) {
++			return false;
++		}
++	}
++	return true;
++}
++
++static int
++mmc_reset_fifo(void)
++{
++	mmc_wr(MMC_CTRL, mmc_rd(MMC_CTRL) | CTRL_FIFO_RESET);
++	return mmc_wait_clear(MMC_CTRL, CTRL_FIFO_RESET, CMD_TIMEOUT_NS) ? 0 : ETIMEDOUT;
++}
++
++/* Send a command and wait for its response; *resp gets R1 (RESP0). */
++static int
++mmc_cmd(uint32_t cmd, uint32_t arg, uint32_t *resp)
++{
++	mmc_wr(MMC_RINTSTS, INT_CMD_DONE | INT_CMD_ERR);
++	mmc_wr(MMC_CMDARG, arg);
++	mmc_wr(MMC_CMD, cmd | CMD_START | CMD_USE_HOLD);
++	if (!mmc_wait_clear(MMC_CMD, CMD_START, CMD_TIMEOUT_NS)) {
++		return ETIMEDOUT;
++	}
++	uint64_t end = deadline_after(CMD_TIMEOUT_NS);
++	uint32_t s;
++	while (!((s = mmc_rd(MMC_RINTSTS)) & (INT_CMD_DONE | INT_HLE))) {
++		if (mach_absolute_time() > end) {
++			return ETIMEDOUT;
++		}
++	}
++	mmc_wr(MMC_RINTSTS, s & (INT_CMD_DONE | INT_CMD_ERR));
++	if (resp) {
++		*resp = mmc_rd(MMC_RESP0);
++	}
++	return (s & INT_CMD_ERR) ? EIO : 0;
++}
++
++/* CMD12 STOP_TRANSMISSION after a failed multi-block read. */
++static void
++mmc_abort(void)
++{
++	(void)mmc_cmd(12 | CMD_R1 | CMD_STOP_ABORT, 0, NULL);
++	(void)mmc_wait_clear(MMC_STATUS, STATUS_DATA_BUSY, DATA_TIMEOUT_NS);
++	(void)mmc_reset_fifo();
++	mmc_wr(MMC_RINTSTS, 0xffffffff);
++}
++
++/* Copy whatever the FIFO holds to dst, at most want bytes. */
++static uint32_t
++mmc_drain(uint8_t *dst, uint32_t want)
++{
++	uint32_t n = STATUS_FCNT(mmc_rd(MMC_STATUS)), got = 0;
++	volatile uint8_t *fifo = (volatile uint8_t *)(sm.regs + sm.data_off);
++	while (n-- && got < want) {
++		if (sm.fifo_bytes == 8) {
++			uint64_t v = *(volatile uint64_t *)fifo;
++			memcpy(dst + got, &v, MIN(8u, want - got));
++			got += 8;
++		} else {
++			uint32_t v = *(volatile uint32_t *)fifo;
++			memcpy(dst + got, &v, MIN(4u, want - got));
++			got += 4;
++		}
++	}
++	return MIN(got, want);
++}
++
++/* Read nblk 512-byte sectors at lba (card address) into dst. */
++static int
++mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
++{
++	if (nblk == 0) {
++		return 0;
++	}
++	if (nblk > MAX_XFER_BLOCKS || lba + nblk > UINT32_MAX) {
++		return EINVAL;
++	}
++	if (!mmc_wait_clear(MMC_STATUS, STATUS_DATA_BUSY, DATA_TIMEOUT_NS)) {
++		return EBUSY;
++	}
++	int error = mmc_reset_fifo();
++	if (error) {
++		return error;
++	}
++	mmc_wr(MMC_RINTSTS, 0xffffffff);
++	mmc_wr(MMC_BLKSIZ, MMC_SECTOR);
++	mmc_wr(MMC_BYTCNT, nblk * MMC_SECTOR);
++	uint32_t cmd = CMD_DAT_EXP | CMD_R1 | CMD_PRV_DAT_WAIT |
++	    (nblk > 1 ? (18 | CMD_SEND_STOP) : 17);
++	mmc_wr(MMC_CMDARG, (uint32_t)lba);
++	mmc_wr(MMC_CMD, cmd | CMD_START | CMD_USE_HOLD);
++	if (!mmc_wait_clear(MMC_CMD, CMD_START, CMD_TIMEOUT_NS)) {
++		return ETIMEDOUT;
++	}
++
++	uint32_t total = nblk * MMC_SECTOR, got = 0, seen = 0;
++	uint64_t end = deadline_after(DATA_TIMEOUT_NS);
++	for (;;) {
++		uint32_t s = mmc_rd(MMC_RINTSTS);
++		seen |= s;
++		if (s & (INT_CMD_ERR | INT_DATA_ERR)) {
++			printf("SWEET MMC: read lba %llu x%u failed, rintsts 0x%x\n", lba, nblk, s);
++			mmc_abort();
++			return EIO;
++		}
++		got += mmc_drain(dst + got, total - got);
++		if (s & INT_RXDR) {
++			mmc_wr(MMC_RINTSTS, INT_RXDR);
++		}
++		if (s & INT_DATA_OVER) {
++			got += mmc_drain(dst + got, total - got);
++			break;
++		}
++		if (mach_absolute_time() > end) {
++			printf("SWEET MMC: read lba %llu x%u timed out, %u/%u bytes, rintsts 0x%x\n",
++			    lba, nblk, got, total, s);
++			mmc_abort();
++			return ETIMEDOUT;
++		}
++	}
++	/* Multi-block: wait for the automatic CMD12 too. */
++	if (nblk > 1) {
++		uint64_t stop_end = deadline_after(CMD_TIMEOUT_NS);
++		while (!((seen |= mmc_rd(MMC_RINTSTS)) & INT_ACD)) {
++			if (mach_absolute_time() > stop_end) {
++				break;
++			}
++		}
++	}
++	mmc_wr(MMC_RINTSTS, 0xffffffff);
++	return got == total ? 0 : EIO;
++}
++
++/* Reuse the host S-Boot left running; polled PIO from here on. */
++static int
++mmc_take_over_host(bool verbose)
++{
++	if (sm.host_ok) {
++		return 0;
++	}
++	sm.regs = ml_io_map(SWEET_MMC_BASE, SWEET_MMC_SIZE);
++	if (!sm.regs) {
++		return ENOMEM;
++	}
++	uint32_t verid = mmc_rd(MMC_VERID) & 0xffff, hcon = mmc_rd(MMC_HCON);
++	uint32_t ctrl = mmc_rd(MMC_CTRL), bmod = mmc_rd(MMC_BMOD);
++	if (verbose) {
++		printf("SWEET MMC: verid 0x%x hcon 0x%x ctrl 0x%x bmod 0x%x clkena 0x%x clkdiv 0x%x\n",
++		    verid, hcon, ctrl, bmod, mmc_rd(MMC_CLKENA), mmc_rd(MMC_CLKDIV));
++		printf("SWEET MMC: ctype 0x%x uhs 0x%x status 0x%x fifoth 0x%x tmout 0x%x intmask 0x%x\n",
++		    mmc_rd(MMC_CTYPE), mmc_rd(MMC_UHS_REG), mmc_rd(MMC_STATUS),
++		    mmc_rd(MMC_FIFOTH), mmc_rd(MMC_TMOUT), mmc_rd(MMC_INTMASK));
++	}
++	if (verid == 0 || verid == 0xffff) {
++		printf("SWEET MMC: no DesignWare MMC host at 0x%x\n", SWEET_MMC_BASE);
++		return ENXIO;
++	}
++	sm.data_off = verid >= 0x240a ? 0x200 : 0x100;
++	switch ((hcon >> 7) & 7) {     /* H_DATA_WIDTH */
++	case 2:
++		sm.fifo_bytes = 8;
++		break;
++	case 1:
++		sm.fifo_bytes = 4;
++		break;
++	default:
++		printf("SWEET MMC: unsupported FIFO width (hcon 0x%x)\n", hcon);
++		return ENXIO;
++	}
++	/* Polled PIO: no interrupts, no internal DMA. */
++	mmc_wr(MMC_INTMASK, 0);
++	mmc_wr(MMC_CTRL, ctrl & ~(CTRL_INT_ENABLE | CTRL_DMA_ENABLE | CTRL_USE_IDMAC));
++	mmc_wr(MMC_BMOD, bmod & ~BMOD_IDMAC_EN);
++	mmc_wr(MMC_RINTSTS, 0xffffffff);
++
++	/* CMD13 SEND_STATUS, RCA 1 (Linux and bootloaders give the eMMC RCA 1). */
++	uint32_t r1 = 0;
++	int error = mmc_cmd(13 | CMD_R1, 1u << 16, &r1);
++	if (verbose) {
++		printf("SWEET MMC: CMD13 %s, R1 0x%x (state %u, 4 = transfer)\n",
++		    error ? "failed" : "ok", r1, (r1 >> 9) & 0xf);
++	}
++	sm.host_ok = true;
++	return 0;
++}
++
++static uint8_t *
++mmc_alloc(size_t size)
++{
++	return (uint8_t *)kalloc_data(size, Z_WAITOK | Z_ZERO);
++}
++
++/*
++ * Walk the GPT. With want == NULL print every partition; otherwise record
++ * the partition named want.
++ */
++static int
++mmc_gpt(const char *want)
++{
++	uint8_t *b = mmc_alloc(MAX_XFER_BLOCKS * MMC_SECTOR);
++	int error = mmc_read(1, 1, b);
++	if (error) {
++		goto out;
++	}
++	if (memcmp(b, "EFI PART", 8) != 0) {
++		printf("SWEET MMC: no GPT at LBA 1 (%02x %02x %02x %02x)\n", b[0], b[1], b[2], b[3]);
++		error = ENXIO;
++		goto out;
++	}
++	uint64_t entry_lba, last_lba;
++	uint32_t nent, esz;
++	memcpy(&last_lba, b + 32, 8);
++	memcpy(&entry_lba, b + 72, 8);
++	memcpy(&nent, b + 80, 4);
++	memcpy(&esz, b + 84, 4);
++	if (want == NULL) {
++		printf("SWEET MMC: GPT: %u entries at LBA %llu, disk %llu MiB\n",
++		    nent, entry_lba, (last_lba + 1) * MMC_SECTOR >> 20);
++	}
++	if (esz != 128 || nent == 0 || nent > 128) {
++		printf("SWEET MMC: unsupported GPT entries %u x %u\n", nent, esz);
++		error = ENXIO;
++		goto out;
++	}
++	error = mmc_read(entry_lba, (nent * esz + MMC_SECTOR - 1) / MMC_SECTOR, b);
++	if (error) {
++		goto out;
++	}
++	error = want ? ENOENT : 0;
++	int shown = 0;
++	char line[160] = "";
++	for (uint32_t i = 0; i < nent; i++) {
++		const uint8_t *e = b + i * esz;
++		uint64_t first, last;
++		memcpy(&first, e + 32, 8);
++		memcpy(&last, e + 40, 8);
++		if (first == 0 && last == 0) {
++			continue;
++		}
++		char name[37];
++		unsigned c;
++		for (c = 0; c < 36; c++) {
++			uint16_t ch = (uint16_t)(e[56 + 2 * c] | e[57 + 2 * c] << 8);
++			if (ch == 0 || ch > 0x7f) {
++				break;
++			}
++			name[c] = (char)ch;
++		}
++		name[c] = 0;
++		if (want == NULL) {
++			/* Three per line: NAME lba+size(MiB) */
++			char item[56];
++			snprintf(item, sizeof(item), "%-10s %7llu+%-5llu ", name, first,
++			    (last - first + 1) * MMC_SECTOR >> 20);
++			strlcat(line, item, sizeof(line));
++			if (++shown % 3 == 0) {
++				printf("SWEET MMC: %s\n", line);
++				line[0] = 0;
++			}
++			continue;
++		}
++		if (strcmp(name, want) != 0 || last < first) {
++			continue;
++		}
++		sm.first_lba = first;
++		sm.nsect = last - first + 1;
++		strlcpy(sm.name, name, sizeof(sm.name));
++		error = 0;
++		break;
++	}
++	if (want == NULL && line[0]) {
++		printf("SWEET MMC: %s\n", line);
++	}
++	if (want && error) {
++		printf("SWEET MMC: no GPT partition named \"%s\"\n", want);
++	}
++out:
++	kfree_data(b, MAX_XFER_BLOCKS * MMC_SECTOR);
++	return error;
++}
++
++/* boot-arg mmcprobe=1: show what the eMMC looks like, change nothing. */
++void sweet_mmc_probe(void);
++
++void
++sweet_mmc_probe(void)
++{
++	lck_mtx_lock(&sweet_mmc_lock);
++	int error = mmc_take_over_host(true);
++	if (!error) {
++		error = mmc_gpt(NULL);
++	}
++	lck_mtx_unlock(&sweet_mmc_lock);
++	printf("SWEET MMC: probe %s (%d)\n", error ? "FAILED" : "done", error);
++}
++
++static int
++sweet_mmc_open(__unused dev_t dev, int flags, __unused int devtype, __unused struct proc *p)
++{
++	if (!sm.ready) {
++		return ENXIO;
++	}
++	return (flags & FWRITE) ? EROFS : 0;
++}
++
++static int
++sweet_mmc_close(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
++{
++	return 0;
++}
++
++static void
++sweet_mmc_strategy(buf_t bp)
++{
++	int error = 0;
++	caddr_t vaddr = NULL;
++	uint64_t off = (uint64_t)buf_blkno(bp) * sm.secsize;
++	uint32_t count = buf_count(bp);
++	uint64_t part_bytes = sm.nsect * MMC_SECTOR;
++
++	buf_setresid(bp, count);
++	if (!(buf_flags(bp) & B_READ)) {
++		error = EROFS;
++		goto done;
++	}
++	if (off > part_bytes || count > part_bytes - off ||
++	    (off % MMC_SECTOR) || (count % MMC_SECTOR)) {
++		error = EINVAL;
++		goto done;
++	}
++	if (count == 0) {
++		goto done;
++	}
++	if (buf_map(bp, &vaddr)) {
++		error = EIO;
++		goto done;
++	}
++
++	lck_mtx_lock(&sweet_mmc_lock);
++	for (uint32_t done = 0; done < count;) {
++		uint32_t nblk = MIN((count - done) / MMC_SECTOR, MAX_XFER_BLOCKS);
++		error = mmc_read(sm.first_lba + (off + done) / MMC_SECTOR, nblk, (uint8_t *)vaddr + done);
++		if (error) {
++			break;
++		}
++		done += nblk * MMC_SECTOR;
++		buf_setresid(bp, count - done);
++	}
++	lck_mtx_unlock(&sweet_mmc_lock);
++	buf_unmap(bp);
++
++done:
++	if (error) {
++		buf_seterror(bp, error);
++	}
++	buf_biodone(bp);
++}
++
++static int
++sweet_mmc_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag,
++    __unused struct proc *p, int is_char)
++{
++	uint32_t *f = (uint32_t *)data;
++	uint64_t *o = (uint64_t *)data;
++
++	switch (cmd) {
++	case DKIOCGETBLOCKSIZE:
++		*f = sm.secsize;
++		return 0;
++	case DKIOCSETBLOCKSIZE:
++		if (is_char) {
++			return ENODEV;
++		}
++		if (*f < DEV_BSIZE || *f > 4096 || (*f & (*f - 1))) {
++			return EINVAL;
++		}
++		sm.secsize = *f;
++		return 0;
++	case DKIOCGETPHYSICALBLOCKSIZE:
++		*f = MMC_SECTOR;
++		return 0;
++	case DKIOCGETBLOCKCOUNT:
++		*o = sm.nsect * MMC_SECTOR / sm.secsize;
++		return 0;
++	case DKIOCISWRITABLE:
++		*f = 0;
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTREAD:
++		*o = MAX_XFER_BLOCKS * MMC_SECTOR / sm.secsize;
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTWRITE:
++		*o = 0;
++		return 0;
++	case DKIOCGETMAXSEGMENTCOUNTREAD:
++	case DKIOCGETMAXSEGMENTCOUNTWRITE:
++		*o = 1;
++		return 0;
++	default:
++		return ENOTTY;
++	}
++}
++
++static int
++sweet_mmc_bioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	return sweet_mmc_ioctl(dev, cmd, data, flag, p, 0);
++}
++
++static int
++sweet_mmc_cioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	return sweet_mmc_ioctl(dev, cmd, data, flag, p, 1);
++}
++
++static int
++sweet_mmc_psize(__unused dev_t dev)
++{
++	return sm.ready ? (int)MIN(sm.nsect * MMC_SECTOR / sm.secsize, INT_MAX) : -1;
++}
++
++static int
++sweet_mmc_read(dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	return physio(sweet_mmc_strategy, NULL, dev, B_READ, minphys, uio, (int)sm.secsize);
++}
++
++static int
++sweet_mmc_write(__unused dev_t dev, __unused struct uio *uio, __unused int ioflag)
++{
++	return EROFS;
++}
++
++static const struct bdevsw sweet_mmc_bdevsw = {
++	.d_open     = sweet_mmc_open,
++	.d_close    = sweet_mmc_close,
++	.d_strategy = sweet_mmc_strategy,
++	.d_ioctl    = sweet_mmc_bioctl,
++	.d_dump     = eno_dump,
++	.d_psize    = sweet_mmc_psize,
++	.d_type     = D_DISK,
++};
++
++static const struct cdevsw sweet_mmc_cdevsw = {
++	.d_open       = sweet_mmc_open,
++	.d_close      = sweet_mmc_close,
++	.d_read       = sweet_mmc_read,
++	.d_write      = sweet_mmc_write,
++	.d_ioctl      = sweet_mmc_cioctl,
++	.d_stop       = eno_stop,
++	.d_reset      = eno_reset,
++	.d_ttys       = NULL,
++	.d_select     = eno_select,
++	.d_mmap       = eno_mmap,
++	.d_strategy   = eno_strat,
++	.d_reserved_1 = eno_getc,
++	.d_reserved_2 = eno_putc,
++	.d_type       = D_DISK,
++};
++
++static int
++sweet_mmc_init(void)
++{
++	char want[64] = "USERDATA";
++	PE_parse_boot_argn("mmcroot", want, sizeof(want));
++	sm.secsize = DEV_BSIZE;
++
++	lck_mtx_lock(&sweet_mmc_lock);
++	int error = mmc_take_over_host(false);
++	if (!error) {
++		error = mmc_gpt(want);
++	}
++	lck_mtx_unlock(&sweet_mmc_lock);
++	if (error) {
++		return error;
++	}
++
++	sm.bmajor = bdevsw_add(-1, &sweet_mmc_bdevsw);
++	if (sm.bmajor < 0) {
++		return ENXIO;
++	}
++	sm.cmajor = cdevsw_add_with_bdev(-1, &sweet_mmc_cdevsw, sm.bmajor);
++	if (sm.cmajor < 0) {
++		return ENXIO;
++	}
++	sm.bdev = makedev(sm.bmajor, 0);
++	devfs_make_node(sm.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "mmcroot0");
++	devfs_make_node(makedev(sm.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rmmcroot0");
++	sm.ready = true;
++	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, read-only\n",
++	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20);
++	return 0;
++}
++
++/* Root device for rd=mmcroot0 (IOFindBSDRoot). */
++int sweet_mmc_rootdev(dev_t *dev);
++
++int
++sweet_mmc_rootdev(dev_t *dev)
++{
++	if (!sm.ready) {
++		int error = sweet_mmc_init();
++		if (error) {
++			return error;
++		}
++	}
++	*dev = sm.bdev;
++	return 0;
++}
++#endif /* SWEET_MMC_BASE */
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+index e6c74aa..63a3ffc 100644
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -782,6 +782,30 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ 		*oflags = 0;
+ 		goto iofrootx;
+ 	}
++
++//
++//	A510F: internal eMMC (bsd/dev/sweet_mmc.c). mmcprobe=1 only prints the
++//	host state and the GPT, whatever the root is.
++//
++	{
++		uint32_t mmcprobe = 0;
++		if (PE_parse_boot_argn("mmcprobe", &mmcprobe, sizeof(mmcprobe)) && mmcprobe) {
++			extern void sweet_mmc_probe(void);
++			sweet_mmc_probe();
++		}
++	}
++	if (strcmp(rdBootVar, "mmcroot0") == 0) {
++		extern int sweet_mmc_rootdev(dev_t *dev);
++		OSSafeReleaseNULL(matching);
++		int mmc_error = sweet_mmc_rootdev(root);
++		if (mmc_error) {
++			panic("IOFindBSDRoot: SWEET eMMC root %s unavailable: %d", rdBootVar, mmc_error);
++		}
++		strlcpy(rootName, rdBootVar, rootNameSize);
++		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
++		*oflags = 0;
++		goto iofrootx;
++	}
+ #endif
+ 
+ //
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index 0a71513..178b5a3 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -73,6 +73,10 @@
+ #define SWEET_PS_HOLD_OUTPUT_HIGH (1U << 8)
+ #define SWEET_PANIC_OFF_SECONDS   60
+ 
++/* Exynos 7580 dwmmc0 (eMMC), DesignWare MMC: bsd/dev/sweet_mmc.c */
++#define SWEET_MMC_BASE            0x13540000
++#define SWEET_MMC_SIZE            0x2000
++
+ #ifndef ASSEMBLER
+ #ifdef __cplusplus
+ extern "C" {
