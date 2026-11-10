@@ -15,7 +15,11 @@ on:
     branches: [a510f]
     paths:
       - "a510f/xnu/**"
-      - "a510f/tools/macho_isa_scan.py"
+      - "a510f/shim/**"
+      - "a510f/tools/**"
+      - "a510f/build.sh"
+      - "tools/mkadt.py"
+      - "tools/mkpayload.py"
       - "xnu/patches/**"
       - ".github/workflows/a510f-xnu.yml"
 
@@ -145,3 +149,38 @@ jobs:
           level=notice; [ "$rc" = 0 ] || level=error
           echo "::$level title=kernel ISA check (exit $rc) $(basename "$f") $(sha256sum "$f" | cut -c1-16)::$(grep -v '^__' isa.txt | tail -40 | cut -c1-300 | sed ':a;N;$!ba;s/\n/%0A/g')"
           exit $rc
+
+  # Flashable recovery image: A510F boot shim + this kernel as the payload
+  # (ADT from a510f/tools/mkadt_a510f.py, boot-args). Only for a kernel that
+  # passed the instruction check.
+  boot-image:
+    needs: isa-check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: a510f-xnu-kernel
+          path: kernel
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc gcc-aarch64-linux-gnu device-tree-compiler \
+            libfdt-dev libssl-dev cpio
+
+      - name: Build shim + payload recovery image
+        run: |
+          set -o pipefail
+          f=$(ls kernel/kernel.* | grep -v -e '\.dSYM' -e SHA256 | head -1)
+          bash a510f/build.sh xnu "$f" 2>&1 | tee boot.log
+          echo "::notice title=boot image::$(grep -E 'recovery.img:|SWEETXNU|segs|entry|phys' boot.log | tail -8 | cut -c1-200 | sed ':a;N;$!ba;s/\n/%0A/g')%0A$(ls -l a510f/out/a510f-xnu-recovery.tar | awk '{print $5" bytes "$9}')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a510f-xnu-recovery
+          path: |
+            a510f/out/a510f-xnu-recovery.tar
+            a510f/out/shim/a510f.adt
+          if-no-files-found: error
