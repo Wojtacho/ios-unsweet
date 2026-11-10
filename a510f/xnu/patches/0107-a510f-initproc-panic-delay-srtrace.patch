@@ -1,8 +1,8 @@
 diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
-index fde499c..87a0754 100644
+index fde499c..51e5311 100644
 --- a/bsd/kern/kern_exit.c
 +++ b/bsd/kern/kern_exit.c
-@@ -1821,6 +1821,23 @@ proc_handle_critical_exit(proc_t p, int rv)
+@@ -1821,6 +1821,22 @@ proc_handle_critical_exit(proc_t p, int rv)
  
  	sync(p, (void *)NULL, (int *)NULL);
  
@@ -15,8 +15,7 @@ index fde499c..87a0754 100644
 +		uint32_t initpanicdelay = 0;
 +		if (PE_parse_boot_argn("initpanicdelay", &initpanicdelay, sizeof(initpanicdelay)) && initpanicdelay) {
 +			extern void delay(int usec);
-+			printf("SWEET: %s; panic in %u s
-+", prefix_str, initpanicdelay);
++			printf("SWEET: %s; panic in %u s\n", prefix_str, initpanicdelay);
 +			for (uint32_t sec = 0; sec < MIN(initpanicdelay, 600u); sec++) {
 +				delay(1000 * 1000);
 +			}
