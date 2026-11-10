@@ -387,6 +387,24 @@ longer boots afterwards; going back means flashing the stock firmware
 `mmcroot=SYSTEM..USERDATA`, so its write test also checks the range parsing
 (it still touches only the last sector of USERDATA and restores it).
 
+## 2026-11-10: eleventh boot: first eMMC write test (repack run 42852522133)
+
+Observed (photo): `range "SYSTEM..USERDATA": first LBA 507904, 14776 MiB`
+(correct), `write test LBA 30769151: read 0 write 0 verify FAILED restore OK
+flush 0`, `probe FAILED (5)`, then md0 root and PID 1 as before. LBA 30769151
+is the last sector of USERDATA (7184384 + 11516 MiB - 1): range code is right.
+
+The card took the write without a CRC/timeout error (DATA_OVER), but the data
+read back differed. "restore OK" proves little: the sector is probably all
+zeros, and zeros survive any FIFO mangling. Suspect: two 32-bit writes to the
+64-bit FIFO each push a whole entry (upper half zero), unlike reads.
+
+Next boot (same boot-args): the test prints the original sector, the pattern,
+then tries FIFO write mode 0 (2x32-bit) and mode 1 (one 64-bit store), each
+followed by CMD13 (R1 error bits) and a read-back with mismatch count, first
+bad offset, how many bytes still equal the old data, and the first 12 bytes.
+The working mode is kept for later writes.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.

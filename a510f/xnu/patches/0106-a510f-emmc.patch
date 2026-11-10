@@ -12,10 +12,10 @@ index 6630131..bf2377a 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
 new file mode 100644
-index 0000000..4de6b91
+index 0000000..d2ef747
 --- /dev/null
 +++ b/bsd/dev/sweet_mmc.c
-@@ -0,0 +1,917 @@
+@@ -0,0 +1,952 @@
 +/*
 + * A510F (Samsung Galaxy A5 2016, Exynos 7580) internal eMMC.
 + *
@@ -127,6 +127,7 @@ index 0000000..4de6b91
 +	vm_offset_t regs;
 +	uint32_t data_off;                      /* FIFO window */
 +	uint32_t fifo_bytes;                    /* FIFO entry width */
++	uint32_t fifo_wmode;                    /* 64-bit FIFO writes: 0 = 2x32-bit, 1 = 1x64-bit */
 +	bool host_ok;
 +	uint64_t first_lba, nsect;              /* partition, in 512-byte sectors */
 +	uint32_t secsize;                       /* logical sector size for the BSD layer */
@@ -337,11 +338,15 @@ index 0000000..4de6b91
 +	volatile uint8_t *fifo = (volatile uint8_t *)(sm.regs + sm.data_off);
 +	while (room-- && put < want) {
 +		if (sm.fifo_bytes == 8) {
-+			/* 32-bit SFR accesses only, as for reads */
 +			uint32_t v[2] = { 0, 0 };
 +			memcpy(v, src + put, MIN(8u, want - put));
-+			*(volatile uint32_t *)fifo = v[0];
-+			*(volatile uint32_t *)(fifo + 4) = v[1];
++			if (sm.fifo_wmode == 1) {
++				uint64_t q = (uint64_t)v[1] << 32 | v[0];
++				*(volatile uint64_t *)fifo = q;
++			} else {
++				*(volatile uint32_t *)fifo = v[0];
++				*(volatile uint32_t *)(fifo + 4) = v[1];
++			}
 +			put += 8;
 +		} else {
 +			uint32_t v = 0;
@@ -683,17 +688,47 @@ index 0000000..4de6b91
 +			}
 +			sm.writable = true;
 +			int r1 = mmc_read(lba, 1, orig);
-+			int w1 = r1 ? -1 : mmc_write(lba, 1, pat);
-+			int r2 = w1 ? -1 : mmc_read(lba, 1, back);
-+			bool same = !r2 && memcmp(pat, back, MMC_SECTOR) == 0;
++			unsigned nz = 0;
++			for (unsigned i = 0; i < MMC_SECTOR; i++) {
++				nz += orig[i] != 0;
++			}
++			printf("SWEET MMC: wtest LBA %llu read %d, %u non-zero bytes, %02x %02x %02x %02x %02x %02x %02x %02x\n",
++			    lba, r1, nz, orig[0], orig[1], orig[2], orig[3], orig[4], orig[5], orig[6], orig[7]);
++			printf("SWEET MMC: wtest pattern %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
++			    pat[0], pat[1], pat[2], pat[3], pat[4], pat[5], pat[6], pat[7], pat[8], pat[9], pat[10], pat[11]);
++			int good = -1;
++			for (uint32_t mode = 0; !r1 && mode < 2 && good < 0; mode++) {
++				sm.fifo_wmode = mode;
++				int w = mmc_write(lba, 1, pat);
++				uint32_t st = 0;
++				int c = mmc_cmd(13 | CMD_R1, 1u << 16, &st);
++				memset(back, 0xee, MMC_SECTOR);
++				int r = mmc_read(lba, 1, back);
++				unsigned bad = 0, first = MMC_SECTOR, eqorig = 0;
++				for (unsigned i = 0; i < MMC_SECTOR; i++) {
++					if (back[i] != pat[i]) {
++						bad++;
++						first = MIN(first, i);
++					}
++					eqorig += back[i] == orig[i];
++				}
++				printf("SWEET MMC: wtest mode %u write %d R1 0x%x(%d) read %d: %u bad from %u, %u = old\n",
++				    mode, w, st, c, r, bad, first, eqorig);
++				printf("SWEET MMC: wtest back %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
++				    back[0], back[1], back[2], back[3], back[4], back[5], back[6], back[7], back[8], back[9], back[10], back[11]);
++				if (!w && !r && bad == 0) {
++					good = (int)mode;
++				}
++			}
++			sm.fifo_wmode = good == 1 ? 1 : 0;
 +			int w2 = r1 ? -1 : mmc_write(lba, 1, orig);
 +			int r3 = w2 ? -1 : mmc_read(lba, 1, back);
 +			bool restored = !r3 && memcmp(orig, back, MMC_SECTOR) == 0;
 +			int fl = mmc_flush();
 +			sm.writable = false;
-+			printf("SWEET MMC: write test LBA %llu: read %d write %d verify %s restore %s flush %d\n",
-+			    lba, r1, w1, same ? "OK" : "FAILED", restored ? "OK" : "FAILED", fl);
-+			error = (same && restored) ? 0 : EIO;
++			printf("SWEET MMC: write test: FIFO write mode %d %s, restore %s, flush %d\n",
++			    good, good >= 0 ? "OK" : "FAILED", restored ? "OK" : "FAILED", fl);
++			error = (good >= 0 && restored) ? 0 : EIO;
 +			kfree_data(orig, MMC_SECTOR);
 +			kfree_data(pat, MMC_SECTOR);
 +			kfree_data(back, MMC_SECTOR);
