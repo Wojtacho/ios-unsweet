@@ -183,6 +183,27 @@ Fix (commit 270f478, patch 0102): allocate that L2 table with alloc_ptpage
 when the L1 entry is empty; clear the alias blocks when the early console is
 disabled after kprintf startup.
 
+## 2026-11-10: second boot (a510f-xnu run 42809529936, commit 270f478)
+
+Observed (photo): the early console ran through arm_vm_init and was
+replaced by the normal framebuffer console, i.e. stages 8-20 passed:
+`kprintf initialized`, `Serial mode specified: 00000003`,
+`initialize_screen: b=67000000, w=00000438, h=00000780, r=000010E0, d=0`,
+`pe_arm_init_interrupts`, `pe_arm_map_interrupt_controller: failed to find
+the interrupt-controller` (message only), `pe_arm_init_debug: failed to find
+cpu-debug-interface`, `SWEET GIC: virtual timer INTID 27`, then
+`panic(cpu 0 caller 0xfffffff007b19748): find_gicr_pe_base: cannot find GICR
+base for core 0 @pe_fiq.c:73` and nested panics ending in "Nested panic
+stall. Stage 2 bailout" (spins; screen stays on).
+
+Also observed: after this image ran, Vol Down + Power and the download-mode
+"cancel" restart both came back into recovery (our image), not Android. Way
+out used: download mode (Vol Down + Home + Power, then Vol Up), charging.
+
+Fix (commit bc2409f, patch 0103): GIC-400 (GICv2) through GICD/GICC MMIO
+(per-CPU init, IRQ ack/EOI, SGIs via GICD_SGIR) and power-off 60 s after a
+panic (PSCI SYSTEM_OFF, then PS_HOLD).
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
