@@ -448,6 +448,28 @@ BEGIN0=0 END0=~0 CTRL0=0x71 and try FIFO modes 0 and 1. Before each write
 the FIFO RAM is refilled with EXT_CSD (CMD8) and the read-back is compared
 with the pattern, the old sector and EXT_CSD (non-zero span, 8 bytes).
 
+## 2026-11-10: fourteenth boot: SMU open, stale FIFO data confirmed (run 42862687942)
+
+Observed: the test sector now reads `88 non-zero bytes` and equals EXT_CSD
+byte for byte (`512 =EXT_CSD`) on the first read of a fresh boot: the
+thirteenth boot's write really stored the FIFO RAM contents (EXT_CSD), not
+the CPU's pattern. SMU as left by S-Boot: `security 0xdfe2e492 begin0 0x0
+end0 0xffffffff ctrl0 0xf1` (all access allowed), so the SMU is not it;
+setting ctrl0 0x71 changed nothing. All three tries: `write 0 R1 0x900 int
+0x1c`, read back = EXT_CSD.
+
+So: the controller sends 512 bytes from FIFO RAM without HTO, but CPU
+writes to DATA (0x200, 2x32 or 1x64) never land there. Our writes pre-fill
+the FIFO before CMD24; Linux sends the command first and pushes data on
+TXDR.
+
+Next boot: FIFO loopback (reset, write 16 bytes, STATUS/FCNT before/after,
+four raw 32-bit reads) for both write modes; then writes in Linux order
+(command, then data as the FIFO drains) 2x32 and 64-bit, and prefill as the
+control. The GPT header (LBA 1) is left in FIFO RAM before each write as the
+stale marker; read-back is compared with pattern, EXT_CSD (old) and GPT.
+The sector is then written back to zeros (its original content).
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
