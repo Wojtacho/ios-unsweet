@@ -2,7 +2,9 @@
 # Build a Samsung recovery image for the SM-A510F plus an Odin tar.
 #
 #   build.sh                        the feasibility probe
-#   build.sh xnu KERNEL [CMDLINE]   boot shim + xnu payload (ADT, boot-args)
+#   build.sh xnu KERNEL [CMDLINE [ROOTFS]]
+#                                   boot shim + xnu payload (ADT, boot-args);
+#                                   ROOTFS becomes the md0 RAM disk (rd=md0)
 #
 # Needs (Ubuntu): gcc gcc-aarch64-linux-gnu device-tree-compiler libfdt-dev
 #                 libssl-dev cpio git python3
@@ -12,6 +14,7 @@ MODE=${1:-probe}
 if [ "$MODE" = xnu ]; then
 	KERNEL=$(realpath "$2")
 	CMDLINE=${3:-debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam}
+	ROOTFS=${4:+$(realpath "$4")}
 fi
 cd "$(dirname "$0")"
 
@@ -87,7 +90,7 @@ if [ "$MODE" = xnu ]; then
 	# ADT, boot-args (tools/mkpayload.py from sweet).
 	python3 tools/mkadt_a510f.py "$OUT/shim/a510f.adt"
 	python3 ../tools/mkpayload.py "$KERNEL" "$OUT/shim/a510f.adt" "$OUT/shim/ramdisk.bin" \
-		--cmdline "$CMDLINE"
+		--cmdline "$CMDLINE" ${ROOTFS:+--ramdisk "$ROOTFS"}
 	RAMDISK="$OUT/shim/ramdisk.bin"
 	TAR=a510f-xnu-recovery.tar
 else

@@ -12,6 +12,9 @@ on:
       - "a510f/boot-args.txt"
       - "a510f/tools/mkadt_a510f.py"
       - "a510f/shim/**"
+      - "a510f/build.sh"
+      - "tools/sweet-init.S"
+      - "tools/mkinit.py"
       - ".github/workflows/a510f-repack.yml"
 
 permissions:
@@ -48,12 +51,23 @@ jobs:
           sudo apt-get install -y -q gcc gcc-aarch64-linux-gnu device-tree-compiler \
             libfdt-dev libssl-dev cpio
 
+      - name: Build the RAM-disk root (sweet's test init) if rd=md0
+        run: |
+          if grep -qw 'rd=md0' a510f/boot-args.txt; then
+            sudo apt-get install -y -q clang > /dev/null
+            # static PID 1: prints to /dev/console, heartbeat every 5 s (tools/sweet-init.S)
+            clang -target arm64-apple-ios16.0 -c tools/sweet-init.S -o init.o
+            python3 tools/mkinit.py init.o rootfs.bin
+            ls -l rootfs.bin
+          fi
+
       - name: Build recovery image
         run: |
           set -o pipefail
           f=$(ls kernel/kernel.* | grep -v -e '\.dSYM' -e SHA256 | head -1)
-          bash a510f/build.sh xnu "$f" "$(head -1 a510f/boot-args.txt)" 2>&1 | tee boot.log
-          echo "::notice title=repacked::kernel from a510f-xnu run ${{ steps.src.outputs.run_id }}%0Aboot-args: $(head -1 a510f/boot-args.txt)%0A$(grep 'recovery.img:' boot.log | cut -c1-200)%0A$(ls -l a510f/out/a510f-xnu-recovery.tar | awk '{print $5" bytes"}')"
+          root=""; [ -f rootfs.bin ] && root=rootfs.bin
+          bash a510f/build.sh xnu "$f" "$(head -1 a510f/boot-args.txt)" $root 2>&1 | tee boot.log
+          echo "::notice title=repacked::kernel from a510f-xnu run ${{ steps.src.outputs.run_id }}%0Aboot-args: $(head -1 a510f/boot-args.txt)%0Aramdisk root: ${root:-none}%0A$(grep 'recovery.img:' boot.log | cut -c1-200)%0A$(ls -l a510f/out/a510f-xnu-recovery.tar | awk '{print $5" bytes"}')"
 
       - uses: actions/upload-artifact@v4
         with:
