@@ -44,6 +44,8 @@ jobs:
           git -C dxb checkout -q FETCH_HEAD
           cp xnu/patches/*.patch xnu/patches/*.sh dxb/patches/
           bash a510f/xnu/make-a510f-variant.sh dxb/patches
+          # A510F-only patches, numbered after sweet's
+          cp a510f/xnu/patches/*.patch dxb/patches/
           sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
           grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
 
