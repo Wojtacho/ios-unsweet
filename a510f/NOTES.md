@@ -337,6 +337,27 @@ checks, HTO non-fatal while data flows, failure trace, LBA 1 bytes printed.
 Fallback if PIO keeps failing: the IDMAC (64-bit descriptors of 32 words on
 this SoC, FMP fields; DBADDRL 0x88/DBADDRU 0x8c/IDSTS 0x90/IDINTEN 0x94).
 
+## 2026-11-10: tenth boot: eMMC reads work (a510f-xnu run 42843267443, commit cc1142b)
+
+Observed (photo): same host registers as the ninth boot, `CMD13 ok`, then
+`SWEET MMC: LBA 1: 45 46 49 20 50 41 52 54` ("EFI PART"), `GPT: 128 entries at
+LBA 2, disk 15028 MiB`, partitions (name start-LBA+MiB): BOTA0 8192+4,
+BOTA1 16384+4, EFS 24576+20, CPEFS 65536+8, m9kefs1 81920+4, m9kefs2
+90112+4, m9kefs3 98304+4, CARRIER 106496+1, PARAM 108544+8, BOOT 124928+32,
+RECOVERY 190464+38, OTA 268288+8, CDMA-RADIO 284672+4, RADIO 292864+88,
+TOMBSTONES 473088+1, DNT 475136+1, PERSISTENT 477184+0, PERSDATA 478208+12,
+RESERVED2 502784+2, SYSTEM 507904+3000, CACHE 6651904+200, HIDDEN
+7061504+60, USERDATA 7184384+11516. `probe done (0)`, then md0 root and the
+PID 1 heartbeat as before.
+
+**Milestone: polled-PIO eMMC reads work** (two 32-bit FIFO reads per 64-bit
+entry). Never touch BOTA*, EFS, CPEFS, m9kefs*, CARRIER, PARAM, RADIO,
+PERSISTENT/PERSDATA (IMEI, modem, bootloader state).
+
+Next: iOS root candidate is USERDATA (11.5 GB, erases Android data; SYSTEM
+is only 3 GB). Needed: eMMC writes (rootrw), a root image that fits, a way
+to write it to the phone, and more RAM for iOS.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
