@@ -241,6 +241,27 @@ cpu_timebase_init and published in the commpage), so mach time starts near 0.
 The decrementer uses CNTV_TVAL (relative), so the offset does not affect
 timer programming.
 
+## 2026-11-10: fifth boot (a510f-xnu run 42828923119, commit ccc5716): no panic, IOKit up
+
+Observed (two photos): zone_init with all submaps (VM/RO/GEN0-3 3686M each,
+DATA 4914M, metadata 96M), `VM bootstrap done: 61 maps, 112 entries and 117
+holes left`, `IOKit IOMD setownership ENABLED`, ATM, log queues, Firehose,
+OSLog, `Telemetry: Sampling all tasks once per 1 second`, `Scheduler: Default
+of clutch`, timeslicing quantum 10000 us, mig/BANK/IPC_PTHREAD_PRIORITY,
+panic_trace, kdp_core, `Initializing serial KDP`, `iBoot version: sweet-shim`,
+`ulock_initialize: thread_max=2560`, SWEET PRNG (HMAC-SHA256), SWEET pthread
+(libpthread-514.100.2), SWEET AMFI (built-in, XML entitlements), vnguard
+policy, `SWEET: trust caches unavailable`, keepsyms, `SWEET: starting
+device-tree platform expert` / `platform expert registered`, `SWEET FB:
+AppleCLCD 1080x1920 stride 4320 at 0x67000000, default surface 1, presented
+as 1125x2436`, SWEET AKS, WDT, SURF (IOCoreSurfaceRoot), HID buttons, HID
+touch, `SWEET BATTERY: static fallback, 100% 4200mV`. A boot progress bar is
+drawn mid-screen. No panic seen (so no auto power-off).
+
+Reading: the GICv2 timer interrupt and the rebased timebase work (the
+scheduler and 1 s telemetry run). Expected next: waiting for the root
+device (no storage driver for the eMMC, no iOS root on the phone yet).
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
