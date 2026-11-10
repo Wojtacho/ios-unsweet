@@ -158,6 +158,31 @@ Lessons (observed, with run ids in git log):
 - Run logs need a GitHub login; workflows publish errors as annotations,
   readable via the check-runs API or the run page.
 
+## 2026-11-10: first xnu boot on the A510F (a510f-xnu run 42807157271, commit ab07160)
+
+Image: `a510f-xnu-recovery.tar` (shim 77,824 B + SWEETXNU payload
+16,493,360 B), flashed to RECOVERY with Odin, booted straight from download
+mode into recovery. Kernel cmdline `debug=0xc serial=3 cpus=1 keepsyms=1
+-enable_kprintf_spam`.
+
+Observed (photo):
+- Shim red screen: payload found, `VIRT FFFFFFF006000000`, `ENTRY
+  FFFFFFF007428488`, `SEGS n=0A end=724AC000`, `BOOTARG pa=724B0000
+  top=724B4000`, `JUMP 71428488`. The DECON/CPU1 lines had scrolled away.
+- Stage-0 white band, then green stage bands: xnu's first instruction ran.
+- `SWEET EARLY 1` .. `7`: arm_init with the 4K MMU on, PE_init_platform
+  (ADT), ml_parse_cpu_topology (8 A53 MPIDRs), cpu_bootstrap,
+  kernel_startup_bootstrap, cpu_init, entering arm_vm_init.
+- The display kept updating after the jump: the CPU1 DECON refresher works.
+- `SWEET EARLY PANIC: arm_vm_init.c:1843 Assertion failed: (l1 &
+  (ARM_TTE_VALID | ARM_TTE_TYPE_MASK)) == (ARM_TTE_VALID |
+  ARM_TTE_TYPE_TABLE)` in sweet_early_map_final: without ARM_LARGE_MEMORY
+  no L2 table exists at VM_MIN_KERNEL_ADDRESS for the early-console alias.
+
+Fix (commit 270f478, patch 0102): allocate that L2 table with alloc_ptpage
+when the L1 entry is empty; clear the alias blocks when the early console is
+disabled after kprintf startup.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
