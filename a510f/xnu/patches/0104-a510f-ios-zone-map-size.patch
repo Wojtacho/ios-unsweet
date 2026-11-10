@@ -17,23 +17,21 @@ index 182b44a..e8ba722 100644
  #define ZONE_MAP_VA_SIZE        (128ULL << 30)
  #else /* XNU_PLATFORM_MacOSX */
 diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
-index 54edb01..8f5fc62 100644
+index 54edb01..ed63628 100644
 --- a/osfmk/vm/vm_kern.c
 +++ b/osfmk/vm/vm_kern.c
-@@ -3641,6 +3641,18 @@ kmem_scramble_ranges(void)
+@@ -3641,6 +3641,16 @@ kmem_scramble_ranges(void)
  		struct mach_vm_range *sp_range = sp.kc_range;
  		if (vm_map_locate_space(kernel_map, sp.kc_size, 0,
  		    VM_MAP_KERNEL_FLAGS_ANYWHERE(), &start, NULL) != KERN_SUCCESS) {
 +			/* A510F: show what did not fit before panicking. */
 +			vm_map_size_t largest = 0;
 +			vm_map_sizes(kernel_map, NULL, NULL, &largest);
-+			printf("kmem_range_init: claim %u/%u %s size 0x%llx at 0x%llx, largest free 0x%llx
-+",
++			printf("kmem_range_init: claim %u/%u %s size 0x%llx at 0x%llx, largest free 0x%llx\n",
 +			    i, kmem_claim_count, sp.kc_name, (unsigned long long)sp.kc_size,
 +			    (unsigned long long)start, (unsigned long long)largest);
 +			for (uint32_t j = 0; j < kmem_claim_count; j++) {
-+				printf("  claim %-24s 0x%llx
-+", kmem_claims[j].kc_name,
++				printf("  claim %-24s 0x%llx\n", kmem_claims[j].kc_name,
 +				    (unsigned long long)kmem_claims[j].kc_size);
 +			}
  			panic("kmem_range_init: vm_map_locate_space failing for claim %s",
