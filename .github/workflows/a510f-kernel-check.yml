@@ -9,7 +9,7 @@ on:
     inputs:
       run_id:
         description: a510f-xnu run whose a510f-xnu-kernel artifact to check
-        default: "42792829063"
+        default: "42798747388"
   push:
     branches: [a510f]
     paths:
@@ -29,7 +29,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: a510f-xnu-kernel
-          run-id: ${{ inputs.run_id || '42792829063' }}
+          run-id: ${{ inputs.run_id || '42798747388' }}
           github-token: ${{ github.token }}
           path: kernel
 
