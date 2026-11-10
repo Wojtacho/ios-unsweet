@@ -12,10 +12,10 @@ index 6630131..bf2377a 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
 new file mode 100644
-index 0000000..e36fa74
+index 0000000..f292254
 --- /dev/null
 +++ b/bsd/dev/sweet_mmc.c
-@@ -0,0 +1,650 @@
+@@ -0,0 +1,683 @@
 +/*
 + * A510F (Samsung Galaxy A5 2016, Exynos 7580) internal eMMC, read-only.
 + *
@@ -211,8 +211,16 @@ index 0000000..e36fa74
 +	volatile uint8_t *fifo = (volatile uint8_t *)(sm.regs + sm.data_off);
 +	while (n-- && got < want) {
 +		if (sm.fifo_bytes == 8) {
-+			uint64_t v = *(volatile uint64_t *)fifo;
-+			memcpy(dst + got, &v, MIN(8u, want - got));
++			/*
++			 * Exynos 7580: 32-bit SFR accesses only, also for the 64-bit
++			 * FIFO (Samsung's CONFIG_MMC_DW_FORCE_32BIT_SFR_RW mci_readq:
++			 * low word at DATA, high word at DATA + 4). A 64-bit load
++			 * did not pop the FIFO: the first read ended in HTO.
++			 */
++			uint32_t v[2];
++			v[0] = *(volatile uint32_t *)fifo;
++			v[1] = *(volatile uint32_t *)(fifo + 4);
++			memcpy(dst + got, v, MIN(8u, want - got));
 +			got += 8;
 +		} else {
 +			uint32_t v = *(volatile uint32_t *)fifo;
@@ -253,15 +261,36 @@ index 0000000..e36fa74
 +
 +	uint32_t total = nblk * MMC_SECTOR, got = 0, seen = 0;
 +	uint64_t end = deadline_after(DATA_TIMEOUT_NS);
++	/* First few (rintsts, status, bytes) samples, printed if the read fails. */
++	uint32_t trace[8][3];
++	unsigned ntrace = 0;
 +	for (;;) {
 +		uint32_t s = mmc_rd(MMC_RINTSTS);
 +		seen |= s;
++		/* Empty the FIFO first: a full FIFO with no reader raises HTO. */
++		uint32_t before = got;
++		got += mmc_drain(dst + got, total - got);
++		if (ntrace < 8 && (got != before || s)) {
++			trace[ntrace][0] = s;
++			trace[ntrace][1] = mmc_rd(MMC_STATUS);
++			trace[ntrace][2] = got;
++			ntrace++;
++		}
++		/* HTO only means "the FIFO filled up": not fatal while data flows. */
++		if ((s & INT_HTO) && got != before) {
++			mmc_wr(MMC_RINTSTS, INT_HTO);
++			s &= ~INT_HTO;
++		}
 +		if (s & (INT_CMD_ERR | INT_DATA_ERR)) {
-+			printf("SWEET MMC: read lba %llu x%u failed, rintsts 0x%x\n", lba, nblk, s);
++			printf("SWEET MMC: read lba %llu x%u failed, rintsts 0x%x, %u/%u bytes\n",
++			    lba, nblk, s, got, total);
++			for (unsigned i = 0; i < ntrace; i++) {
++				printf("SWEET MMC:   rintsts 0x%x status 0x%x bytes %u\n",
++				    trace[i][0], trace[i][1], trace[i][2]);
++			}
 +			mmc_abort();
 +			return EIO;
 +		}
-+		got += mmc_drain(dst + got, total - got);
 +		if (s & INT_RXDR) {
 +			mmc_wr(MMC_RINTSTS, INT_RXDR);
 +		}
@@ -359,6 +388,10 @@ index 0000000..e36fa74
 +	int error = mmc_read(1, 1, b);
 +	if (error) {
 +		goto out;
++	}
++	if (want == NULL) {
++		printf("SWEET MMC: LBA 1: %02x %02x %02x %02x %02x %02x %02x %02x (\"EFI PART\" = 45 46 49 20 50 41 52 54)\n",
++		    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
 +	}
 +	if (memcmp(b, "EFI PART", 8) != 0) {
 +		printf("SWEET MMC: no GPT at LBA 1 (%02x %02x %02x %02x)\n", b[0], b[1], b[2], b[3]);
