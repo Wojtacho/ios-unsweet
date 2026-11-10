@@ -529,6 +529,29 @@ SYSTEM 91f2bc0e..., CACHE 3537d735..., HIDDEN 614939a2..., USERDATA
 b8693563... Android is gone; RECOVERY holds TWRP 3.2.3 until the kernel tar
 is flashed back.
 
+## 2026-11-10: sixteenth boot: first boot of the iOS root (repack 42877251282)
+
+Observed: `SWEET MMC: "SYSTEM..USERDATA": first LBA 507904, 14776 MiB,
+read-write`, `BSD root: mmcroot0`, `hfs: Initializing the journal`, `hfs:
+iOSRoot: hfs_recording_init: creating the hotfile btree`, SWEET AMFI /
+Sandbox / HFS registered, networking up, then panic: `initproc failed to
+start -- exit reason namespace 6 subcode 0x1 description: Library not
+loaded: /usr/lib/libSystem.B.dylib Referenced from: <5C15DB07-...>
+/sbin/launchd Reason: tried: '/usr/lib/libSystem.B.dylib' (no such file, no
+dyld cache), '/usr/local/lib/libSystem.B.dylib' (no such file)`.
+
+**Milestone: the real launchd runs as PID 1 from the eMMC root** (dyld
+loaded it), but dyld has no shared cache. The image is right (checked from
+the rebuilt root.img with E:\Claude	wrp-write\hfsls.py):
+/System/Library/Caches/com.apple.dyld holds dyld_shared_cache_arm64 and
+.01-.42 (+ .symbols) as hard links into the OS cryptex, as on sweet.
+Prime suspect: 4K pages (sweet's kernel is 16K; the cache is laid out for
+16K). The kernel's shared-region error lines scroll away before the panic.
+
+0107: boot-arg initpanicdelay=SECONDS (print, then wait before the initproc
+panic) and srtrace=N (shared_region_trace_level as a tunable; 2 = info).
+Next boot: initpanicdelay=600 srtrace=2.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.

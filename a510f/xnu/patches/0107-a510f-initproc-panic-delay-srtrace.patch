@@ -1,0 +1,42 @@
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+index fde499c..87a0754 100644
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1821,6 +1821,23 @@ proc_handle_critical_exit(proc_t p, int rv)
+ 
+ 	sync(p, (void *)NULL, (int *)NULL);
+ 
++	/*
++	 * A510F: the panic screen pushes the last console lines (dyld/shared
++	 * region errors) off the framebuffer. boot-arg initpanicdelay=SECONDS
++	 * keeps them on screen before panicking.
++	 */
++	{
++		uint32_t initpanicdelay = 0;
++		if (PE_parse_boot_argn("initpanicdelay", &initpanicdelay, sizeof(initpanicdelay)) && initpanicdelay) {
++			extern void delay(int usec);
++			printf("SWEET: %s; panic in %u s
++", prefix_str, initpanicdelay);
++			for (uint32_t sec = 0; sec < MIN(initpanicdelay, 600u); sec++) {
++				delay(1000 * 1000);
++			}
++		}
++	}
++
+ 	if (p->p_exit_reason == OS_REASON_NULL) {
+ 		panic_with_options(0, NULL, DEBUGGER_OPTION_INITPROC_PANIC, "%s -- no exit reason available -- (signal %d, exit status %d %s)",
+ 		    prefix_str, WTERMSIG(rv), WEXITSTATUS(rv), ((proc_getcsflags(p) & CS_KILLED) ? "CS_KILLED" : ""));
+diff --git a/osfmk/vm/vm_shared_region.c b/osfmk/vm/vm_shared_region.c
+index db1d613..a91fd38 100644
+--- a/osfmk/vm/vm_shared_region.c
++++ b/osfmk/vm/vm_shared_region.c
+@@ -137,7 +137,8 @@
+ int shared_region_version = 3;
+ 
+ /* trace level, output is sent to the system log file */
+-int shared_region_trace_level = SHARED_REGION_TRACE_ERROR_LVL;
++/* A510F: boot-arg srtrace=2 traces every shared region call (dyld cache mapping) */
++TUNABLE_WRITEABLE(int, shared_region_trace_level, "srtrace", SHARED_REGION_TRACE_ERROR_LVL);
+ 
+ /* should local (non-chroot) shared regions persist when no task uses them ? */
+ int shared_region_persistence = 0;      /* no by default */
