@@ -691,6 +691,26 @@ without stop, read 1 with stop), then the batcher, printing hs INT/TRANS/
 FIFO status after every message; LDO33 is written through whichever path
 returns a sane ID and a 3.3 V-selected L33CTRL.
 
+**Touch boots 3 and 4 (2026-11-11), both froze the phone.**
+- touch3 (plain mode): HSI2C3 TRANS_STATUS 0x2000c, TX FIFO kept the byte
+  (fifo 0x1000001), `plain PMIC id 5 0xee`; the batcher step after it never
+  printed and the whole phone froze.
+- touch4 (HSI2C SW_RST keeping S-Boot timing, then plain, then batcher):
+  saved conf 0x9803c1ff fs1 0xf0f0f00 fs2 0xf0ffffff fs3 0xff00ff sla 0xff;
+  after reset ctl 0x9 but trans still 0x2000c, fifo 0x1000100; plain gave
+  "bus not idle" (EBUSY); after "trying the batcher" + reset the phone froze.
+- Samsung's kernel (ref/k7580): hsi2c@104c0000 has `samsung,hsi2c-batcher`,
+  HS mode 2.5 MHz, a second reg at 0x104b0180 (mailbox), pins gpm0-0 SDA /
+  gpm0-1 SCL (pinctrl 0x104E0000), pclk_hsi2c3 = CMU_MIF 0x10430900 bit 27.
+  The bus is shared with the APM (Cortex-M3) behind a hardware semaphore
+  (HSI2C_SMRelease 0x200) that the batcher takes. Conclusion (guess, fits
+  both freezes): never touch the HSI2C registers directly.
+- touch5 (commit de5330e): batcher only, read-only dump of pclk/gpm0/batcher
+  state first, batcher state trace + payload per message. Its first CI run
+  failed in the ISA check on an Ubuntu apt mirror error (exit 100), the
+  rerun (6ad6487) hung on apt; the workflow now takes numpy from PyPI and
+  puts timeouts/retries on apt.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.

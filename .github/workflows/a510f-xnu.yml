@@ -140,7 +140,9 @@ jobs:
 
       - name: Check the kernel for instructions the A53 lacks
         run: |
-          for i in 1 2 3; do sudo apt-get install -y -q python3-numpy > /dev/null && break; sudo apt-get update -q > /dev/null; sleep 10; done
+          # numpy from PyPI first (the Ubuntu mirror hung for 20 min on 2026-11-11)
+          timeout 300 pip3 install -q --break-system-packages numpy || \
+            timeout 600 sudo apt-get install -y -q -o Acquire::Retries=3 -o Acquire::http::Timeout=20 python3-numpy > /dev/null
           python3 -c 'import numpy'
           f=$(ls kernel/kernel.* 2>/dev/null | grep -v -e '\.dSYM' -e SHA256 | head -1 || true)
           [ -n "$f" ] || { echo "::error title=kernel ISA check::no kernel was built"; exit 1; }
@@ -167,8 +169,9 @@ jobs:
 
       - name: Install toolchain
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc gcc-aarch64-linux-gnu device-tree-compiler \
+          A='-o Acquire::Retries=3 -o Acquire::http::Timeout=20'
+          timeout 600 sudo apt-get update -q $A
+          timeout 900 sudo apt-get install -y -q $A gcc gcc-aarch64-linux-gnu device-tree-compiler \
             libfdt-dev libssl-dev cpio
 
       # Same image as a510f-repack: boot-args from a510f/boot-args.txt and,
