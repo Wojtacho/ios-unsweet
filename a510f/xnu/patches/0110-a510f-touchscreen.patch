@@ -1,0 +1,583 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index bf2377a..3bca1e5 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -106,6 +106,7 @@ bsd/dev/random/randomdev.c		standard
+ bsd/dev/memdev.c			standard
+ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_mmc.c			standard
++bsd/dev/a510f_touch.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
+new file mode 100644
+index 0000000..29560b5
+--- /dev/null
++++ b/bsd/dev/a510f_touch.c
+@@ -0,0 +1,551 @@
++/*
++ * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
++ * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
++ * gpc3-0/1), attention line gpa1-1 (low = data ready). Its 3.3 V supply is
++ * LDO33 of the S2MPU03 PMIC (register 0x4E), reached through the HSI2C3
++ * "batcher" at 0x104C0000 (sequence as in Samsung's i2c-exynos5.c).
++ *
++ * boot-arg a510ftouch:
++ *   0  off (default)
++ *   1  probe: set up I2C2 pins/clock, read the PMIC ID and LDO33 control,
++ *      try the touch chip; print everything; no PMIC writes
++ *   2  full: as 1, then switch LDO33 on (3.3 V) if it is off and the PMIC
++ *      reads looked sane, power up the chip, poll it and report fingers to
++ *      SweetHIDTouch (sweet_hid_touch, panel pixels).
++ *
++ * Everything runs on one kernel thread with polled I/O.
++ */
++#include <pexpert/arm64/board_config.h>
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++extern void IOSleep(unsigned int milliseconds);
++extern void delay(int usec);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++void a510f_touch_start(void);
++
++/* ---- addresses ------------------------------------------------------------ */
++#define CMU_PERI_PA     0x139F0000u
++#define EN_PCLK_PERIC   0x0904u         /* bit 9: pclk_i2c2 */
++#define I2C2_PA         0x13850000u
++#define PIN_NFC_PA      0x138C0000u     /* gpc3 at +0x000 */
++#define PIN_ALIVE_PA    0x139B0000u     /* gpa1 at +0x020 */
++#define HSI2C3_PA       0x104C0000u
++
++#define TS_ADDR         0x20
++#define PMIC_ADDR       0x66
++#define PMIC_REG_ID     0x00
++#define PMIC_REG_L33    0x4E
++#define PMIC_L33_ON     0xFC            /* [7:6]=11 on, 0x3C = 1.8 V + 60 x 25 mV = 3.3 V */
++
++/* s3c2410 I2C */
++#define IICCON          0x00
++#define IICSTAT         0x04
++#define IICADD          0x08
++#define IICDS           0x0C
++#define IICLC           0x10
++#define CON_ACKEN       (1u << 7)
++#define CON_IRQEN       (1u << 5)
++#define CON_PEND        (1u << 4)
++#define CON_DIV         15u             /* 66 MHz / 16 / 16 = 258 kHz */
++#define STAT_MTX        (3u << 6)
++#define STAT_MRX        (2u << 6)
++#define STAT_START      (1u << 5)       /* write: start, read: bus busy */
++#define STAT_TXRXEN     (1u << 4)
++#define STAT_ARB        (1u << 3)
++#define STAT_NACK       (1u << 0)
++
++/* HSI2C + batcher (i2c-exynos5.c) */
++#define HS_CTL          0x00
++#define HS_FIFO_CTL     0x04
++#define HS_TRAILIG_CTL  0x08
++#define HS_INT_ENABLE   0x20
++#define HS_TX_DATA      0x34
++#define HS_RX_DATA      0x38
++#define HS_CONF         0x40
++#define HS_AUTO_CONF    0x44
++#define HS_TIMEOUT      0x48
++#define HS_TIMING_HS1   0x54
++#define HS_TIMING_HS2   0x58
++#define HS_TIMING_HS3   0x5C
++#define HS_TIMING_FS1   0x60
++#define HS_TIMING_FS2   0x64
++#define HS_TIMING_FS3   0x68
++#define HS_TIMING_SLA   0x6C
++#define HS_ADDR         0x70
++#define BAT_CON         0x500
++#define BAT_STATE       0x504
++#define BAT_INT_EN      0x508
++#define BAT_FIFO_STATUS 0x50C
++#define BAT_INT_STATUS  0x510
++#define BAT_OPCODE      0x600
++#define BAT_PAYLOAD     0x1000
++#define BAT_PAYLOAD_END 0x1060
++#define BAT_ENABLE      (1u << 0)
++#define BAT_DEDICATE    (1u << 1)
++#define BAT_START       (1u << 4)
++#define BAT_COMPLETE    (1u << 0)
++#define BAT_UNEXPECTED  (1u << 1)
++
++/* BT532 / ZT7538 */
++#define ZT_SWRESET      0x0000
++#define ZT_CLEAR_INT    0x0003
++#define ZT_TOUCH_MODE   0x0010
++#define ZT_FW_VERSION   0x0012
++#define ZT_VENDOR_ID    0x001C
++#define ZT_POINT_STATUS 0x0080
++#define ZT_INT_MASK     0x00F0
++#define ZT_FINGERS      5
++#define ZT_STATUS_EXIST (1u << 11)
++#define ZT_SUB_EXIST    (1u << 0)
++#define ZT_SUB_DOWN     (1u << 1)
++#define ZT_SUB_MOVE     (1u << 2)
++#define ZT_SUB_UP       (1u << 3)
++
++/* Panel 1080x1920 shows the centre of the 1125x2436 frame (y offset 258);
++ * SweetHIDTouch adds (2436 - 2400) / 2 = 18, so add the other 240 here. */
++#define TOUCH_Y_ADJUST  240
++
++static struct {
++	vm_offset_t cmu, i2c, pin_nfc, pin_alive, hs;
++	int mode;
++	bool down[ZT_FINGERS];
++	unsigned cmd_index, cmd_pointer, desc_pointer;
++	uint32_t cmd_buffer;
++} t;
++
++static inline uint32_t
++rd(vm_offset_t b, uint32_t o)
++{
++	uint32_t v = *(volatile uint32_t *)(b + o);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline void
++wr(vm_offset_t b, uint32_t o, uint32_t v)
++{
++	__asm__ volatile ("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(b + o) = v;
++}
++
++/* ---- I2C2 (s3c2410) ------------------------------------------------------- */
++static bool
++i2c_wait_pend(void)
++{
++	for (int i = 0; i < 20000; i++) {          /* ~20 ms */
++		if (rd(t.i2c, IICCON) & CON_PEND) {
++			return true;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++static void
++i2c_clear_pend(bool ack)
++{
++	uint32_t con = (rd(t.i2c, IICCON) & ~(CON_PEND | CON_ACKEN)) | (ack ? CON_ACKEN : 0);
++	wr(t.i2c, IICCON, con);
++}
++
++static void
++i2c_stop(uint32_t mode)
++{
++	wr(t.i2c, IICSTAT, mode | STAT_TXRXEN);
++	i2c_clear_pend(true);
++	for (int i = 0; i < 2000 && (rd(t.i2c, IICSTAT) & STAT_START); i++) {
++		delay(1);
++	}
++}
++
++/* Write len bytes to addr. 0 ok, else EIO/ETIMEDOUT/ENXIO (no ACK). */
++static int
++i2c_write(uint8_t addr, const uint8_t *buf, unsigned len)
++{
++	wr(t.i2c, IICCON, CON_ACKEN | CON_IRQEN | CON_DIV);
++	wr(t.i2c, IICSTAT, STAT_MTX | STAT_TXRXEN);
++	wr(t.i2c, IICDS, (uint32_t)addr << 1);
++	wr(t.i2c, IICSTAT, STAT_MTX | STAT_START | STAT_TXRXEN);
++	if (!i2c_wait_pend()) {
++		i2c_stop(STAT_MTX);
++		return ETIMEDOUT;
++	}
++	if (rd(t.i2c, IICSTAT) & STAT_NACK) {
++		i2c_stop(STAT_MTX);
++		return ENXIO;
++	}
++	for (unsigned i = 0; i < len; i++) {
++		wr(t.i2c, IICDS, buf[i]);
++		delay(1);
++		i2c_clear_pend(true);
++		if (!i2c_wait_pend()) {
++			i2c_stop(STAT_MTX);
++			return ETIMEDOUT;
++		}
++		if (rd(t.i2c, IICSTAT) & STAT_NACK) {
++			i2c_stop(STAT_MTX);
++			return EIO;
++		}
++	}
++	i2c_stop(STAT_MTX);
++	return 0;
++}
++
++static int
++i2c_read(uint8_t addr, uint8_t *buf, unsigned len)
++{
++	wr(t.i2c, IICCON, CON_ACKEN | CON_IRQEN | CON_DIV);
++	wr(t.i2c, IICSTAT, STAT_MRX | STAT_TXRXEN);
++	wr(t.i2c, IICDS, ((uint32_t)addr << 1) | 1);
++	wr(t.i2c, IICSTAT, STAT_MRX | STAT_START | STAT_TXRXEN);
++	if (!i2c_wait_pend()) {
++		i2c_stop(STAT_MRX);
++		return ETIMEDOUT;
++	}
++	if (rd(t.i2c, IICSTAT) & STAT_NACK) {
++		i2c_stop(STAT_MRX);
++		return ENXIO;
++	}
++	for (unsigned i = 0; i < len; i++) {
++		i2c_clear_pend(i + 1 < len);            /* NACK the last byte */
++		if (!i2c_wait_pend()) {
++			i2c_stop(STAT_MRX);
++			return ETIMEDOUT;
++		}
++		buf[i] = (uint8_t)rd(t.i2c, IICDS);
++	}
++	i2c_stop(STAT_MRX);
++	return 0;
++}
++
++/* BT532 register access: 16-bit little-endian register numbers. */
++static int
++zt_read(uint16_t reg, void *buf, unsigned len)
++{
++	uint8_t r[2] = { (uint8_t)reg, (uint8_t)(reg >> 8) };
++	int e = i2c_write(TS_ADDR, r, 2);
++	if (e) {
++		return e;
++	}
++	delay(50);
++	e = i2c_read(TS_ADDR, buf, len);
++	delay(10);
++	return e;
++}
++
++static int
++zt_cmd(uint16_t reg)
++{
++	uint8_t r[2] = { (uint8_t)reg, (uint8_t)(reg >> 8) };
++	int e = i2c_write(TS_ADDR, r, 2);
++	delay(10);
++	return e;
++}
++
++static int
++zt_write(uint16_t reg, uint16_t val)
++{
++	uint8_t r[4] = { (uint8_t)reg, (uint8_t)(reg >> 8), (uint8_t)val, (uint8_t)(val >> 8) };
++	int e = i2c_write(TS_ADDR, r, 4);
++	delay(10);
++	return e;
++}
++
++/* ---- HSI2C3 batcher (PMIC) ------------------------------------------------ */
++static void
++bat_op(uint32_t value, uint32_t reg)
++{
++	if (BAT_PAYLOAD + t.desc_pointer * 4 >= BAT_PAYLOAD_END) {
++		printf("A510F TOUCH: batcher payload full\n");
++		return;
++	}
++	t.cmd_buffer &= ~(0xffu << (8 * t.cmd_index));
++	t.cmd_buffer |= (reg & 0xffu) << (8 * t.cmd_index);
++	wr(t.hs, BAT_OPCODE + t.cmd_pointer * 4, t.cmd_buffer);
++	wr(t.hs, BAT_PAYLOAD + t.desc_pointer++ * 4, value);
++	if (++t.cmd_index == 4) {
++		t.cmd_index = 0;
++		t.cmd_pointer++;
++		t.cmd_buffer = 0xffffffffu;
++	}
++}
++
++static void
++bat_reset_ptrs(void)
++{
++	t.desc_pointer = t.cmd_index = t.cmd_pointer = 0;
++	t.cmd_buffer = 0xffffffffu;
++}
++
++/*
++ * One batcher message (i2c-exynos5.c exynos5_i2c_xfer_batcher): a write of
++ * len bytes (7-bit address) or a read of len bytes (10-bit address mode, as
++ * Samsung's driver does for the PMIC), stop after it if stop.
++ */
++static int
++bat_xfer(bool read, uint8_t *buf, unsigned len, bool stop)
++{
++	bat_reset_ptrs();
++	wr(t.hs, BAT_CON, 0);                                   /* idle */
++	wr(t.hs, BAT_CON, rd(t.hs, BAT_CON) | BAT_ENABLE | BAT_DEDICATE);
++
++	bat_op(0x0F0F0F00, HS_TIMING_HS1);
++	bat_op(0x080F0F04, HS_TIMING_HS2);
++	bat_op(0x00000013, HS_TIMING_HS3);
++	bat_op(0x78787800, HS_TIMING_FS1);
++	bat_op(0x3C0F7878, HS_TIMING_FS2);
++	bat_op(0x000000F0, HS_TIMING_FS3);
++	bat_op(0x00000007, HS_TIMING_SLA);
++	bat_op(0x2ff, HS_TRAILIG_CTL);
++
++	uint32_t conf = (1u << 31) | (1u << 29) |               /* auto, HS mode */
++	    (3u << 16) | (3u << 13) | (1u << 28) | (1u << 27) | 0xff;
++	if (read) {
++		conf |= 1u << 30;                               /* 10-bit address mode */
++	}
++	bat_op(conf, HS_CONF);
++	bat_op(0, HS_TIMEOUT);
++	bat_op((1u << 0) | (1u << 1) | (0x8u << 16) | (len << 4), HS_FIFO_CTL);
++	uint32_t ctl = 1u << 3;                                 /* master */
++	ctl |= read ? ((1u << 6) | (1u << 30)) : (1u << 7);    /* RXCHON+EXT_ADDR / TXCHON */
++	bat_op(ctl, HS_CTL);
++	bat_op(read ? ((uint32_t)(PMIC_ADDR & 0x3fff) << 10) : ((uint32_t)(PMIC_ADDR & 0x7f) << 10), HS_ADDR);
++	uint32_t ac = (read ? (1u << 16) : 0) | (stop ? (1u << 17) : 0) | len | (1u << 31);
++	bat_op(ac, HS_AUTO_CONF);
++	wr(t.hs, BAT_INT_STATUS, rd(t.hs, BAT_INT_STATUS));
++	bat_op(read ? (1u << 1) : ((1u << 0) | (1u << 7)), HS_INT_ENABLE);
++	uint32_t rx_at = BAT_PAYLOAD + t.desc_pointer * 4;
++	for (unsigned i = 0; i < len; i++) {
++		bat_op(read ? 0x77 : buf[i], read ? HS_RX_DATA : HS_TX_DATA);
++	}
++	bat_op(0x00, 0xff);                                     /* finalize */
++	bat_reset_ptrs();
++	wr(t.hs, BAT_INT_EN, 1);
++	wr(t.hs, BAT_CON, rd(t.hs, BAT_CON) | BAT_START);
++
++	uint32_t st = 0;
++	for (int i = 0; i < 50000; i++) {                       /* ~50 ms */
++		st = rd(t.hs, BAT_STATE);
++		if (st & (BAT_COMPLETE | BAT_UNEXPECTED)) {
++			break;
++		}
++		delay(1);
++	}
++	wr(t.hs, BAT_INT_EN, 0);
++	int err = 0;
++	if (!(st & BAT_COMPLETE) || (st & BAT_UNEXPECTED)) {
++		printf("A510F TOUCH: batcher %s failed: state 0x%x fifo 0x%x int 0x%x\n",
++		    read ? "read" : "write", st, rd(t.hs, BAT_FIFO_STATUS), rd(t.hs, BAT_INT_STATUS));
++		err = EIO;
++	} else if (read) {
++		for (unsigned i = 0; i < len; i++) {
++			buf[i] = (uint8_t)rd(t.hs, rx_at + i * 4);
++		}
++	}
++	wr(t.hs, BAT_STATE, st | BAT_COMPLETE);
++	wr(t.hs, BAT_INT_STATUS, rd(t.hs, BAT_INT_STATUS));
++	wr(t.hs, BAT_CON, 0);                                   /* idle */
++	return err;
++}
++
++static int
++pmic_read(uint8_t reg, uint8_t *val)
++{
++	int e = bat_xfer(false, &reg, 1, false);
++	if (!e) {
++		e = bat_xfer(true, val, 1, true);
++	}
++	return e;
++}
++
++static int
++pmic_write(uint8_t reg, uint8_t val)
++{
++	uint8_t b[2] = { reg, val };
++	return bat_xfer(false, b, 2, true);
++}
++
++/* ---- setup -------------------------------------------------------------- */
++static void
++setup_i2c2(void)
++{
++	/* pclk_i2c2 */
++	wr(t.cmu, EN_PCLK_PERIC, rd(t.cmu, EN_PCLK_PERIC) | (1u << 9));
++	/* gpc3-0/1: function 2 (I2C), pull-up (3), drive 0 */
++	uint32_t con = rd(t.pin_nfc, 0x00);
++	con = (con & ~0xffu) | 0x22u;
++	wr(t.pin_nfc, 0x00, con);
++	uint32_t pud = rd(t.pin_nfc, 0x08);
++	pud = (pud & ~0xfu) | 0xfu;
++	wr(t.pin_nfc, 0x08, pud);
++	wr(t.pin_nfc, 0x0c, rd(t.pin_nfc, 0x0c) & ~0xffu);
++	/* gpa1-1: plain input, no pull (we poll the level) */
++	wr(t.pin_alive, 0x20, rd(t.pin_alive, 0x20) & ~(0xfu << 4));
++	wr(t.pin_alive, 0x28, rd(t.pin_alive, 0x28) & ~(0x3u << 2));
++	/* controller: filter on, SDA delay 1 clock; ack, /16, divider 15 */
++	wr(t.i2c, IICLC, 0x5);
++	wr(t.i2c, IICCON, CON_ACKEN | CON_IRQEN | CON_DIV);
++	wr(t.i2c, IICSTAT, STAT_TXRXEN);
++}
++
++static bool
++attn_low(void)
++{
++	return (rd(t.pin_alive, 0x24) & (1u << 1)) == 0;
++}
++
++static bool
++zt_power_on(void)
++{
++	/* bt532_power_sequence */
++	if (zt_write(0xc000, 0x0001)) {
++		return false;
++	}
++	uint16_t code = 0;
++	(void)zt_read(0xcc00, &code, 2);
++	printf("A510F TOUCH: chip code 0x%04x\n", code);
++	if (zt_cmd(0xc004) || zt_write(0xc002, 0x0001)) {
++		return false;
++	}
++	IOSleep(2);
++	if (zt_write(0xc001, 0x0001)) {
++		return false;
++	}
++	IOSleep(150);                                           /* FIRMWARE_ON_DELAY */
++	/* mini_init_touch */
++	if (zt_cmd(ZT_SWRESET) || zt_write(ZT_TOUCH_MODE, 0) || zt_write(ZT_INT_MASK, 0x3f)) {
++		return false;
++	}
++	for (int i = 0; i < 10; i++) {
++		(void)zt_cmd(ZT_CLEAR_INT);
++	}
++	uint16_t vendor = 0, fw = 0;
++	(void)zt_read(ZT_VENDOR_ID, &vendor, 2);
++	(void)zt_read(ZT_FW_VERSION, &fw, 2);
++	printf("A510F TOUCH: ZT7538 up, vendor 0x%04x fw 0x%04x\n", vendor, fw);
++	return true;
++}
++
++static void
++zt_poll_once(void)
++{
++	uint8_t p[4 + 6 * ZT_FINGERS];
++	if (zt_read(ZT_POINT_STATUS, p, sizeof(p))) {
++		return;
++	}
++	uint16_t status = (uint16_t)(p[0] | p[1] << 8);
++	for (int f = 0; f < ZT_FINGERS; f++) {
++		const uint8_t *c = p + 4 + 6 * f;
++		int x = c[0] | c[1] << 8, y = c[2] | c[3] << 8;
++		uint8_t sub = c[5];
++		bool down = (sub & ZT_SUB_EXIST) && !(sub & ZT_SUB_UP);
++		if (!(status & ZT_STATUS_EXIST) && !(sub & ZT_SUB_UP)) {
++			down = false;
++		}
++		if (down) {
++			if (x > 1079) {
++				x = 1079;
++			}
++			if (y > 1919) {
++				y = 1919;
++			}
++			sweet_hid_touch(f, 1, x, y + TOUCH_Y_ADJUST);
++			t.down[f] = true;
++		} else if (t.down[f]) {
++			sweet_hid_touch(f, 0, x, y + TOUCH_Y_ADJUST);
++			t.down[f] = false;
++		}
++	}
++	(void)zt_cmd(ZT_CLEAR_INT);
++}
++
++static void
++touch_thread(__unused void *arg, __unused wait_result_t w)
++{
++	IOSleep(3000);
++	setup_i2c2();
++	printf("A510F TOUCH: mode %d, PERIC pclk 0x%x, gpc3 con 0x%x pud 0x%x, gpa1 con 0x%x dat 0x%x, "
++	    "iiccon 0x%x iicstat 0x%x, hsi2c ctl 0x%x conf 0x%x batcher con 0x%x state 0x%x\n",
++	    t.mode, rd(t.cmu, EN_PCLK_PERIC), rd(t.pin_nfc, 0), rd(t.pin_nfc, 8),
++	    rd(t.pin_alive, 0x20), rd(t.pin_alive, 0x24), rd(t.i2c, IICCON), rd(t.i2c, IICSTAT),
++	    rd(t.hs, HS_CTL), rd(t.hs, HS_CONF), rd(t.hs, BAT_CON), rd(t.hs, BAT_STATE));
++
++	uint8_t probe[2] = { 0, 0 };
++	int te = zt_read(ZT_VENDOR_ID, probe, 2);
++	printf("A510F TOUCH: chip at 0x20 before power: %d (%02x %02x)\n", te, probe[0], probe[1]);
++
++	uint8_t id = 0xee, l33 = 0xee;
++	int e1 = pmic_read(PMIC_REG_ID, &id);
++	int e2 = pmic_read(PMIC_REG_L33, &l33);
++	printf("A510F TOUCH: PMIC id %d 0x%02x, LDO33 ctrl %d 0x%02x (on = 0x%02x)\n", e1, id, e2, l33, PMIC_L33_ON);
++
++	if (t.mode < 2) {
++		printf("A510F TOUCH: probe only (a510ftouch=1), done\n");
++		thread_terminate(current_thread());
++		return;
++	}
++	if (te) {
++		/* Write only after both reads worked and LDO33 reads like an LDO control. */
++		if (e1 || e2 || id == 0x00 || id == 0xff || (l33 & 0x3f) != 0x3c) {
++			printf("A510F TOUCH: PMIC reads not trusted, LDO33 left alone\n");
++			thread_terminate(current_thread());
++			return;
++		}
++		int ew = pmic_write(PMIC_REG_L33, PMIC_L33_ON);
++		uint8_t back = 0xee;
++		(void)pmic_read(PMIC_REG_L33, &back);
++		printf("A510F TOUCH: LDO33 on: write %d, now 0x%02x\n", ew, back);
++		IOSleep(50);                                    /* CHIP_ON_DELAY */
++	}
++	if (!zt_power_on()) {
++		printf("A510F TOUCH: ZT7538 init failed\n");
++		thread_terminate(current_thread());
++		return;
++	}
++	unsigned events = 0;
++	for (;;) {
++		if (attn_low()) {
++			zt_poll_once();
++			if (++events == 1 || events % 500 == 0) {
++				printf("A510F TOUCH: %u reports\n", events);
++			}
++		} else {
++			IOSleep(8);
++		}
++	}
++}
++
++void
++a510f_touch_start(void)
++{
++	static bool started;
++	if (started) {
++		return;
++	}
++	started = true;
++	t.mode = 0;
++	PE_parse_boot_argn("a510ftouch", &t.mode, sizeof(t.mode));
++	if (t.mode <= 0) {
++		return;
++	}
++	t.cmu = ml_io_map(CMU_PERI_PA, 0x1000);
++	t.i2c = ml_io_map(I2C2_PA, 0x1000);
++	t.pin_nfc = ml_io_map(PIN_NFC_PA, 0x1000);
++	t.pin_alive = ml_io_map(PIN_ALIVE_PA, 0x1000);
++	t.hs = ml_io_map(HSI2C3_PA, 0x2000);
++	thread_t th;
++	if (kernel_thread_start(touch_thread, NULL, &th) == KERN_SUCCESS) {
++		thread_deallocate(th);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
+index 6f8dba3..4fc6fde 100644
+--- a/bsd/dev/sweet_mmc.c
++++ b/bsd/dev/sweet_mmc.c
+@@ -986,6 +986,9 @@ sweet_mmc_init(void)
+ 	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
+ 	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
+ 	    sm.writable ? "read-write" : "read-only");
++	/* A510F touchscreen (boot-arg a510ftouch, bsd/dev/a510f_touch.c). */
++	extern void a510f_touch_start(void);
++	a510f_touch_start();
+ 	return 0;
+ }
+ 

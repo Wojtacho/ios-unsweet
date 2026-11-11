@@ -645,6 +645,26 @@ Observations:
 Next: A510F touch driver (touch IC on the I2C bus, see the LineageOS DT),
 buttons (gpio-keys: Home, Vol; power key via PMIC), RTC time, colours.
 
+## 2026-11-11: touchscreen driver (0110, bsd/dev/a510f_touch.c)
+
+Hardware (LineageOS a5xelte DT + TWRP 3.2.3 sysfs/debugfs, where touch
+works): Zinitix ZT7538 (bt532_ts_device) at 10-0020 = 0x20 on the s3c2410
+I2C at 0x13850000 (pins gpc3-0/1 function 2, pull-up 3; pclk gate
+CMU_PERI 0x139F0904 bit 9), attention gpa1-1 (0x139B0020 bank, active low).
+Supply tsp_avdd = S2MPU03 LDO33 (3.3 V, not boot-on), PMIC 3-a066 on HSI2C3
+0x104C0000 with Samsung's batcher (opcode/payload sequence copied from
+i2c-exynos5.c exynos5_i2c_xfer_batcher; reads use 10-bit mode). L33CTRL =
+0x4E, on = 0xFC ([7:6]=11, vsel 0x3C = 3.3 V). TWRP has no /dev/mem.
+Display: the 1080x1920 panel shows the centre of the 1125x2436 frame (y
+offset 258), SweetHIDTouch adds 18, so the driver adds 240 to y.
+
+Driver (one polled kernel thread, started from sweet_mmc_init): a510ftouch=1
+probes and prints (chip before power, PMIC ID, LDO33), =2 also switches
+LDO33 on (only if the PMIC reads are sane and the LDO reads 3.3 V-selected),
+runs the BT532 power sequence (0xc000/0xc004/0xc002/0xc001) + mini init
+(SWRESET, TOUCH_MODE 0, INT mask 0x3f, clear x10), then polls gpa1-1 and
+reads 0x0080 (status, count, 6 bytes/finger) -> sweet_hid_touch.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
