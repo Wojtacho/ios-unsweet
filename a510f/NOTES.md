@@ -627,6 +627,24 @@ button locations etc. Fix: workflows fetch Firmware/all_flash/
 DeviceTree.d22ap.im4p from the IPSW and extract it (tools/im4p_extract.py,
 LZFSE via pyliblzfse); 61 /product properties.
 
+## 2026-11-11: **MILESTONE: iOS 16 LOCK SCREEN ON THE GALAXY A5 2016**
+
+Boot from BOOT (kernel 0109 + repack 43001819608 with the D22AP /product
+node, image E:\Claude510f-ios-boot-product.tar, TWRP 3.2.3 in RECOVERY).
+SpringBoard no longer crash-loops: photos show the iOS 16 lock screen,
+"Wednesday, December 31" and a clock "4:04" that advances (4:07 later).
+Observations:
+- Date is the epoch (Dec 31 1969 local, no RTC / time source yet).
+- Clock and date drawn in red (iOS draws them white on the default
+  wallpaper; wallpaper itself black): check the pixel format / channel
+  order of the SWEET FB copy to the DECON (ARGB8888) and the wallpaper path.
+- Kernel console text briefly drew over the GUI, then disappeared.
+- No touch (sweettouch=0, no A510F touch driver), no buttons (sweetkeys=0).
+- Screen stays on (sweetfb_alwayson=1).
+
+Next: A510F touch driver (touch IC on the I2C bus, see the LineageOS DT),
+buttons (gpio-keys: Home, Vol; power key via PMIC), RTC time, colours.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
