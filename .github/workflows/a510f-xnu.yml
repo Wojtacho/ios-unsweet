@@ -140,7 +140,8 @@ jobs:
 
       - name: Check the kernel for instructions the A53 lacks
         run: |
-          sudo apt-get install -y -q python3-numpy > /dev/null
+          for i in 1 2 3; do sudo apt-get install -y -q python3-numpy > /dev/null && break; sudo apt-get update -q > /dev/null; sleep 10; done
+          python3 -c 'import numpy'
           f=$(ls kernel/kernel.* 2>/dev/null | grep -v -e '\.dSYM' -e SHA256 | head -1 || true)
           [ -n "$f" ] || { echo "::error title=kernel ISA check::no kernel was built"; exit 1; }
           rc=0

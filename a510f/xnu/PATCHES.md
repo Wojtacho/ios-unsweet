@@ -10,6 +10,6 @@
 - `0107-a510f-initproc-panic-delay-srtrace.patch`
 - `0108-a510f-16k-code-signatures-on-4k.patch`
 - `0109-a510f-display-always-on.patch`
-- `0110-a510f-touchscreen.patch`
+- `0110-a510f-touchscreen.patch` (ZT7538 touch; PMIC LDO33 through the HSI2C3 batcher only)
 
 See a510f/NOTES.md for what each boot showed.
