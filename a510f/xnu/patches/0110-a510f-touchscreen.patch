@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..fdf196d
+index 0000000..ebd04e1
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,693 @@
+@@ -0,0 +1,753 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -49,6 +49,7 @@ index 0000000..fdf196d
 +extern void IOSleep(unsigned int milliseconds);
 +extern void delay(int usec);
 +extern void sweet_hid_touch(int finger, int down, int x, int y);
++extern void sweet_hid_key(int key, int down);
 +void a510f_touch_start(void);
 +
 +/* ---- addresses ------------------------------------------------------------ */
@@ -584,11 +585,69 @@ index 0000000..fdf196d
 +	(void)zt_cmd(ZT_CLEAR_INT);
 +}
 +
++/*
++ * Buttons: plain GPIOs on gpa2 (always-on bank, 0x139B0040), active low,
++ * from Samsung's gpio-keys node: power gpa2-7, volume down gpa2-1, volume
++ * up gpa2-0, home gpa2-5. Polled every 8 ms with the touch chip; a change
++ * counts once two samples in a row agree (debounce), then goes to
++ * SweetHIDButtons: 0 power, 1 volume up, 2 volume down, 3 home (menu).
++ */
++#define GPA2_CON        0x40
++#define GPA2_DAT        0x44
++static const struct { uint8_t pin, key; const char *name; } a510f_keys[] = {
++	{ 7, 0, "power" }, { 0, 1, "volume up" }, { 1, 2, "volume down" }, { 5, 3, "home" },
++};
++#define NKEYS (sizeof(a510f_keys) / sizeof(a510f_keys[0]))
++static bool key_down[NKEYS], key_pending[NKEYS];
++
++static void
++keys_setup(void)
++{
++	uint32_t con = rd(t.pin_alive, GPA2_CON);
++	printf("A510F KEYS: gpa2 con 0x%x dat 0x%x pud 0x%x\n", con, rd(t.pin_alive, GPA2_DAT),
++	    rd(t.pin_alive, GPA2_CON + 8));
++	for (unsigned i = 0; i < NKEYS; i++) {
++		con &= ~(0xfu << (4 * a510f_keys[i].pin));     /* input */
++	}
++	wr(t.pin_alive, GPA2_CON, con);
++	uint32_t dat = rd(t.pin_alive, GPA2_DAT);
++	for (unsigned i = 0; i < NKEYS; i++) {
++		key_down[i] = key_pending[i] = !(dat & (1u << a510f_keys[i].pin));
++	}
++	printf("A510F KEYS: inputs, dat 0x%x\n", dat);
++}
++
++static void
++keys_poll(void)
++{
++	uint32_t dat = rd(t.pin_alive, GPA2_DAT);
++	for (unsigned i = 0; i < NKEYS; i++) {
++		bool now = !(dat & (1u << a510f_keys[i].pin));
++		if (now != key_down[i] && now == key_pending[i]) {
++			key_down[i] = now;
++			printf("A510F KEYS: %s %s\n", a510f_keys[i].name, now ? "down" : "up");
++			sweet_hid_key(a510f_keys[i].key, now);
++		}
++		key_pending[i] = now;
++	}
++}
++
++/* Touch unavailable: keep the buttons working. */
++static void
++keys_only_loop(void)
++{
++	for (;;) {
++		keys_poll();
++		IOSleep(8);
++	}
++}
++
 +static void
 +touch_thread(__unused void *arg, __unused wait_result_t w)
 +{
 +	IOSleep(3000);
 +	setup_i2c2();
++	keys_setup();
 +	printf("A510F TOUCH: mode %d, PERIC pclk 0x%x, gpc3 con 0x%x pud 0x%x, gpa1 con 0x%x dat 0x%x, "
 +	    "iiccon 0x%x iicstat 0x%x, hsi2c ctl 0x%x conf 0x%x batcher con 0x%x state 0x%x\n",
 +	    t.mode, rd(t.cmu, EN_PCLK_PERIC), rd(t.pin_nfc, 0), rd(t.pin_nfc, 8),
@@ -643,14 +702,14 @@ index 0000000..fdf196d
 +
 +	if (t.mode < 2) {
 +		printf("A510F TOUCH: probe only (a510ftouch=1), done\n");
-+		thread_terminate(current_thread());
++		keys_only_loop();
 +		return;
 +	}
 +	if (te) {
 +		/* Write only after both reads worked and LDO33 reads like an LDO control. */
 +		if (!bat_ok) {
 +			printf("A510F TOUCH: PMIC reads not trusted, LDO33 left alone\n");
-+			thread_terminate(current_thread());
++			keys_only_loop();
 +			return;
 +		}
 +		uint8_t back = 0xee;
@@ -662,7 +721,7 @@ index 0000000..fdf196d
 +	}
 +	if (!zt_power_on()) {
 +		printf("A510F TOUCH: ZT7538 init failed\n");
-+		thread_terminate(current_thread());
++		keys_only_loop();
 +		return;
 +	}
 +	printf("A510F TOUCH: polling, attn %s\n", attn_low() ? "LOW" : "high");
@@ -673,6 +732,7 @@ index 0000000..fdf196d
 +	 */
 +	unsigned lows = 0;
 +	for (;;) {
++		keys_poll();
 +		if (attn_low()) {
 +			zt_poll_once();
 +			if (++lows == 1 || lows % 500 == 0) {
