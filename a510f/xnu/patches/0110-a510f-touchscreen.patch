@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..c865e86
+index 0000000..cebad8a
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,629 @@
+@@ -0,0 +1,670 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -319,7 +319,7 @@ index 0000000..c865e86
 + * Samsung's driver does for the PMIC), stop after it if stop.
 + */
 +static int
-+bat_xfer(bool read, uint8_t *buf, unsigned len, bool stop)
++bat_xfer(bool read, uint8_t *buf, unsigned len, bool stop, bool tenbit)
 +{
 +	bat_reset_ptrs();
 +	uint32_t st0 = rd(t.hs, BAT_STATE);
@@ -344,20 +344,29 @@ index 0000000..c865e86
 +
 +	uint32_t conf = (1u << 31) | (1u << 29) |               /* auto, HS mode */
 +	    (3u << 16) | (3u << 13) | (1u << 28) | (1u << 27) | 0xff;
-+	if (read) {
++	if (read && tenbit) {
 +		conf |= 1u << 30;                               /* 10-bit address mode */
 +	}
 +	bat_op(conf, HS_CONF);
 +	bat_op(0, HS_TIMEOUT);
 +	bat_op((1u << 0) | (1u << 1) | (0x8u << 16) | (len << 4), HS_FIFO_CTL);
 +	uint32_t ctl = 1u << 3;                                 /* master */
-+	ctl |= read ? ((1u << 6) | (1u << 30)) : (1u << 7);    /* RXCHON+EXT_ADDR / TXCHON */
++	ctl |= read ? (1u << 6) : (1u << 7);                   /* RXCHON / TXCHON */
++	if (read && tenbit) {
++		ctl |= 1u << 30;                                /* EXT_ADDR */
++	}
 +	bat_op(ctl, HS_CTL);
-+	bat_op(read ? ((uint32_t)(PMIC_ADDR & 0x3fff) << 10) : ((uint32_t)(PMIC_ADDR & 0x7f) << 10), HS_ADDR);
++	bat_op((read && tenbit) ? ((uint32_t)(PMIC_ADDR & 0x3fff) << 10) : ((uint32_t)(PMIC_ADDR & 0x7f) << 10), HS_ADDR);
 +	uint32_t ac = (read ? (1u << 16) : 0) | (stop ? (1u << 17) : 0) | len | (1u << 31);
 +	bat_op(ac, HS_AUTO_CONF);
 +	wr(t.hs, BAT_INT_STATUS, rd(t.hs, BAT_INT_STATUS));
-+	bat_op(read ? (1u << 1) : ((1u << 0) | (1u << 7)), HS_INT_ENABLE);
++	/*
++	 * RX almost full / TX almost empty as Samsung, plus TRANSFER_DONE and
++	 * the trans-state errors (no ack, no dev, abort, timeout: 0xf00, as
++	 * samsung,check-transdone-int does for this bus): touch7's read waited
++	 * in 0x200 for an RX interrupt that never came.
++	 */
++	bat_op((read ? (1u << 1) : (1u << 0)) | (1u << 7) | (0xfu << 8), HS_INT_ENABLE);
 +	uint32_t rx_at = BAT_PAYLOAD + t.desc_pointer * 4;
 +	for (unsigned i = 0; i < len; i++) {
 +		bat_op(read ? 0x77 : buf[i], read ? HS_RX_DATA : HS_TX_DATA);
@@ -389,14 +398,11 @@ index 0000000..c865e86
 +		}
 +		delay(1);
 +	}
-+	printf("A510F TOUCH:   bat %s states 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x, payload 0x%x\n",
-+	    read ? "rd" : "wr", trace[0], trace[1], trace[2], trace[3], trace[4], trace[5],
-+	    rd(t.hs, rx_at));
++	uint32_t payload = rd(t.hs, rx_at);
++	uint32_t bfifo = rd(t.hs, BAT_FIFO_STATUS);
 +	wr(t.hs, BAT_INT_EN, 0);
 +	int err = 0;
 +	if (!done || (st & BAT_UNEXPECTED)) {
-+		printf("A510F TOUCH: batcher %s failed: state 0x%x fifo 0x%x int 0x%x\n",
-+		    read ? "read" : "write", st, rd(t.hs, BAT_FIFO_STATUS), rd(t.hs, BAT_INT_STATUS));
 +		err = EIO;
 +	} else if (read) {
 +		for (unsigned i = 0; i < len; i++) {
@@ -411,33 +417,59 @@ index 0000000..c865e86
 +	wr(t.hs, BAT_STATE, st | BAT_COMPLETE);
 +	wr(t.hs, BAT_INT_STATUS, is);
 +	wr(t.hs, BAT_CON, 0);                                   /* idle */
-+	printf("A510F TOUCH:   bat %s len %u: state 0x%x int 0x%x, now state 0x%x\n",
-+	    read ? "rd" : "wr", len, st, is, rd(t.hs, BAT_STATE));
++	/* One line per message: states seen, int, payload, state after idle. */
++	printf("A510F TOUCH:  %s%s%s %x>%x>%x>%x i%x p%x f%x n%x%s\n",
++	    read ? "rd" : "wr", (read && tenbit) ? "10" : "", stop ? "S" : "",
++	    trace[0], trace[1], trace[2], trace[3], is, payload, bfifo, rd(t.hs, BAT_STATE),
++	    err ? (done ? " UNEXP" : " TIMEOUT") : "");
 +	return err;
 +}
 +
 +static bool
 +pmic_sane(int e1, uint8_t id, int e2, uint8_t l33)
 +{
-+	return !e1 && !e2 && id != 0x00 && id != 0xff && id != 0x77 && l33 != 0x77 &&
-+	       (l33 & 0x3f) == 0x3c;
++	/* Real data, and LDO33 either already set to 3.3 V, or off with a plausible ID. */
++	return !e1 && !e2 && id != 0xff && id != 0x77 && id != 0xee && l33 != 0x77 && l33 != 0xee &&
++	       ((l33 & 0x3f) == 0x3c || (id != 0x00 && (l33 & 0xc0) == 0));
++}
++
++/*
++ * Register read = write the register number, then read one byte. Samsung's
++ * batcher does it as write (no stop) + read in 10-bit "EXT_ADDR" mode; on
++ * touch7 that read never got a byte. Try that and the plain I2C forms:
++ *   0: write no-stop + read 10-bit (Samsung)
++ *   1: write + stop, read 7-bit
++ *   2: write no-stop + read 7-bit (repeated start)
++ *   3: write + stop, read 10-bit
++ */
++static const char *const pmic_mode_name[4] = {
++	"nostop+10bit", "stop+7bit", "nostop+7bit", "stop+10bit",
++};
++static int pmic_mode;
++
++static int
++pmic_read_mode(int mode, uint8_t reg, uint8_t *val)
++{
++	bool wstop = (mode == 1 || mode == 3);
++	bool tenbit = (mode == 0 || mode == 3);
++	int e = bat_xfer(false, &reg, 1, wstop, false);
++	if (!e) {
++		e = bat_xfer(true, val, 1, true, tenbit);
++	}
++	return e;
 +}
 +
 +static int
 +pmic_read(uint8_t reg, uint8_t *val)
 +{
-+	int e = bat_xfer(false, &reg, 1, false);
-+	if (!e) {
-+		e = bat_xfer(true, val, 1, true);
-+	}
-+	return e;
++	return pmic_read_mode(pmic_mode, reg, val);
 +}
 +
 +static int
 +pmic_write(uint8_t reg, uint8_t val)
 +{
 +	uint8_t b[2] = { reg, val };
-+	return bat_xfer(false, b, 2, true);
++	return bat_xfer(false, b, 2, true, false);
 +}
 +
 +/* ---- setup -------------------------------------------------------------- */
@@ -575,12 +607,21 @@ index 0000000..c865e86
 +	    rd(t.pin_m, 0x0), rd(t.pin_m, 0x4), rd(t.pin_m, 0x8), rd(t.pin_m, 0xc));
 +
 +	uint8_t id = 0xee, l33 = 0xee;
-+	int e1 = pmic_read(PMIC_REG_ID, &id);
-+	IOSleep(5);
-+	int e2 = pmic_read(PMIC_REG_L33, &l33);
-+	printf("A510F TOUCH: batcher PMIC id %d 0x%02x, LDO33 ctrl %d 0x%02x (on = 0x%02x)\n",
-+	    e1, id, e2, l33, PMIC_L33_ON);
-+	bool bat_ok = pmic_sane(e1, id, e2, l33);
++	int e1 = EIO, e2 = EIO;
++	bool bat_ok = false;
++	for (int m = 0; m < 4 && !bat_ok; m++) {
++		id = l33 = 0xee;
++		e1 = pmic_read_mode(m, PMIC_REG_ID, &id);
++		IOSleep(5);
++		e2 = pmic_read_mode(m, PMIC_REG_L33, &l33);
++		bat_ok = pmic_sane(e1, id, e2, l33);
++		printf("A510F TOUCH: PMIC read mode %d (%s): id %d 0x%02x, LDO33 ctrl %d 0x%02x%s\n",
++		    m, pmic_mode_name[m], e1, id, e2, l33, bat_ok ? "  <- using this" : "");
++		if (bat_ok) {
++			pmic_mode = m;
++		}
++		IOSleep(5);
++	}
 +
 +	if (t.mode < 2) {
 +		printf("A510F TOUCH: probe only (a510ftouch=1), done\n");
