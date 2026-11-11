@@ -26,8 +26,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # iPhone10,3 / iPhone10,6, iOS 16.7.16 (20H392): the userland sweet runs.
-  IPSW_URL: https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw
+  # iPhone 8 Plus (iPhone10,2 / iPhone10,5), iOS 16.7.16 (20H392), the same
+  # build as sweet's iPhone X userland: 1080x1920 panel and a Home button,
+  # like the A510F.
+  IPSW_URL: https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-76738/B6C604B4-548E-401F-BBFF-916E3FFDF235/iPhone_5.5_P3_16.7.16_20H392_Restore.ipsw
   # GPT of the phone (MiB): SYSTEM 3000, CACHE 200, HIDDEN 60, USERDATA 11516,
   # contiguous from LBA 507904 (a510f/NOTES.md, tenth boot).
   PARTS: "system:3000 cache:200 hidden:60 userdata:11516"
@@ -160,7 +162,7 @@ jobs:
         if: github.event_name == 'push' || inputs.upload
         uses: actions/upload-artifact@v4
         with:
-          name: a510f-ios-root-odin
+          name: a510f-ios-root-8plus-odin
           path: /mnt/w/a510f-ios-root.tar
           compression-level: 1
           retention-days: 5

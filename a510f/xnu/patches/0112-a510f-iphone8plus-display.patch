@@ -1,0 +1,96 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index d89ae91..bc84f1c 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -69,17 +69,18 @@ enum {
+ #define SWEET_FB_NOTIFY_TYPES           8
+ #define SWEET_FB_NOTIFY_VSYNC           5
+ #define SWEET_FB_VSYNC_US               16667
+-#define SWEET_FB_DOT_PITCH              458     /* ppi, as the iPhone X panel */
++#define SWEET_FB_DOT_PITCH              401     /* ppi, as the iPhone 8 Plus panel */
+ /*
+  * The iOS userland only has status bar / layout data for real iPhone
+  * screens (UIKit: "No status bar visual provider for screen", the red
+- * rdar://45025538 bar for 360x800 points). The display is therefore
+- * presented as the iPhone X panel, 1125x2436 (375x812 points @3x), and the
+- * centered 1080x2400 part of it is shown on the 1080x2400 panel.
+- * Boot-arg sweetfb_native=1 presents the real panel size instead.
++ * rdar://45025538 bar for 360x800 points). A510F: the userland is the
++ * iPhone 8 Plus, which renders 1242x2208 (414x736 points @3x) and scales
++ * it to its 1080x1920 panel; the A510F panel is the same, so the frame is
++ * presented as 1242x2208 and scaled to fit (boot-arg sweetfb_fit=1, exact
++ * 16:9, no borders). Boot-arg sweetfb_native=1 presents the panel size.
+  */
+-#define SWEET_FB_LOGICAL_W              1125
+-#define SWEET_FB_LOGICAL_H              2436
++#define SWEET_FB_LOGICAL_W              1242
++#define SWEET_FB_LOGICAL_H              2208
+ #define SWEET_FB_FORMAT_BGRA            0x42475241
+ 
+ class IOMobileFramebuffer : public IOService {
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 27bc49d..1c2599f 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -368,6 +368,7 @@ protected:
+ private:
+ 	IOLock *fLock;
+ 	int fLogicalW, fLogicalH, fOffX, fOffY;
++	int fPanelW, fPanelH;           /* touch panel pixels */
+ 	bool fDown[SWEET_TOUCH_FINGERS];
+ 	bool fEdge[SWEET_TOUCH_FINGERS];
+ 	IOFixed fX[SWEET_TOUCH_FINGERS];
+@@ -432,16 +433,29 @@ SweetHIDTouch::start(IOService *provider)
+ 	if (!fLock || !IOHIDEventService::start(provider)) {
+ 		return false;
+ 	}
+-	int native = 0;
++	int native = 0, fit = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
++	PE_parse_boot_argn("sweetfb_fit", &fit, sizeof(fit));
++	fPanelW = 1080;
++	fPanelH = 2400;
+ 	fLogicalW = native ? 1080 : 1125;
+ 	fLogicalH = native ? 2400 : 2436;
+ 	fOffX = (fLogicalW - 1080) / 2;
+ 	fOffY = (fLogicalH - 2400) / 2;
++	if (fit) {
++		/*
++		 * A510F (sweetfb_fit=1): SweetFramebuffer scales the whole presented
++		 * frame (iPhone 8 Plus 1242x2208) onto the 1080x1920 panel, so the
++		 * panel is the display: touch maps 1:1, no offsets.
++		 */
++		fPanelW = fLogicalW = 1080;
++		fPanelH = fLogicalH = 1920;
++		fOffX = fOffY = 0;
++	}
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+-	setProperty("SurfaceHeight", (unsigned long long)(151 << 16), 32);
++	setProperty("SurfaceHeight", (unsigned long long)((fit ? 121 : 151) << 16), 32);
+ 	gSweetTouch = this;
+ 	registerService();
+ 	IOLog("SWEET HID: touch registered\n");
+@@ -458,8 +472,8 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
+ 		return;
+ 	}
+-	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+-	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	x = x < 0 ? 0 : (x > fPanelW - 1 ? fPanelW - 1 : x);
++	y = y < 0 ? 0 : (y > fPanelH - 1 ? fPanelH - 1 : y);
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+@@ -472,8 +486,8 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 		return;
+ 	}
+ 	if (!was && down) {
+-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > fPanelW - 1 - SWEET_TOUCH_EDGE_PX ||
++		    y < SWEET_TOUCH_EDGE_PX || y > fPanelH - 1 - SWEET_TOUCH_EDGE_PX;
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);

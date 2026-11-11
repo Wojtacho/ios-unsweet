@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..ebd04e1
+index 0000000..77936f8
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,753 @@
+@@ -0,0 +1,759 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -138,13 +138,16 @@ index 0000000..ebd04e1
 +#define ZT_SUB_MOVE     (1u << 2)
 +#define ZT_SUB_UP       (1u << 3)
 +
-+/* Panel 1080x1920 shows the centre of the 1125x2436 frame (y offset 258);
-+ * SweetHIDTouch adds (2436 - 2400) / 2 = 18, so add the other 240 here. */
++/* iPhone X layout (no sweetfb_fit): the panel shows the centre of the
++ * 1125x2436 frame (y offset 258); SweetHIDTouch adds (2436 - 2400) / 2 = 18,
++ * so add the other 240 here. With sweetfb_fit (iPhone 8 Plus, scaled to
++ * fit) the panel is the display and touch passes through unchanged. */
 +#define TOUCH_Y_ADJUST  240
 +
 +static struct {
 +	vm_offset_t cmu, i2c, pin_nfc, pin_alive, hs, cmu_mif, pin_m;
 +	int mode;
++	int yadj;                       /* TOUCH_Y_ADJUST or 0 (sweetfb_fit) */
 +	bool down[ZT_FINGERS];
 +	unsigned cmd_index, cmd_pointer, desc_pointer;
 +	uint32_t cmd_buffer;
@@ -575,10 +578,10 @@ index 0000000..ebd04e1
 +			if (y > 1919) {
 +				y = 1919;
 +			}
-+			sweet_hid_touch(f, 1, x, y + TOUCH_Y_ADJUST);
++			sweet_hid_touch(f, 1, x, y + t.yadj);
 +			t.down[f] = true;
 +		} else if (t.down[f]) {
-+			sweet_hid_touch(f, 0, x, y + TOUCH_Y_ADJUST);
++			sweet_hid_touch(f, 0, x, y + t.yadj);
 +			t.down[f] = false;
 +		}
 +	}
@@ -753,6 +756,9 @@ index 0000000..ebd04e1
 +	started = true;
 +	t.mode = 0;
 +	PE_parse_boot_argn("a510ftouch", &t.mode, sizeof(t.mode));
++	int fit = 0;
++	PE_parse_boot_argn("sweetfb_fit", &fit, sizeof(fit));
++	t.yadj = fit ? 0 : TOUCH_Y_ADJUST;
 +	if (t.mode <= 0) {
 +		return;
 +	}

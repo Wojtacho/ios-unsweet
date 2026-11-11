@@ -70,18 +70,18 @@ jobs:
             ls -l rootfs.bin
           fi
 
-      - name: Fetch the iPhone X device tree (/product for the ADT)
+      - name: Fetch the iPhone 8 Plus device tree (/product, /buttons for the ADT)
         env:
-          IPSW_URL: https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw
+          IPSW_URL: https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-76738/B6C604B4-548E-401F-BBFF-916E3FFDF235/iPhone_5.5_P3_16.7.16_20H392_Restore.ipsw
         run: |
-          # tools/mkadt.py copies /product (artwork-device-subtype 2436, thin
-          # bezel, ...) from Apple's D22AP device tree; without it UIKit's
-          # screen bounding path asserts and SpringBoard crash-loops.
+          # a510f/tools/mkadt_a510f.py: identity iPhone10,2 / D21AP, and
+          # /product (artwork, screen class) + /buttons (Home button type)
+          # from Apple's D21AP device tree. The userland is the 8 Plus IPSW.
           pip3 install -q --break-system-packages pyliblzfse
-          python3 tools/remotezip.py "$IPSW_URL" Firmware/all_flash/DeviceTree.d22ap.im4p /tmp/dt
-          mkdir -p research/ipsw-x
-          python3 tools/im4p_extract.py /tmp/dt/Firmware/all_flash/DeviceTree.d22ap.im4p research/ipsw-x/d22ap.adt
-          test -s research/ipsw-x/d22ap.adt
+          python3 tools/remotezip.py "$IPSW_URL" Firmware/all_flash/DeviceTree.d21ap.im4p /tmp/dt
+          mkdir -p research/ipsw-8p
+          python3 tools/im4p_extract.py /tmp/dt/Firmware/all_flash/DeviceTree.d21ap.im4p research/ipsw-8p/d21ap.adt
+          test -s research/ipsw-8p/d21ap.adt
 
       - name: Build recovery image
         run: |

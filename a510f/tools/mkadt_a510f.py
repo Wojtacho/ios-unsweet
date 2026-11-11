@@ -53,8 +53,65 @@ def child(node, name):
     raise KeyError(name)
 
 
+# The iOS userland is the iPhone 8 Plus (iPhone10,2 / D21AP) IPSW: its
+# 1080x1920 panel is the A510F's, and it has a Home button. The real D21AP
+# device tree (an Apple artifact, fetched in CI from the IPSW, not in git)
+# gives /product (artwork, screen class) and /buttons (Home button type).
+D21AP_ADT = os.path.join(HERE, '../../research/ipsw-8p/d21ap.adt')
+CANVAS_W, CANVAS_H = 1242, 2208             # 414x736 points @3x, as iOS renders on an 8 Plus
+
+
+def real_node(name, path=D21AP_ADT):
+    """Properties of /NAME in the real D21AP tree (no syscfg placeholders)."""
+    root, _ = adt.parse(open(path, 'rb').read())
+    for c in root.children:
+        if dict((k, v) for k, f, v in c.props).get('name') == name.encode() + b'\0':
+            return [(k, v) for k, f, v in c.props if not f and k not in ('name', 'AAPL,phandle')]
+    return None
+
+
+def iphone8plus(root):
+    if not os.path.exists(D21AP_ADT):
+        raise SystemExit(f'{D21AP_ADT} missing: extract DeviceTree.d21ap.im4p from the 8 Plus IPSW')
+    # Identity: compatible[0] = hw.model (D21AP), model = hw.machine (iPhone10,2).
+    compat = root.prop('compatible').split(b'\0')
+    rest = b''.join(c + b'\0' for c in compat[2:] if c)
+    setprop(root, 'compatible', mkadt.cstr('D21AP') + mkadt.cstr('iPhone10,2') + rest)
+    setprop(root, 'model', mkadt.cstr('iPhone10,2'))
+    setprop(root, 'target-type', mkadt.cstr('D21'))
+    setprop(root, 'target-sub-type', mkadt.cstr('D21AP'))
+    # Display canvas: the size iOS renders at (SweetFramebuffer scales it to the panel).
+    disp = child(child(root, 'arm-io'), 'disp0')
+    setprop(disp, 'canvas-width', struct.pack('<I', CANVAS_W))
+    setprop(disp, 'canvas-height', struct.pack('<I', CANVAS_H))
+    # /product and /buttons from the real tree (replace the iPhone X ones).
+    for name in ('product', 'buttons'):
+        props = real_node(name)
+        if props is not None and name == 'buttons':
+            # Only what MobileGestalt reads; not Apple's wiring (compatible,
+            # interrupts, function-button_* phandles) that drivers would match.
+            props = [(k, v) for k, v in props
+                     if k in ('button-names', 'home-button-type', 'opposed-power-vol-buttons')]
+        root.children = [c for c in root.children if c.name != name]
+        if props is not None:
+            n = mkadt.node(name, [('AAPL,phandle', struct.pack('<I', 900 + len(root.children)))] + props)
+            root.children.append(n)
+            print(f'D21AP /{name}: ' + ', '.join(k for k, v in props), file=sys.stderr)
+        elif name == 'product':
+            raise SystemExit('D21AP tree has no /product')
+        else:
+            # No /buttons in the tree: a Home-button device has no home-button-type (= 0).
+            root.children.append(mkadt.node('buttons', [
+                ('AAPL,phandle', struct.pack('<I', 899)),
+                ('button-names', mkadt.cstr('volup') + mkadt.cstr('voldown') + mkadt.cstr('hold') + mkadt.cstr('menu')),
+                ('opposed-power-vol-buttons', struct.pack('<I', 1)),
+            ]))
+            print('D21AP has no /buttons: Home-button default', file=sys.stderr)
+
+
 def build():
     root = mkadt.build(qemu=False, highmem=False)
+    iphone8plus(root)
     # No UFS on this phone (eMMC); sweet_ufs must not probe Qualcomm MMIO.
     root.children = [c for c in root.children if c.name != 'sweet-ufs']
     for i, cpu in enumerate(child(root, 'cpus').children):

@@ -10,6 +10,8 @@
 - `0107-a510f-initproc-panic-delay-srtrace.patch`
 - `0108-a510f-16k-code-signatures-on-4k.patch`
 - `0109-a510f-display-always-on.patch`
-- `0110-a510f-touchscreen.patch` (ZT7538 touch; PMIC LDO33 through the HSI2C3 batcher only) .
+- `0110-a510f-touchscreen.patch` (ZT7538 touch, PMIC LDO33 through the HSI2C3 batcher, GPIO buttons)
+- `0111-a510f-display-fit.patch` (boot-arg sweetfb_fit=1: scale the presented frame to the panel)
+- `0112-a510f-iphone8plus-display.patch` (present 1242x2208 @401 ppi like the iPhone 8 Plus; touch 1:1 on the panel with sweetfb_fit)
 
 See a510f/NOTES.md for what each boot showed.
