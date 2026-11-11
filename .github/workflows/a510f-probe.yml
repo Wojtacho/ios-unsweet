@@ -1,12 +1,9 @@
 name: a510f-probe
 
+# Manual only: the early Linux probe image is no longer part of the iOS
+# bring-up, and running it on every push only added failed runs.
 on:
   workflow_dispatch:
-  push:
-    branches: [a510f]
-    paths:
-      - "a510f/**"
-      - ".github/workflows/a510f-probe.yml"
 
 concurrency:
   group: a510f-probe-${{ github.ref }}
