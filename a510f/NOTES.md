@@ -665,6 +665,15 @@ runs the BT532 power sequence (0xc000/0xc004/0xc002/0xc001) + mini init
 (SWRESET, TOUCH_MODE 0, INT mask 0x3f, clear x10), then polls gpa1-1 and
 reads 0x0080 (status, count, 6 bytes/finger) -> sweet_hid_touch.
 
+First touch boot (run 43007348036, BOOT): `A510F TOUCH: mode 2, PERIC pclk
+0x53fbfff, gpc3 con 0x22 pud 0x5f, gpa1 con 0x0 dat 0x2, iiccon 0xaf
+iicstat 0x10, hsi2c ctl 0x0 conf 0x9803c1ff batcher con 0x0 state 0x8`;
+`chip at 0x20 before power: 6` (ENXIO, no ACK: unpowered); `batcher write
+failed: state 0x200 fifo 0x1000001 int 0x1` twice; PMIC id/LDO33 not read;
+`PMIC reads not trusted, LDO33 left alone` (guard worked). Completion is
+BATCHER_INT_STATUS bit 0 (Samsung's IRQ handler sets the state COMPLETE bit
+itself): fixed in 0110.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.

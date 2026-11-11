@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..29560b5
+index 0000000..d473026
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,551 @@
+@@ -0,0 +1,559 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -351,17 +351,25 @@ index 0000000..29560b5
 +	wr(t.hs, BAT_INT_EN, 1);
 +	wr(t.hs, BAT_CON, rd(t.hs, BAT_CON) | BAT_START);
 +
-+	uint32_t st = 0;
++	/*
++	 * Done = the batcher interrupt (BATCHER_INT_STATUS bit 0); Samsung's IRQ
++	 * handler then sets BATCHER_OPERATION_COMPLETE in the state register
++	 * itself. Seen on the phone: state 0x200, int 0x1 when finished.
++	 */
++	uint32_t st = 0, is = 0;
++	bool done = false;
 +	for (int i = 0; i < 50000; i++) {                       /* ~50 ms */
 +		st = rd(t.hs, BAT_STATE);
-+		if (st & (BAT_COMPLETE | BAT_UNEXPECTED)) {
++		is = rd(t.hs, BAT_INT_STATUS);
++		if ((is & 1u) || (st & (BAT_COMPLETE | BAT_UNEXPECTED))) {
++			done = true;
 +			break;
 +		}
 +		delay(1);
 +	}
 +	wr(t.hs, BAT_INT_EN, 0);
 +	int err = 0;
-+	if (!(st & BAT_COMPLETE) || (st & BAT_UNEXPECTED)) {
++	if (!done || (st & BAT_UNEXPECTED)) {
 +		printf("A510F TOUCH: batcher %s failed: state 0x%x fifo 0x%x int 0x%x\n",
 +		    read ? "read" : "write", st, rd(t.hs, BAT_FIFO_STATUS), rd(t.hs, BAT_INT_STATUS));
 +		err = EIO;
