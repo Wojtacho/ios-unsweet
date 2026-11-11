@@ -724,6 +724,18 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
   before; the 10-bit EXT_ADDR read goes 0x40 -> 0x200 and stays there 200 ms
   (no RX interrupt). Batcher reset works (0x200 -> 0x8).
 - touch8 (commit c84c53c): enables TRANSFER_DONE + 0xf00 trans-state error
+- touch8 result: PMIC read form **stop+7bit** works (id 0x02, L33CTRL 0x3c),
+  LDO33 -> 0xfc, ZT7538 chip code 0xe538, vendor 0x5a49 ("ZI"), fw 0x0005.
+  The 10-bit EXT_ADDR read gets UNEXP (int 0x400 = no-dev-ack).
+- **🎉 TOUCH WORKS (touch9, commit d80cb34, 2026-11-11 ~19:00 local,
+  video IMG_4691.MOV):** single and multi-finger touches reach iOS; holding
+  the lock screen opens the wallpaper/customise UI. Fixes in touch9: the poll
+  loop always sleeps 8 ms (it used to re-poll without sleeping while attn was
+  low, busy-waiting I2C on the only CPU), skips status 0/1/0xffff/MUST_ZERO
+  reports. That boot ran with sweetfb_noconsole=0 (console over the UI).
+  Input is slow (cpus=1; sweet saw ~1 min latency on 1 core). Next: GPIO
+  buttons (gpa2) -> sweet_hid_key, noconsole back to 1, then iPhone 8 Plus
+  userland, then SMP (PSCI cpu_on 0xC4000003, MPIDR 0x000-0x003, 0x100-0x103).
   interrupts, tries 4 read forms (nostop+10bit, stop+7bit, nostop+7bit,
   stop+10bit), one console line per message. Not booted yet.
 - Facts checked in Samsung's source: L33CTRL really is 0x4E (enum has explicit
