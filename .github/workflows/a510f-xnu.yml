@@ -169,10 +169,16 @@ jobs:
 
       - name: Install toolchain
         run: |
+          # The runners' Azure Ubuntu mirror hung on 2026-11-11: time-limit apt
+          # and fall back to archive.ubuntu.com.
           A='-o Acquire::Retries=3 -o Acquire::http::Timeout=20'
-          timeout 600 sudo apt-get update -q $A
-          timeout 900 sudo apt-get install -y -q $A gcc gcc-aarch64-linux-gnu device-tree-compiler \
-            libfdt-dev libssl-dev cpio
+          pk="gcc gcc-aarch64-linux-gnu device-tree-compiler libfdt-dev libssl-dev cpio"
+          apt_try() { timeout 300 sudo apt-get update -q $A && timeout 600 sudo apt-get install -y -q $A $pk; }
+          if ! apt_try; then
+            echo "::warning::Azure Ubuntu mirror failed, switching to archive.ubuntu.com"
+            sudo sed -i 's#azure.archive.ubuntu.com#archive.ubuntu.com#g' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources || true
+            apt_try
+          fi
 
       # Same image as a510f-repack: boot-args from a510f/boot-args.txt and,
       # with rd=md0, sweet's test init as the RAM-disk root.

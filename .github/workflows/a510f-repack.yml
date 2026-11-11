@@ -32,9 +32,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          id=$(gh run list -R "$GITHUB_REPOSITORY" -w a510f-xnu.yml -b a510f -s success -L 1 \
-                 --json databaseId -q '.[0].databaseId')
-          [ -n "$id" ] || { echo "::error::no successful a510f-xnu run"; exit 1; }
+          # Newest a510f-xnu run that uploaded a kernel, even if a later job
+          # (the boot image, on a broken apt mirror) failed.
+          id=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=a510f-xnu-kernel&per_page=1" \
+                 --jq '.artifacts[0].workflow_run.id')
+          [ -n "$id" ] || { echo "::error::no a510f-xnu kernel artifact"; exit 1; }
           echo "run_id=$id" >> "$GITHUB_OUTPUT"
           echo "kernel from a510f-xnu run $id"
 
@@ -47,9 +49,16 @@ jobs:
 
       - name: Install toolchain
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc gcc-aarch64-linux-gnu device-tree-compiler \
-            libfdt-dev libssl-dev cpio
+          # The runners' Azure Ubuntu mirror hung on 2026-11-11: time-limit apt
+          # and fall back to archive.ubuntu.com.
+          A='-o Acquire::Retries=3 -o Acquire::http::Timeout=20'
+          pk="gcc gcc-aarch64-linux-gnu device-tree-compiler libfdt-dev libssl-dev cpio"
+          apt_try() { timeout 300 sudo apt-get update -q $A && timeout 600 sudo apt-get install -y -q $A $pk; }
+          if ! apt_try; then
+            echo "::warning::Azure Ubuntu mirror failed, switching to archive.ubuntu.com"
+            sudo sed -i 's#azure.archive.ubuntu.com#archive.ubuntu.com#g' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources || true
+            apt_try
+          fi
 
       - name: Build the RAM-disk root (sweet's test init) if rd=md0
         run: |
