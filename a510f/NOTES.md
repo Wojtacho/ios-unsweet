@@ -710,6 +710,26 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
   failed in the ISA check on an Ubuntu apt mirror error (exit 100), the
   rerun (6ad6487) hung on apt; the workflow now takes numpy from PyPI and
   puts timeouts/retries on apt.
+- touch5 (local image: CI apt mirror down, boot image spliced on the PC with
+  a510f/tools/splice_payload.py from the CI kernel artifact): pclk_hsi2c3 on
+  (MIF 0x900 = 0x1f79f0ff), **gpm0 con 0x11 dat 0x3**: S-Boot leaves the PMIC
+  bus pins as GPIO outputs, not HSI2C. Froze after `bat wr states 0x40 0x200`
+  on an HSI2C status read while the batcher owned the block (same read as
+  touch3/4: that, not the plain mode itself, is what froze them).
+- touch6 (gpm0 -> func 2, pud 3, drv 2; no HSI2C reads during batcher):
+  no freeze, boots to the lock screen. Write reg 0x00: states 0x40 -> 0x11,
+  int 0x81, idle after. Read stopped early on a stale INT_STATUS 0x81 ->
+  0x77, batcher left in 0x200.
+- touch7 (done = state bit 0, reset stuck batcher + SMRelease): write OK as
+  before; the 10-bit EXT_ADDR read goes 0x40 -> 0x200 and stays there 200 ms
+  (no RX interrupt). Batcher reset works (0x200 -> 0x8).
+- touch8 (commit c84c53c): enables TRANSFER_DONE + 0xf00 trans-state error
+  interrupts, tries 4 read forms (nostop+10bit, stop+7bit, nostop+7bit,
+  stop+10bit), one console line per message. Not booted yet.
+- Facts checked in Samsung's source: L33CTRL really is 0x4E (enum has explicit
+  jumps), LDO33 "tsp_avdd" is the only touch supply (`zinitix,gpio_ldo_en`
+  only means "no separate dvdd regulator"), ZT7538 int mask 0x3f (palm on),
+  touch mode 0, x/y resolution 1080x1920.
 
 ## Open problems before XNU work
 
