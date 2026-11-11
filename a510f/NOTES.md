@@ -606,6 +606,27 @@ wake it (sweetkeys=0, no A510F key driver yet).
 0109: boot-arg sweetfb_alwayson=1 ignores display-off requests. Next boot:
 noconsole + alwayson, to see what iOS draws after the logo.
 
+## 2026-11-11: twentieth boot: SpringBoard crash loop found (TWRP in RECOVERY)
+
+Video IMG_4657: clean Apple logo with a progress bar that crept forward,
+then stalled for 30+ min (stray kernel lines at the screen edges). New
+setup: iOS kernel in **BOOT** (normal power-on), **TWRP 3.2.3 in RECOVERY**
+(tar E:\Claude510f-ios-boot+twrp-recovery.tar). From TWRP,
+E:\Claude	wrp-write\hfsremote.py reads the iOS HFSX volume read-only over adb
+(dd of mmcblk0 from 248 MiB, 1 MiB chunks, B-tree lookups, hard links).
+
+/private/var/mobile/Library/Logs/CrashReporter: 23 SpringBoard-*.ips, one
+every ~20 s, all the same (symbolicated by iOS): NSAssertion in
+`-[_UIScreenComplexBoundingPathUtilities _loadBitmapForScreen:type:]` <-
+initWithScreen: <- `-[UIScreen _boundingPathUtilities]` <- `-[UIWindow
+_boundingPath]` <- UIScrollView scroll indicator insets. Cause: our ADT has
+**no /product node** - tools/mkadt.py copies it from Apple's D22AP device
+tree (research/ipsw-x/d22ap.adt, not in git) and only warned when missing.
+/product carries artwork-device-subtype 2436, thin-bezel, oled-display,
+button locations etc. Fix: workflows fetch Firmware/all_flash/
+DeviceTree.d22ap.im4p from the IPSW and extract it (tools/im4p_extract.py,
+LZFSE via pyliblzfse); 61 /product properties.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
