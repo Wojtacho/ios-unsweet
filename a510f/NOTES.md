@@ -572,6 +572,17 @@ unverified (they cannot be hashed alone; the stock code would panic "offset
 not aligned to cshash boundary"). Logged once: `SWEET: accepting 16384-byte
 code signature pages unverified (4096-byte VM pages)`. srtrace dropped.
 
+## 2026-11-11: eighteenth boot: launchd starts iOS, Apple logo (run 42907039170)
+
+User report (no photo yet): text scrolled fast, then many `exec xpcproxy`,
+`exec wcd` ... lines (launchd spawning services through xpcproxy), and
+later **the Apple logo appeared**, with the kernel console text drawn over
+it. **Milestone: iOS userland runs and draws on the A510F screen** (through
+the SWEET AppleCLCD/IOMobileFramebuffer stand-in).
+
+Next: repack with sweetfb_noconsole=1 (console muted once the GUI presents
+its first frame, as on sweet).
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
