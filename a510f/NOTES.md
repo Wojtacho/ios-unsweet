@@ -682,6 +682,15 @@ Needs: root image from the 8 Plus IPSW, D21AP /product, identity patch
 (sweet 0059 says iPhone10,3/D22AP), logical display 1242x2208, scale to fit
 (0111 sweetfb_fit, written in ref/p0109, not pushed yet), touch mapping.
 
+Second touch boot (run 43011405392): `PMIC id 0 0x77, LDO33 ctrl 0 0x77`:
+the batcher messages now complete but the RX payload keeps the 0x77
+placeholder (no byte received); guard held. S-Boot leaves HSI2C3 in plain
+auto mode (conf 0x9803c1ff, batcher con 0). 0110 now tries plain polled
+HSI2C first (exynos5_i2c_xfer_msg polling path: 7-bit 0x66, write reg
+without stop, read 1 with stop), then the batcher, printing hs INT/TRANS/
+FIFO status after every message; LDO33 is written through whichever path
+returns a sane ID and a 3.3 V-selected L33CTRL.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.

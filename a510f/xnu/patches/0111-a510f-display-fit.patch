@@ -1,0 +1,142 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 167f8d4..d89ae91 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -104,6 +104,14 @@ public:
+ 	uint32_t      fWidth, fHeight, fRowBytes;
+ 	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
+ 	int32_t       fOffX, fOffY;             /* logical origin of the panel */
++	/*
++	 * A510F (boot-arg sweetfb_fit=1): scale the whole logical frame into the
++	 * panel (height fits, pillarbox fPadX each side) instead of cropping
++	 * its centre. Panel = pad + logical * fFitNum / fFitDen.
++	 */
++	bool          fFit, fFitCleared;
++	int32_t       fFitNum, fFitDen, fPadX;
++	int32_t      *fFitCol;                  /* panel column -> logical column */
+ 	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
+ 	IOMemoryMap  *fMap;
+ 	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
+@@ -122,6 +130,8 @@ public:
+ 	void removeClient(IOMobileFramebufferUserClient *client);
+ 	void swap(const uint8_t *rec);
+ 	void present(const uint8_t *rec);
++	void presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx, int32_t sy,
++	    int32_t dx, int32_t dy, int32_t w, int32_t h);
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+@@ -176,6 +186,30 @@ AppleCLCD::start(IOService *provider)
+ 	}
+ 	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	int fit = 0;
++	PE_parse_boot_argn("sweetfb_fit", &fit, sizeof(fit));
++	fFit = fit && (fLogicalW != fWidth || fLogicalH != fHeight);
++	if (fFit) {
++		/* Scale by the tighter axis so the whole frame is visible. */
++		if ((int64_t)fWidth * fLogicalH < (int64_t)fHeight * fLogicalW) {
++			fFitNum = (int32_t)fWidth;
++			fFitDen = (int32_t)fLogicalW;
++		} else {
++			fFitNum = (int32_t)fHeight;
++			fFitDen = (int32_t)fLogicalH;
++		}
++		fPadX = ((int32_t)fWidth - (int32_t)((int64_t)fLogicalW * fFitNum / fFitDen)) / 2;
++		fFitCol = (int32_t *)IOMalloc(sizeof(int32_t) * fWidth);
++		if (fFitCol == NULL) {
++			fFit = false;
++		} else {
++			for (uint32_t px = 0; px < fWidth; px++) {
++				fFitCol[px] = (int32_t)(((int64_t)((int32_t)px - fPadX) * fFitDen) / fFitNum);
++			}
++			IOLog("SWEET FB: fit %ux%u into %ux%u: scale %d/%d, pillarbox %d px\n",
++			    fLogicalW, fLogicalH, fWidth, fHeight, fFitNum, fFitDen, fPadX);
++		}
++	}
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -359,6 +393,11 @@ AppleCLCD::present(const uint8_t *rec)
+ 		if (dx < 0 || dy < 0) {
+ 			dx = dy = 0;
+ 		}
++		if (fFit) {
++			presentFit(s, src, bpe, sx, sy, dx, dy, w, h);
++			s->release();
++			continue;
++		}
+ 		/* Logical (presented) display coordinates -> panel coordinates. */
+ 		dx -= fOffX;
+ 		dy -= fOffY;
+@@ -401,6 +440,70 @@ AppleCLCD::present(const uint8_t *rec)
+ 	}
+ }
+ 
++/*
++ * A510F sweetfb_fit: nearest-neighbour scale of one layer, logical rect
++ * (dx, dy, w, h) read from the surface at (sx, sy), into the panel.
++ */
++void
++AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx, int32_t sy,
++    int32_t dx, int32_t dy, int32_t w, int32_t h)
++{
++	if (src == 0 || bpe != 4 || s->elementWidth != 1 || s->elementHeight != 1 || s->memory == NULL) {
++		return;
++	}
++	if (w > (int32_t)s->width - sx) {
++		w = (int32_t)s->width - sx;
++	}
++	if (h > (int32_t)s->height - sy) {
++		h = (int32_t)s->height - sy;
++	}
++	if (w <= 0 || h <= 0) {
++		return;
++	}
++	uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow + (uint64_t)(sx + w) * 4;
++	if (last > s->memory->getLength()) {
++		return;
++	}
++	if (!fFitCleared) {
++		/* Black pillarbox (the console text was there). */
++		for (uint32_t y = 0; y < fHeight; y++) {
++			bzero((void *)(fPixels + (uint64_t)y * fRowBytes), (size_t)fWidth * 4);
++		}
++		fFitCleared = true;
++	}
++	int32_t py0 = (int32_t)(((int64_t)dy * fFitNum + fFitDen - 1) / fFitDen);
++	int32_t py1 = (int32_t)(((int64_t)(dy + h) * fFitNum + fFitDen - 1) / fFitDen);
++	int32_t px0 = fPadX + (int32_t)(((int64_t)dx * fFitNum + fFitDen - 1) / fFitDen);
++	int32_t px1 = fPadX + (int32_t)(((int64_t)(dx + w) * fFitNum + fFitDen - 1) / fFitDen);
++	if (py0 < 0) {
++		py0 = 0;
++	}
++	if (px0 < 0) {
++		px0 = 0;
++	}
++	if (py1 > (int32_t)fHeight) {
++		py1 = (int32_t)fHeight;
++	}
++	if (px1 > (int32_t)fWidth) {
++		px1 = (int32_t)fWidth;
++	}
++	const uint8_t *base = (const uint8_t *)(src + s->offset);
++	for (int32_t py = py0; py < py1; py++) {
++		int32_t ly = (int32_t)(((int64_t)py * fFitDen) / fFitNum) - dy;
++		if (ly < 0 || ly >= h) {
++			continue;
++		}
++		const uint32_t *row = (const uint32_t *)(base + (uint64_t)(sy + ly) * s->bytesPerRow) + sx;
++		uint32_t *out = (uint32_t *)(fPixels + (uint64_t)py * fRowBytes);
++		for (int32_t px = px0; px < px1; px++) {
++			int32_t lx = fFitCol[px] - dx;
++			if (lx >= 0 && lx < w) {
++				out[px] = row[lx];
++			}
++		}
++	}
++}
++
+ bool
+ IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
+ {
