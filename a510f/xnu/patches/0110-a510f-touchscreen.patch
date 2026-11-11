@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..cebad8a
+index 0000000..fdf196d
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,670 @@
+@@ -0,0 +1,693 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -533,14 +533,32 @@ index 0000000..cebad8a
 +	return true;
 +}
 +
++static unsigned zt_logged, zt_errors;
++
 +static void
 +zt_poll_once(void)
 +{
 +	uint8_t p[4 + 6 * ZT_FINGERS];
-+	if (zt_read(ZT_POINT_STATUS, p, sizeof(p))) {
++	int e = zt_read(ZT_POINT_STATUS, p, sizeof(p));
++	if (e) {
++		if (++zt_errors <= 5 || zt_errors % 1000 == 0) {
++			printf("A510F TOUCH: point read error %d (%u so far)\n", e, zt_errors);
++		}
++		(void)zt_cmd(ZT_CLEAR_INT);
 +		return;
 +	}
 +	uint16_t status = (uint16_t)(p[0] | p[1] << 8);
++	/* Diagnostics: the first 40 reports in full, then every 200th. */
++	static unsigned seen;
++	if (++seen <= 40 || seen % 200 == 0) {
++		printf("A510F TOUCH: #%u st 0x%04x n %u f0 %u,%u w%u sub 0x%02x\n", seen, status, p[2],
++		    p[4] | p[5] << 8, p[6] | p[7] << 8, p[8], p[9]);
++	}
++	if (status == 0x0000 || status == 0xffff || status == 0x0001 || (status & (1u << 13))) {
++		/* periodic / invalid (MUST_ZERO bit) report, as Samsung's driver skips */
++		(void)zt_cmd(ZT_CLEAR_INT);
++		return;
++	}
 +	for (int f = 0; f < ZT_FINGERS; f++) {
 +		const uint8_t *c = p + 4 + 6 * f;
 +		int x = c[0] | c[1] << 8, y = c[2] | c[3] << 8;
@@ -647,16 +665,21 @@ index 0000000..cebad8a
 +		thread_terminate(current_thread());
 +		return;
 +	}
-+	unsigned events = 0;
++	printf("A510F TOUCH: polling, attn %s\n", attn_low() ? "LOW" : "high");
++	/*
++	 * Always sleep between polls: every I2C transfer here busy-waits, and
++	 * with one CPU a loop that keeps finding attn low (no sleep) starved
++	 * backboardd. 125 Hz is plenty for touch.
++	 */
++	unsigned lows = 0;
 +	for (;;) {
 +		if (attn_low()) {
 +			zt_poll_once();
-+			if (++events == 1 || events % 500 == 0) {
-+				printf("A510F TOUCH: %u reports\n", events);
++			if (++lows == 1 || lows % 500 == 0) {
++				printf("A510F TOUCH: %u attn reports\n", lows);
 +			}
-+		} else {
-+			IOSleep(8);
 +		}
++		IOSleep(8);
 +	}
 +}
 +
