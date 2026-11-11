@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..323bfa5
+index 0000000..58b65d2
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,601 @@
+@@ -0,0 +1,618 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -392,12 +392,16 @@ index 0000000..323bfa5
 +			buf[i] = (uint8_t)rd(t.hs, rx_at + i * 4);
 +		}
 +	}
-+	printf("A510F TOUCH:   bat %s len %u: state 0x%x int 0x%x | hs int 0x%x trans 0x%x fifo 0x%x\n",
-+	    read ? "rd" : "wr", len, st, is, rd(t.hs, HS_INT_STATUS), rd(t.hs, HS_TRANS_STATUS),
-+	    rd(t.hs, HS_FIFO_STATUS));
++	/*
++	 * As Samsung's IRQ handler: mark complete, ack, back to idle. No HSI2C
++	 * (0x00-0xff) register access while the batcher owns the block: that
++	 * read stalled the CPU for good (touch3/4/5 froze right here).
++	 */
 +	wr(t.hs, BAT_STATE, st | BAT_COMPLETE);
-+	wr(t.hs, BAT_INT_STATUS, rd(t.hs, BAT_INT_STATUS));
++	wr(t.hs, BAT_INT_STATUS, is);
 +	wr(t.hs, BAT_CON, 0);                                   /* idle */
++	printf("A510F TOUCH:   bat %s len %u: state 0x%x int 0x%x, now state 0x%x\n",
++	    read ? "rd" : "wr", len, st, is, rd(t.hs, BAT_STATE));
 +	return err;
 +}
 +
@@ -545,6 +549,19 @@ index 0000000..323bfa5
 +	    rd(t.cmu_mif, EN_PCLK_MIF), rd(t.pin_m, 0), rd(t.pin_m, 4), rd(t.pin_m, 8),
 +	    rd(t.hs, HS_TRANS_STATUS), rd(t.hs, HS_INT_STATUS), rd(t.hs, HS_FIFO_STATUS),
 +	    rd(t.hs, BAT_CON), rd(t.hs, BAT_STATE), rd(t.hs, BAT_INT_STATUS), rd(t.hs, BAT_FIFO_STATUS));
++
++	/*
++	 * S-Boot leaves gpm0-0/1 as GPIO outputs (con 0x11, dat 0x3), so the
++	 * HSI2C block is not on the pads at all. Apply Samsung's hs_i2c3_bus
++	 * pinctrl: function 2, pull-up (3), drive 2. gpm0 is a bank_type_2
++	 * bank: CON 4 bits, PUD 2 bits, DRV 4 bits per pin.
++	 */
++	wr(t.pin_m, 0x0, (rd(t.pin_m, 0x0) & ~0xffu) | 0x22u);
++	wr(t.pin_m, 0x8, (rd(t.pin_m, 0x8) & ~0xfu) | 0xfu);
++	wr(t.pin_m, 0xc, (rd(t.pin_m, 0xc) & ~0xffu) | 0x22u);
++	delay(100);
++	printf("A510F TOUCH: gpm0 -> hs_i2c3_bus: con 0x%x dat 0x%x pud 0x%x drv 0x%x\n",
++	    rd(t.pin_m, 0x0), rd(t.pin_m, 0x4), rd(t.pin_m, 0x8), rd(t.pin_m, 0xc));
 +
 +	uint8_t id = 0xee, l33 = 0xee;
 +	int e1 = pmic_read(PMIC_REG_ID, &id);
