@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..58b65d2
+index 0000000..c865e86
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,618 @@
+@@ -0,0 +1,629 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -119,6 +119,8 @@ index 0000000..58b65d2
 +#define BAT_START       (1u << 4)
 +#define BAT_COMPLETE    (1u << 0)
 +#define BAT_UNEXPECTED  (1u << 1)
++#define BAT_IDLE_STATE  (1u << 3)
++#define HS_SM_RELEASE   0x200           /* HSI2C_SMRelease: write 1 = release AP semaphore */
 +
 +/* BT532 / ZT7538 */
 +#define ZT_SWRESET      0x0000
@@ -320,6 +322,14 @@ index 0000000..58b65d2
 +bat_xfer(bool read, uint8_t *buf, unsigned len, bool stop)
 +{
 +	bat_reset_ptrs();
++	uint32_t st0 = rd(t.hs, BAT_STATE);
++	if (st0 != BAT_IDLE_STATE) {
++		/* Samsung's recover_batcher: batcher reset, release the AP semaphore. */
++		wr(t.hs, BAT_CON, 1u << 31);
++		wr(t.hs, BAT_CON, 0);
++		wr(t.hs, HS_SM_RELEASE, 1);
++		printf("A510F TOUCH:   batcher was in state 0x%x, reset: now 0x%x\n", st0, rd(t.hs, BAT_STATE));
++	}
 +	wr(t.hs, BAT_CON, 0);                                   /* idle */
 +	wr(t.hs, BAT_CON, rd(t.hs, BAT_CON) | BAT_ENABLE | BAT_DEDICATE);
 +
@@ -358,21 +368,22 @@ index 0000000..58b65d2
 +	wr(t.hs, BAT_CON, rd(t.hs, BAT_CON) | BAT_START);
 +
 +	/*
-+	 * Done = the batcher interrupt (BATCHER_INT_STATUS bit 0); Samsung's IRQ
-+	 * handler then sets BATCHER_OPERATION_COMPLETE in the state register
-+	 * itself. Seen on the phone: state 0x200, int 0x1 when finished.
++	 * Done = OPERATION_COMPLETE (state bit 0), set by the hardware: touch6
++	 * showed a write finish as states 0x40 -> 0x11. INT_STATUS is no use: it
++	 * still read 0x81 from the previous message when a read had only reached
++	 * 0x40, and stopping there left the batcher stuck in 0x200.
 +	 */
 +	uint32_t st = 0, is = 0;
 +	uint32_t trace[6] = { 0 };
 +	unsigned nt = 0;
 +	bool done = false;
-+	for (int i = 0; i < 50000; i++) {                       /* ~50 ms */
++	for (int i = 0; i < 200000; i++) {                      /* ~200 ms */
 +		st = rd(t.hs, BAT_STATE);
 +		is = rd(t.hs, BAT_INT_STATUS);
 +		if (nt < 6 && (nt == 0 || trace[nt - 1] != st)) {
 +			trace[nt++] = st;                       /* state changes */
 +		}
-+		if ((is & 1u) || (st & (BAT_COMPLETE | BAT_UNEXPECTED))) {
++		if (st & (BAT_COMPLETE | BAT_UNEXPECTED)) {
 +			done = true;
 +			break;
 +		}
