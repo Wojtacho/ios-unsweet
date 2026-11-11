@@ -674,6 +674,14 @@ failed: state 0x200 fifo 0x1000001 int 0x1` twice; PMIC id/LDO33 not read;
 BATCHER_INT_STATUS bit 0 (Samsung's IRQ handler sets the state COMPLETE bit
 itself): fixed in 0110.
 
+Plan (user, 2026-11-11): after touch works, switch the userland from the
+iPhone X (D22AP, 1125x2436, no Home button) to the **iPhone 8 Plus**
+(iPhone10,2 D21AP: 1242x2208 rendered and scaled to a 1080x1920 16:9 panel,
+Home button) - same A11 generation, matches the A510F panel and Home key.
+Needs: root image from the 8 Plus IPSW, D21AP /product, identity patch
+(sweet 0059 says iPhone10,3/D22AP), logical display 1242x2208, scale to fit
+(0111 sweetfb_fit, written in ref/p0109, not pushed yet), touch mapping.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.
