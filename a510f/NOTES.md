@@ -766,6 +766,15 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
   the lock screen: TWRP + hfsremote.py (move hfscache aside first) to pull
   /private/var/mobile/Library/Logs/CrashReporter and logs.
   Next after that: SMP (8 x A53 via PSCI cpu_on 0xC4000003).
+- First boot logs (pulled in TWRP, twrp-write/pulled/b8p): no crash, no
+  panic; SpringBoard up at +1 min; datamigrator ran 7 passes (exit 0) and
+  recorded LastSystemVersion 20H392; Setup marked done by the root tweaks.
+  It was only slow (1 CPU) and was stopped right as migration ended.
+- **🎉 iPHONE 8 PLUS USERLAND WORKS ON THE A510F (2026-11-11 ~22:30
+  local, second boot):** full-screen lock screen (1242x2208 scaled exactly
+  onto 1080x1920, nothing cut off or stretched), Home button opens it and
+  goes to the home screen with apps, Power sleeps/wakes the display,
+  volume buttons work, touch works. Laggy (cpus=1). Next: SMP.
   interrupts, tries 4 read forms (nostop+10bit, stop+7bit, nostop+7bit,
   stop+10bit), one console line per message. Not booted yet.
 - Facts checked in Samsung's source: L33CTRL really is 0x4E (enum has explicit
