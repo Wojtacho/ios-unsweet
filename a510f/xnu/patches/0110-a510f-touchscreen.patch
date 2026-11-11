@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..10aa3b1
+index 0000000..323bfa5
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,738 @@
+@@ -0,0 +1,601 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -58,6 +58,9 @@ index 0000000..10aa3b1
 +#define PIN_NFC_PA      0x138C0000u     /* gpc3 at +0x000 */
 +#define PIN_ALIVE_PA    0x139B0000u     /* gpa1 at +0x020 */
 +#define HSI2C3_PA       0x104C0000u
++#define CMU_MIF_PA      0x10430000u
++#define EN_PCLK_MIF     0x0900u         /* bit 27: pclk_hsi2c3 */
++#define PIN_M_PA        0x104E0000u     /* gpm0 at +0x000: 0 SDA, 1 SCL */
 +
 +#define TS_ADDR         0x20
 +#define PMIC_ADDR       0x66
@@ -137,7 +140,7 @@ index 0000000..10aa3b1
 +#define TOUCH_Y_ADJUST  240
 +
 +static struct {
-+	vm_offset_t cmu, i2c, pin_nfc, pin_alive, hs;
++	vm_offset_t cmu, i2c, pin_nfc, pin_alive, hs, cmu_mif, pin_m;
 +	int mode;
 +	bool down[ZT_FINGERS];
 +	unsigned cmd_index, cmd_pointer, desc_pointer;
@@ -360,16 +363,24 @@ index 0000000..10aa3b1
 +	 * itself. Seen on the phone: state 0x200, int 0x1 when finished.
 +	 */
 +	uint32_t st = 0, is = 0;
++	uint32_t trace[6] = { 0 };
++	unsigned nt = 0;
 +	bool done = false;
 +	for (int i = 0; i < 50000; i++) {                       /* ~50 ms */
 +		st = rd(t.hs, BAT_STATE);
 +		is = rd(t.hs, BAT_INT_STATUS);
++		if (nt < 6 && (nt == 0 || trace[nt - 1] != st)) {
++			trace[nt++] = st;                       /* state changes */
++		}
 +		if ((is & 1u) || (st & (BAT_COMPLETE | BAT_UNEXPECTED))) {
 +			done = true;
 +			break;
 +		}
 +		delay(1);
 +	}
++	printf("A510F TOUCH:   bat %s states 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x, payload 0x%x\n",
++	    read ? "rd" : "wr", trace[0], trace[1], trace[2], trace[3], trace[4], trace[5],
++	    rd(t.hs, rx_at));
 +	wr(t.hs, BAT_INT_EN, 0);
 +	int err = 0;
 +	if (!done || (st & BAT_UNEXPECTED)) {
@@ -388,150 +399,6 @@ index 0000000..10aa3b1
 +	wr(t.hs, BAT_INT_STATUS, rd(t.hs, BAT_INT_STATUS));
 +	wr(t.hs, BAT_CON, 0);                                   /* idle */
 +	return err;
-+}
-+
-+/*
-+ * Soft reset of the HSI2C block (i2c-exynos5.c exynos5_i2c_reset + init),
-+ * keeping the timing and CONF values S-Boot programmed. At boot the block
-+ * sits in "master busy, arbitration lost" (TRANS_STATUS 0x2000c) with
-+ * CTL = 0, and sends nothing until it is reset.
-+ */
-+static uint32_t hs_saved[8];
-+static const uint32_t hs_saved_regs[8] = {
-+	HS_CONF, HS_TIMING_HS1, HS_TIMING_HS2, HS_TIMING_HS3,
-+	HS_TIMING_FS1, HS_TIMING_FS2, HS_TIMING_FS3, HS_TIMING_SLA,
-+};
-+
-+static void
-+hs_save_timing(void)
-+{
-+	for (int i = 0; i < 8; i++) {
-+		hs_saved[i] = rd(t.hs, hs_saved_regs[i]);
-+	}
-+	printf("A510F TOUCH: hsi2c conf 0x%x fs1 0x%x fs2 0x%x fs3 0x%x sla 0x%x trans 0x%x\n",
-+	    hs_saved[0], hs_saved[4], hs_saved[5], hs_saved[6], hs_saved[7], rd(t.hs, HS_TRANS_STATUS));
-+}
-+
-+static void
-+hs_reset(void)
-+{
-+	wr(t.hs, BAT_CON, 0);                                   /* batcher off */
-+	wr(t.hs, HS_CTL, rd(t.hs, HS_CTL) | (1u << 31));        /* SW_RST */
-+	delay(10);
-+	wr(t.hs, HS_CTL, rd(t.hs, HS_CTL) & ~(1u << 31));
-+	delay(10);
-+	for (int i = 1; i < 8; i++) {
-+		wr(t.hs, hs_saved_regs[i], hs_saved[i]);
-+	}
-+	wr(t.hs, HS_TIMEOUT, rd(t.hs, HS_TIMEOUT) & ~(1u << 31));
-+	wr(t.hs, HS_CTL, (1u << 0) | (1u << 3));                /* FUNC_MODE_I2C | MASTER */
-+	wr(t.hs, HS_TRAILIG_CTL, 0xff);
-+	wr(t.hs, HS_CONF, (hs_saved[0] & ~((1u << 29) | (1u << 30))) | (1u << 31));   /* auto, FS, 7-bit */
-+	wr(t.hs, HS_INT_ENABLE, 0);
-+	wr(t.hs, HS_INT_STATUS, rd(t.hs, HS_INT_STATUS));
-+	printf("A510F TOUCH: hsi2c reset: ctl 0x%x conf 0x%x trans 0x%x fifo 0x%x\n",
-+	    rd(t.hs, HS_CTL), rd(t.hs, HS_CONF), rd(t.hs, HS_TRANS_STATUS), rd(t.hs, HS_FIFO_STATUS));
-+}
-+
-+static int
-+hs_plain_xfer(bool read, uint8_t *buf, unsigned len, bool stop)
-+{
-+	/* Bus check: master state idle (0), or waiting after a no-stop message (0xd). */
-+	uint32_t bs = rd(t.hs, HS_TRANS_STATUS) & 0xfu;
-+	for (int i = 0; i < 5000 && bs != 0 && bs != 0xd; i++) {
-+		delay(1);
-+		bs = rd(t.hs, HS_TRANS_STATUS) & 0xfu;
-+	}
-+	if (bs != 0 && bs != 0xd) {
-+		printf("A510F TOUCH:   plain %s: bus not idle, trans 0x%x\n", read ? "rd" : "wr",
-+		    rd(t.hs, HS_TRANS_STATUS));
-+		return EBUSY;
-+	}
-+	wr(t.hs, HS_FIFO_CTL, (1u << 0) | (1u << 1) | (0x8u << 16) | (0x8u << 4));
-+	uint32_t ctl = (rd(t.hs, HS_CTL) & ~((1u << 6) | (1u << 7))) | (1u << 0) | (1u << 3);
-+	uint32_t ac = len | (1u << 31);                         /* MASTER_RUN */
-+	if (read) {
-+		ctl |= 1u << 6;                                 /* RXCHON */
-+		ac |= 1u << 16;
-+	} else {
-+		ctl |= 1u << 7;                                 /* TXCHON */
-+	}
-+	if (stop) {
-+		ac |= 1u << 17;
-+	}
-+	wr(t.hs, HS_INT_STATUS, rd(t.hs, HS_INT_STATUS));
-+	wr(t.hs, HS_ADDR, (uint32_t)(PMIC_ADDR & 0x7f) << 10);
-+	wr(t.hs, HS_CTL, ctl);
-+	if (!read) {
-+		for (unsigned i = 0; i < len; i++) {            /* fill before RUN */
-+			wr(t.hs, HS_TX_DATA, buf[i]);
-+		}
-+	}
-+	wr(t.hs, HS_AUTO_CONF, ac);
-+	unsigned n = read ? 0 : len;
-+	int err = 0;
-+	for (int i = 0; i < 20000 && n < len; i++) {           /* ~20 ms */
-+		uint32_t fs = rd(t.hs, HS_FIFO_STATUS);
-+		if (read) {
-+			if (!(fs & (1u << 24))) {                       /* RX not empty */
-+				buf[n++] = (uint8_t)rd(t.hs, HS_RX_DATA);
-+				continue;
-+			}
-+		} else if ((fs & 0x7fu) < 64) {
-+			wr(t.hs, HS_TX_DATA, buf[n++]);
-+			continue;
-+		}
-+		delay(1);
-+	}
-+	if (n < len) {
-+		err = ETIMEDOUT;
-+	}
-+	/*
-+	 * Exynos7-style status: INT bit 7 TRANS_DONE, 8 abort, 9 no dev ack,
-+	 * 10 no dev, 11 timeout; TRANS_STATUS[3:0] master state (0 idle,
-+	 * 0xb no ack, 0xc arbitration lost, 0xd waiting after a no-stop message).
-+	 */
-+	uint32_t is = 0, ts = 0;
-+	bool done = false;
-+	for (int i = 0; i < 20000; i++) {
-+		is = rd(t.hs, HS_INT_STATUS);
-+		ts = rd(t.hs, HS_TRANS_STATUS);
-+		uint32_t st = ts & 0xfu;
-+		if ((is & (0x1fu << 7)) || st == 0xb || st == 0xc ||
-+		    (stop ? st == 0 && i > 2000 : st == 0xd)) {
-+			done = true;
-+			break;
-+		}
-+		delay(1);
-+	}
-+	printf("A510F TOUCH:   plain %s len %u: %u bytes, hs int 0x%x trans 0x%x fifo 0x%x%s\n",
-+	    read ? "rd" : "wr", len, n, is, ts, rd(t.hs, HS_FIFO_STATUS), done ? "" : " (no end)");
-+	uint32_t st = ts & 0xfu;
-+	if (!done || (is & (0xfu << 8)) || st == 0xb || st == 0xc) {
-+		err = EIO;
-+	}
-+	wr(t.hs, HS_INT_STATUS, is);
-+	if (err) {
-+		hs_reset();                                     /* leave the block usable */
-+	}
-+	return err;
-+}
-+
-+static int
-+pmic_read_plain(uint8_t reg, uint8_t *val)
-+{
-+	int e = hs_plain_xfer(false, &reg, 1, false);
-+	if (!e) {
-+		e = hs_plain_xfer(true, val, 1, true);
-+	}
-+	return e;
-+}
-+
-+static int
-+pmic_write_plain(uint8_t reg, uint8_t val)
-+{
-+	uint8_t b[2] = { reg, val };
-+	return hs_plain_xfer(false, b, 2, true);
 +}
 +
 +static bool
@@ -667,26 +534,25 @@ index 0000000..10aa3b1
 +	int te = zt_read(ZT_VENDOR_ID, probe, 2);
 +	printf("A510F TOUCH: chip at 0x20 before power: %d (%02x %02x)\n", te, probe[0], probe[1]);
 +
-+	/* Plain mode first, after a soft reset of the stuck HSI2C block. */
-+	hs_save_timing();
-+	hs_reset();
-+	uint8_t pid = 0xee, pl33 = 0xee;
-+	int p1 = pmic_read_plain(PMIC_REG_ID, &pid);
-+	int p2 = pmic_read_plain(PMIC_REG_L33, &pl33);
-+	printf("A510F TOUCH: plain PMIC id %d 0x%02x, LDO33 ctrl %d 0x%02x\n", p1, pid, p2, pl33);
-+	bool plain_ok = pmic_sane(p1, pid, p2, pl33);
++	/*
++	 * HSI2C3 is shared with the APM (Cortex-M3) behind a hardware
++	 * semaphore that only the batcher takes, so: batcher only, never the
++	 * HSI2C registers directly (that froze the phone twice). Read-only
++	 * look at the bus first: gpm0-0 SDA, gpm0-1 SCL, pclk_hsi2c3.
++	 */
++	printf("A510F TOUCH: hsi2c3 pclk(MIF 0x900 bit 27) 0x%x, gpm0 con 0x%x dat 0x%x pud 0x%x, "
++	    "trans 0x%x int 0x%x fifo 0x%x, bat con 0x%x state 0x%x int 0x%x fifo 0x%x\n",
++	    rd(t.cmu_mif, EN_PCLK_MIF), rd(t.pin_m, 0), rd(t.pin_m, 4), rd(t.pin_m, 8),
++	    rd(t.hs, HS_TRANS_STATUS), rd(t.hs, HS_INT_STATUS), rd(t.hs, HS_FIFO_STATUS),
++	    rd(t.hs, BAT_CON), rd(t.hs, BAT_STATE), rd(t.hs, BAT_INT_STATUS), rd(t.hs, BAT_FIFO_STATUS));
 +
 +	uint8_t id = 0xee, l33 = 0xee;
-+	int e1 = EIO, e2 = EIO;
-+	if (!plain_ok) {
-+		printf("A510F TOUCH: trying the batcher\n");
-+		hs_reset();
-+		e1 = pmic_read(PMIC_REG_ID, &id);
-+		e2 = pmic_read(PMIC_REG_L33, &l33);
-+		printf("A510F TOUCH: batcher PMIC id %d 0x%02x, LDO33 ctrl %d 0x%02x (on = 0x%02x)\n",
-+		    e1, id, e2, l33, PMIC_L33_ON);
-+	}
-+	bool bat_ok = !plain_ok && pmic_sane(e1, id, e2, l33);
++	int e1 = pmic_read(PMIC_REG_ID, &id);
++	IOSleep(5);
++	int e2 = pmic_read(PMIC_REG_L33, &l33);
++	printf("A510F TOUCH: batcher PMIC id %d 0x%02x, LDO33 ctrl %d 0x%02x (on = 0x%02x)\n",
++	    e1, id, e2, l33, PMIC_L33_ON);
++	bool bat_ok = pmic_sane(e1, id, e2, l33);
 +
 +	if (t.mode < 2) {
 +		printf("A510F TOUCH: probe only (a510ftouch=1), done\n");
@@ -695,21 +561,16 @@ index 0000000..10aa3b1
 +	}
 +	if (te) {
 +		/* Write only after both reads worked and LDO33 reads like an LDO control. */
-+		if (!plain_ok && !bat_ok) {
++		if (!bat_ok) {
 +			printf("A510F TOUCH: PMIC reads not trusted, LDO33 left alone\n");
 +			thread_terminate(current_thread());
 +			return;
 +		}
 +		uint8_t back = 0xee;
-+		int ew;
-+		if (plain_ok) {
-+			ew = pmic_write_plain(PMIC_REG_L33, PMIC_L33_ON);
-+			(void)pmic_read_plain(PMIC_REG_L33, &back);
-+		} else {
-+			ew = pmic_write(PMIC_REG_L33, PMIC_L33_ON);
-+			(void)pmic_read(PMIC_REG_L33, &back);
-+		}
-+		printf("A510F TOUCH: LDO33 on (%s): write %d, now 0x%02x\n", plain_ok ? "plain" : "batcher", ew, back);
++		int ew = pmic_write(PMIC_REG_L33, PMIC_L33_ON);
++		IOSleep(5);
++		(void)pmic_read(PMIC_REG_L33, &back);
++		printf("A510F TOUCH: LDO33 on: write %d, now 0x%02x\n", ew, back);
 +		IOSleep(50);                                    /* CHIP_ON_DELAY */
 +	}
 +	if (!zt_power_on()) {
@@ -748,6 +609,8 @@ index 0000000..10aa3b1
 +	t.pin_nfc = ml_io_map(PIN_NFC_PA, 0x1000);
 +	t.pin_alive = ml_io_map(PIN_ALIVE_PA, 0x1000);
 +	t.hs = ml_io_map(HSI2C3_PA, 0x2000);
++	t.cmu_mif = ml_io_map(CMU_MIF_PA, 0x1000);
++	t.pin_m = ml_io_map(PIN_M_PA, 0x1000);
 +	thread_t th;
 +	if (kernel_thread_start(touch_thread, NULL, &th) == KERN_SUCCESS) {
 +		thread_deallocate(th);
