@@ -583,6 +583,29 @@ the SWEET AppleCLCD/IOMobileFramebuffer stand-in).
 Next: repack with sweetfb_noconsole=1 (console muted once the GUI presents
 its first frame, as on sweet).
 
+## 2026-11-11: nineteenth boot: clean Apple logo, then black (repack 42985075608)
+
+Video IMG_4656.MOV (3.5 min, frames every 3 s): kernel boot to ~0:35; ~1:15
+launchd execs UserEventAgent, keybagd, usermanagerd, logd, remoted,
+mediaserverd, watchdogd, configd, DumpPanic, distnoted, amfid,
+containermanagerd, bluetoothd, fairplayd.H2, backboardd, thermalmonitord,
+sleepd, IOMFB_FDR_Loader, mtmergeprops, AppleCredentialManagerDaemon,
+notifyd, mobiletimerd, ptpd, lockdownd, nfcd, rapportd, fseventsd,
+identityservicesd, timed, imagent, sharingd, driverkitd, locationd, many
+xpcproxy; ~2:00 cfprefsd, powerd, passd, runningboardd, PowerUIAgent,
+contextstored, apfs_iosd, dasd, ACCHWComponentAuthService, mobileassetd,
+biomed, ReportCrash, com.apple.datamigrator, lsd; `SWEET Sandbox: logd
+privilege 1002 denied`; `CRASH driverkitd[67] sig 9`; ~2:45 `IOK
+backboardd: matching IOProviderClass IOAcceleratorES -> 0 found` repeated
+(no GPU, as on sweet before its CPU-rendering fixes), securityd AKS sel 7,
+nanoprefsyncd, mobileactivationd; ~2:55 console muted, **clean Apple logo**
+(GUI first frame); ~3:15 **black**. Matches sweet 0079: backboardd
+RequestPowerChange(0) (auto-lock) fades the panel to black; no buttons to
+wake it (sweetkeys=0, no A510F key driver yet).
+
+0109: boot-arg sweetfb_alwayson=1 ignores display-off requests. Next boot:
+noconsole + alwayson, to see what iOS draws after the logo.
+
 ## Open problems before XNU work
 
 1. **16 KB pages.** XNU arm64 builds its kernel pmap on a 16 KB granule.

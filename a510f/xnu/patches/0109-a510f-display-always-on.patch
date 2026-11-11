@@ -1,0 +1,24 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index a62416c..167f8d4 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -535,6 +535,19 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 	case kSweetFBRequestPowerChange:
+ 		if (args->scalarInputCount >= 1) {
+ 			bool off = args->scalarInput[0] == 0;
++			/*
++			 * A510F: boot-arg sweetfb_alwayson=1 ignores "display off"
++			 * (auto-lock) while there is no button to turn it back on.
++			 */
++			static int alwayson = -1;
++			if (alwayson < 0) {
++				uint32_t v = 0;
++				alwayson = PE_parse_boot_argn("sweetfb_alwayson", &v, sizeof(v)) && v;
++			}
++			if (off && alwayson) {
++				IOLog("SWEET FB: display off ignored (sweetfb_alwayson)\n");
++				break;
++			}
+ 			IOLockLock(fFB->fLock);
+ 			if (off != fFB->fPowerOff) {
+ 				fFB->fPowerOff = off;
