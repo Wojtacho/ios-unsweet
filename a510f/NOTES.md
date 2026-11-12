@@ -822,6 +822,15 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
       write, wait bit 29; mux back (sel 0, stat 1).
     - Gate with a boot-arg (a510fcpufreq=1200), abort if the read voltage
       is implausible or a read-back differs; print every step.
+  - **1.2 GHz WORKS (commit 5a4cf36, image a510f-ios-boot-1200, IMG_4711):**
+    both clusters were 1.0 V (vsel 0x60) at 780 MHz; vsel -> 0x7D read back
+    0x7d; dividers stable, parked, locked, back on the PLL: 0xa0170041 =
+    1196 MHz, ~27 s after power-on. Boot timeline barely changed (logo 2:30,
+    responsive ~4:40): boot is not CPU-bound (polled eMMC PIO, console
+    drawing with kprintf spam, fixed waits/respawn throttles). UI "maybe
+    faster". Next speed candidates: eMMC (bus clock / DMA), less console,
+    1.6 GHz (needs ABB for slow ASV groups), GPU (Mali-T720 via Panfrost,
+    like joranv1/ios-sailfish did with freedreno; check CA GLES2).
 - First boot logs (pulled in TWRP, twrp-write/pulled/b8p): no crash, no
   panic; SpringBoard up at +1 min; datamigrator ran 7 passes (exit 0) and
   recorded LastSystemVersion 20H392; Setup marked done by the root tweaks.
