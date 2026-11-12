@@ -878,10 +878,10 @@ index 0000000..dca13c9
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..c63cad8 100644
+index 6f8dba3..607b88d 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
-@@ -316,6 +316,240 @@ mmc_rdata(uint32_t op, uint32_t arg, uint32_t blksz, uint32_t nblk, uint8_t *dst
+@@ -316,6 +316,256 @@ mmc_rdata(uint32_t op, uint32_t arg, uint32_t blksz, uint32_t nblk, uint8_t *dst
  	return got == total ? 0 : EIO;
  }
  
@@ -923,6 +923,11 @@ index 6f8dba3..c63cad8 100644
 +static struct {
 +	bool on;                                /* passed the self-test */
 +	unsigned failures;
++	/* Repeated in every read-statistics line: the self-test line once got lost. */
++	const char *why;                        /* NULL: self-test never ran */
++	int ep, ed;                             /* self-test PIO / DMA errors */
++	uint32_t bad, rint, ids;                /* bytes differing; last DMA error status */
++	uint64_t reads;                         /* reads done by DMA */
 +	struct mmc_desc *desc;                  /* one page, page aligned */
 +	uint64_t desc_pa;
 +} md;
@@ -1036,6 +1041,8 @@ index 6f8dba3..c63cad8 100644
 +		}
 +	}
 +	if (error) {
++		md.rint = s;
++		md.ids = ids;
 +		if (md.failures < 5) {
 +			printf("SWEET MMC: DMA read lba %u x%u %s: rintsts 0x%x idsts 0x%x\n",
 +			    arg, nblk, error == EIO ? "error" : "timeout", s, ids);
@@ -1060,11 +1067,13 @@ index 6f8dba3..c63cad8 100644
 +	uint32_t want = 1;
 +	PE_parse_boot_argn("mmcdma", &want, sizeof(want));
 +	if (!want) {
++		md.why = "off (mmcdma=0)";
 +		printf("SWEET MMC: DMA off (mmcdma=0)\n");
 +		return;
 +	}
 +	md.desc = (struct mmc_desc *)(void *)kalloc_data(PAGE_SIZE, Z_WAITOK | Z_ZERO);
 +	if (md.desc == NULL || ((vm_offset_t)md.desc & PAGE_MASK)) {
++		md.why = "off: descriptor page not page aligned";
 +		printf("SWEET MMC: DMA off: no page-aligned descriptor page\n");
 +		return;
 +	}
@@ -1072,6 +1081,7 @@ index 6f8dba3..c63cad8 100644
 +	const uint32_t blocks = 128;
 +	uint8_t *a = mmc_alloc(blocks * MMC_SECTOR), *b = mmc_alloc(blocks * MMC_SECTOR);
 +	if (a == NULL || b == NULL || md.desc_pa == 0) {
++		md.why = "off: no test buffers or desc pa";
 +		printf("SWEET MMC: DMA off: no test buffers\n");
 +		return;
 +	}
@@ -1093,6 +1103,10 @@ index 6f8dba3..c63cad8 100644
 +	pio_us /= 1000;
 +	dma_us /= 1000;
 +	md.on = (ep == 0 && ed == 0 && bad == 0);
++	md.why = md.on ? "on" : "off: self-test failed";
++	md.ep = ep;
++	md.ed = ed;
++	md.bad = bad;
 +	printf("SWEET MMC: DMA self-test %s: pio %d %llu us, dma %d %llu us, %u bytes differ (first %u), desc pa 0x%llx\n",
 +	    md.on ? "OK, reads use DMA" : "FAILED, reads stay PIO", ep, pio_us, ed, dma_us, bad, first, md.desc_pa);
 +	kfree_data(a, blocks * MMC_SECTOR);
@@ -1117,12 +1131,14 @@ index 6f8dba3..c63cad8 100644
 +	    mmc_stat_bytes >> 20, busy_ms,
 +	    busy_ms ? (mmc_stat_bytes >> 10) * 1000ull / busy_ms : 0ull,
 +	    mmc_stat_cmds, now_ns / 1000000000ull);
++	printf("SWEET MMC: dma %s, %llu dma reads, %u failures; test pio %d dma %d bad %u; last rint 0x%x ids 0x%x\n",
++	    md.why ? md.why : "self-test not run", md.reads, md.failures, md.ep, md.ed, md.bad, md.rint, md.ids);
 +}
 +
  /* Read nblk 512-byte sectors at lba (card address) into dst. */
  static int
  mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
-@@ -326,8 +560,41 @@ mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
+@@ -326,8 +576,44 @@ mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
  	if (nblk > MAX_XFER_BLOCKS || lba + nblk > UINT32_MAX) {
  		return EINVAL;
  	}
@@ -1140,6 +1156,7 @@ index 6f8dba3..c63cad8 100644
 +			if (error) {
 +				if (++md.failures >= 8) {
 +					md.on = false;
++					md.why = "off: disabled after 8 read failures";
 +					printf("SWEET MMC: DMA disabled after %u failures\n", md.failures);
 +				}
 +				error = mmc_rdata(n > 1 ? (18 | CMD_SEND_STOP) : 17, at, MMC_SECTOR, n,
@@ -1147,6 +1164,8 @@ index 6f8dba3..c63cad8 100644
 +				if (error) {
 +					break;
 +				}
++			} else {
++				md.reads++;
 +			}
 +			done += n;
 +		}
@@ -1166,7 +1185,7 @@ index 6f8dba3..c63cad8 100644
  }
  
  /* Copy up to want bytes from src into the FIFO's free entries. */
-@@ -965,6 +1232,9 @@ sweet_mmc_init(void)
+@@ -965,6 +1251,9 @@ sweet_mmc_init(void)
  	if (!error) {
  		error = mmc_gpt(want);
  	}
@@ -1176,7 +1195,7 @@ index 6f8dba3..c63cad8 100644
  	lck_mtx_unlock(&sweet_mmc_lock);
  	if (error) {
  		return error;
-@@ -986,6 +1256,9 @@ sweet_mmc_init(void)
+@@ -986,6 +1275,9 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
