@@ -784,6 +784,14 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
     libsystem's mach_absolute_time() takes the kernel trap.
   - Note: darwin-xnu-build SKIPS patches that do not apply (warning only):
     always grep the built kernel for a string from each new patch.
+  - **🎉 7-CORE BOOT WORKS (commit f105cc5, image a510f-ios-boot-smp7c, run
+    43201898121, 2026-11-12 ~12:00):** Apple logo at 2:20, text at 3:10
+    ("nexus register"), lock screen responsive at ~4:35. Still laggy but
+    better than 1 core (user report). Kernel check: mrs CNTPCT x7 (was 0),
+    CNTVCT x9 (was 28; rest = panic delay, diagnostics, prebuilt libs).
+    Open for speed: CPU clock (S-Boot's DVFS level unknown), the CPU copy +
+    scale of every frame in SweetFramebuffer (no GPU, software rendering),
+    polled eMMC, core 0x001 still the display refresher.
 - First boot logs (pulled in TWRP, twrp-write/pulled/b8p): no crash, no
   panic; SpringBoard up at +1 min; datamigrator ran 7 passes (exit 0) and
   recorded LastSystemVersion 20H392; Setup marked done by the root tweaks.
