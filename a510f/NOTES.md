@@ -831,6 +831,15 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
     faster". Next speed candidates: eMMC (bus clock / DMA), less console,
     1.6 GHz (needs ABB for slow ASV groups), GPU (Mali-T720 via Panfrost,
     like joranv1/ios-sailfish did with freedreno; check CA GLES2).
+  - **eMMC read statistics (commit 71a3ee9, IMG_4713):** 128 MiB / 23.3 s
+    busy at 56 s since boot, 192 / 34.7 at 68 s, 256 / 46.2 at 80 s,
+    384 MiB / 69.3 s at 103 s: **5.6-5.7 MB/s**, and 56-103 s is ~98% spent
+    in the PIO read loop (avg request ~47 KB). ~1.4 us per 8-byte FIFO entry
+    (two 32-bit SFR reads ~0.7 us each). Bus is 8-bit DDR: **IDMAC DMA**
+    (S-Boot uses it, BMOD 0x282) is the fix. Also seen: from ~110 s
+    backboardd polls IOServiceNotificationUser IOAcceleratorES ("0 found")
+    continuously, each printed - see ios-topaz/ios-sailfish's
+    IOAcceleratorES finding for the faster boot.
 - First boot logs (pulled in TWRP, twrp-write/pulled/b8p): no crash, no
   panic; SpringBoard up at +1 min; datamigrator ran 7 passes (exit 0) and
   recorded LastSystemVersion 20H392; Setup marked done by the root tweaks.
