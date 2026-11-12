@@ -1,8 +1,8 @@
 diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
-index 9969739..8e1f5dc 100644
+index 9969739..7ee5160 100644
 --- a/iokit/Kernel/arm/SweetBattery.cpp
 +++ b/iokit/Kernel/arm/SweetBattery.cpp
-@@ -12,10 +12,23 @@
+@@ -12,10 +12,25 @@
  #include <IOKit/pwr_mgt/IOPMPowerSource.h>
  #include <libkern/c++/OSCollectionIterator.h>
  #include <pexpert/pexpert.h>
@@ -19,14 +19,16 @@ index 9969739..8e1f5dc 100644
 + */
 +extern "C" int a510f_fg_read(uint8_t reg, uint16_t *out);
 +#define SWEET_BATT_MAH 2900u
++#define SWEET_BATT_POLL_MS 5000   /* a gauge read is ~2 ms; plug-in shows within 5 s */
 +#else
 +#define SWEET_BATT_MAH 5020u
++#define SWEET_BATT_POLL_MS 30000
 +#endif
 +
  class SweetBattery : public IOPMPowerSource {
  	OSDeclareDefaultStructors(SweetBattery);
  public:
-@@ -28,6 +41,11 @@ private:
+@@ -28,6 +43,11 @@ private:
  	IOTimerEventSource *fTimer;
  	bool fTimerAdded, fRunning, fReal;
  	int fLastMode;
@@ -38,7 +40,7 @@ index 9969739..8e1f5dc 100644
  	void putNumber(const char *key, UInt32 value);
  	void putBool(const char *key, bool value);
  	void publish(unsigned percent, unsigned mv, int ma, bool external,
-@@ -72,6 +90,10 @@ SweetBattery::init(OSDictionary *dictionary)
+@@ -72,6 +92,10 @@ SweetBattery::init(OSDictionary *dictionary)
  		}
  	}
  	fLastMode = -1;
@@ -49,7 +51,7 @@ index 9969739..8e1f5dc 100644
  	return true;
  }
  
-@@ -101,11 +123,11 @@ void
+@@ -101,11 +125,11 @@ void
  SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
      bool capable, bool charging, bool full, bool measured, bool currentValid)
  {
@@ -64,7 +66,7 @@ index 9969739..8e1f5dc 100644
  	setExternalConnected(external);
  	setExternalChargeCapable(capable);
  	setIsCharging(charging);
-@@ -119,11 +141,11 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
+@@ -119,11 +143,11 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
  	putBool("FullyCharged", full);
  	putBool("AppleRawExternalConnected", external);
  	putNumber("AppleRawCurrentCapacity", capacity);
@@ -80,7 +82,7 @@ index 9969739..8e1f5dc 100644
  	putBool("SweetBatteryHardwareSampleValid", measured);
  	putBool("SweetBatteryCurrentValid", currentValid);
  	putBool("SweetBatterySOCEstimated", measured);
-@@ -137,7 +159,7 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
+@@ -137,7 +161,7 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
  		const char *keys[] = {kIOBatteryCurrentChargeKey, kIOBatteryCapacityKey,
  		    kIOBatteryVoltageKey, kIOBatteryAmperageKey, kIOBatteryCycleCountKey,
  		    kIOBatteryFlagsKey};
@@ -89,7 +91,7 @@ index 9969739..8e1f5dc 100644
  		    (UInt32)(kIOBatteryInstalled | (external ? kIOBatteryChargerConnect : 0) |
  		    (charging ? kIOBatteryCharge : 0))};
  		for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
-@@ -154,7 +176,7 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
+@@ -154,7 +178,7 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
  	int mode = measured ? 1 : 0;
  	if (mode != fLastMode) {
  		IOLog("SWEET BATTERY: %s, %u%% %umV external=%d charging=%d\n",
@@ -98,7 +100,7 @@ index 9969739..8e1f5dc 100644
  		    percent, mv, external, charging);
  		fLastMode = mode;
  	}
-@@ -203,9 +225,67 @@ SweetBattery::estimatePercent(unsigned mv)
+@@ -203,9 +227,67 @@ SweetBattery::estimatePercent(unsigned mv)
  	return 100;
  }
  
@@ -145,7 +147,7 @@ index 9969739..8e1f5dc 100644
 +	bool external = charging || (percent >= 99 && ma > -15);
 +	bool full = external && percent >= 100;
 +	publish(percent, mv, ma, external, external, charging && !full, full, true, true);
-+	if (fPolls++ < 3 || (fPolls % 20) == 0 || (int)external != fLastExt || (int)charging != fLastChg) {
++	if (fPolls++ < 3 || (fPolls % 120) == 0 || (int)external != fLastExt || (int)charging != fLastChg) {
 +		IOLog("SWEET BATTERY: SM5705 %u%% (raw %u.%u%%) %umV %dmA %d.%dC external %d charging %d\n",
 +		    percent, raw / 10, raw % 10, mv, ma, t / 10, (t < 0 ? -t : t) % 10, external, charging);
 +	}
@@ -166,7 +168,16 @@ index 9969739..8e1f5dc 100644
  	uint8_t type, present, usb, path, charger, error, temperature;
  	uint16_t rawVoltage;
  	bool valid = fReal &&
-@@ -262,9 +342,20 @@ SweetBattery::start(IOService *provider)
+@@ -252,7 +334,7 @@ SweetBattery::timerFired(OSObject *owner, IOTimerEventSource *sender)
+ 	SweetBattery *self = OSDynamicCast(SweetBattery, owner);
+ 	if (self && self->fRunning) {
+ 		self->poll();
+-		sender->setTimeoutMS(30000);
++		sender->setTimeoutMS(SWEET_BATT_POLL_MS);
+ 	}
+ }
+ 
+@@ -262,9 +344,20 @@ SweetBattery::start(IOService *provider)
  	if (!IOPMPowerSource::start(provider)) {
  		return false;
  	}
@@ -187,3 +198,12 @@ index 9969739..8e1f5dc 100644
  	/* Publish a complete source BEFORE registerService wakes powerd. */
  	poll();
  	if (fReal) {
+@@ -273,7 +366,7 @@ SweetBattery::start(IOService *provider)
+ 		if (fLoop && fTimer && fLoop->addEventSource(fTimer) == kIOReturnSuccess) {
+ 			fTimerAdded = true;
+ 			fRunning = true;
+-			fTimer->setTimeoutMS(30000);
++			fTimer->setTimeoutMS(SWEET_BATT_POLL_MS);
+ 		} else {
+ 			fReal = false;
+ 			poll();
