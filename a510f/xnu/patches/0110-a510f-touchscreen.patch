@@ -878,10 +878,10 @@ index 0000000..dca13c9
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..607b88d 100644
+index 6f8dba3..25c064f 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
-@@ -316,6 +316,256 @@ mmc_rdata(uint32_t op, uint32_t arg, uint32_t blksz, uint32_t nblk, uint8_t *dst
+@@ -316,6 +316,294 @@ mmc_rdata(uint32_t op, uint32_t arg, uint32_t blksz, uint32_t nblk, uint8_t *dst
  	return got == total ? 0 : EIO;
  }
  
@@ -904,6 +904,7 @@ index 6f8dba3..607b88d 100644
 +#define BMOD_SWRESET    (1u << 0)
 +#define BMOD_FB         (1u << 1)
 +#define IDSTS_RI        (1u << 1)
++#define IDSTS_NI        (1u << 8)
 +#define IDSTS_ERR       ((1u << 2) | (1u << 4) | (1u << 5) | (1u << 9))   /* FBE DU CES AIS */
 +#define DES0_DIC        (1u << 1)
 +#define DES0_LD         (1u << 2)
@@ -928,6 +929,15 @@ index 6f8dba3..607b88d 100644
 +	int ep, ed;                             /* self-test PIO / DMA errors */
 +	uint32_t bad, rint, ids;                /* bytes differing; last DMA error status */
 +	uint64_t reads;                         /* reads done by DMA */
++	/*
++	 * How each DMA read was judged complete. IMG_4727: the first build
++	 * waited for IDSTS.RI (with IDINTEN 0), never saw it (IDSTS read 0)
++	 * although the data had arrived intact. Now IDINTEN is RI|NI as in
++	 * Linux, and a read that ends in DATA_OVER with an empty FIFO and no RI
++	 * after 50 us also counts as done; the self-test still compares data.
++	 */
++	uint64_t ri, dto_only;
++	uint32_t hcon;
 +	struct mmc_desc *desc;                  /* one page, page aligned */
 +	uint64_t desc_pa;
 +} md;
@@ -1001,7 +1011,9 @@ index 6f8dba3..607b88d 100644
 +	mmc_wr(MMC_CTRL, mmc_rd(MMC_CTRL) | CTRL_USE_IDMAC);
 +	mmc_wr(MMC_BMOD, BMOD_SWRESET);
 +	(void)mmc_wait_clear(MMC_BMOD, BMOD_SWRESET, CMD_TIMEOUT_NS);
-+	mmc_wr(MMC_IDINTEN, 0);
++	uint32_t ctrl_saved = mmc_rd(MMC_CTRL);
++	mmc_wr(MMC_CTRL, ctrl_saved & ~CTRL_INT_ENABLE);    /* polled: no interrupt line */
++	mmc_wr(MMC_IDINTEN, IDSTS_RI | IDSTS_NI);
 +	mmc_wr(MMC_DBADDRL, (uint32_t)md.desc_pa);
 +	mmc_wr(MMC_DBADDRU, (uint32_t)(md.desc_pa >> 32));
 +	mmc_wr(MMC_BMOD, mmc_rd(MMC_BMOD) | BMOD_IDMAC_EN | BMOD_FB);
@@ -1012,9 +1024,13 @@ index 6f8dba3..607b88d 100644
 +	mmc_wr(MMC_CMD, CMD_DAT_EXP | CMD_R1 | CMD_PRV_DAT_WAIT | op | CMD_START | CMD_USE_HOLD);
 +	if (!mmc_wait_clear(MMC_CMD, CMD_START, CMD_TIMEOUT_NS)) {
 +		mmc_dma_cleanup();
++		mmc_wr(MMC_IDINTEN, 0);
++		mmc_wr(MMC_CTRL, mmc_rd(MMC_CTRL) | (ctrl_saved & CTRL_INT_ENABLE));
 +		return ETIMEDOUT;
 +	}
 +	uint64_t end = deadline_after(DATA_TIMEOUT_NS);
++	uint64_t dto_at = 0, settle = 0;
++	nanoseconds_to_absolutetime(50000, &settle);
 +	uint32_t s = 0, ids = 0, seen = 0;
 +	for (;;) {
 +		s = mmc_rd(MMC_RINTSTS);
@@ -1024,8 +1040,18 @@ index 6f8dba3..607b88d 100644
 +			error = EIO;
 +			break;
 +		}
-+		if ((s & INT_DATA_OVER) && (ids & IDSTS_RI)) {
-+			break;
++		if (s & INT_DATA_OVER) {
++			if (ids & IDSTS_RI) {
++				md.ri++;
++				break;
++			}
++			uint64_t now = mach_absolute_time();
++			if (dto_at == 0) {
++				dto_at = now;
++			} else if (now - dto_at > settle && STATUS_FCNT(mmc_rd(MMC_STATUS)) == 0) {
++				md.dto_only++;
++				break;
++			}
 +		}
 +		if (mach_absolute_time() > end) {
 +			error = ETIMEDOUT;
@@ -1048,10 +1074,14 @@ index 6f8dba3..607b88d 100644
 +			    arg, nblk, error == EIO ? "error" : "timeout", s, ids);
 +		}
 +		mmc_dma_cleanup();
++		mmc_wr(MMC_IDINTEN, 0);
++		mmc_wr(MMC_CTRL, mmc_rd(MMC_CTRL) | (ctrl_saved & CTRL_INT_ENABLE));
 +		mmc_abort();
 +		return error;
 +	}
 +	mmc_dma_cleanup();
++	mmc_wr(MMC_IDINTEN, 0);
++	mmc_wr(MMC_CTRL, mmc_rd(MMC_CTRL) | (ctrl_saved & CTRL_INT_ENABLE));
 +	mmc_dcache_flush(dst, total);           /* drop lines fetched while the DMA ran */
 +	return 0;
 +}
@@ -1078,23 +1108,30 @@ index 6f8dba3..607b88d 100644
 +		return;
 +	}
 +	md.desc_pa = ml_vtophys((vm_offset_t)md.desc);
-+	const uint32_t blocks = 128;
++	const uint32_t blocks = MMC_DMA_MAX_BLOCKS;      /* all 32 descriptors' worth */
++	md.hcon = mmc_rd(MMC_HCON);
 +	uint8_t *a = mmc_alloc(blocks * MMC_SECTOR), *b = mmc_alloc(blocks * MMC_SECTOR);
 +	if (a == NULL || b == NULL || md.desc_pa == 0) {
 +		md.why = "off: no test buffers or desc pa";
 +		printf("SWEET MMC: DMA off: no test buffers\n");
 +		return;
 +	}
-+	memset(b, 0xa5, blocks * MMC_SECTOR);
-+	uint64_t t0 = mach_absolute_time();
-+	int ep = mmc_rdata(18 | CMD_SEND_STOP, 0, MMC_SECTOR, blocks, a, NULL);
-+	uint64_t t1 = mach_absolute_time();
-+	int ed = mmc_dma_rdata(18 | CMD_SEND_STOP, 0, blocks, b);
-+	uint64_t t2 = mach_absolute_time();
++	/* Three places: the GPT, further in, and the start of the iOS root. */
++	const uint32_t at[3] = { 0, 8192, (uint32_t)sm.first_lba };
++	int ep = 0, ed = 0;
 +	uint32_t bad = 0, first = 0;
-+	for (uint32_t i = 0; i < blocks * MMC_SECTOR; i++) {
-+		if (a[i] != b[i] && bad++ == 0) {
-+			first = i;
++	uint64_t t0 = 0, t1 = 0, t2 = 0;
++	for (int r = 0; r < 3 && !ep && !ed && !bad; r++) {
++		memset(b, 0xa5 ^ r, blocks * MMC_SECTOR);
++		t0 = mach_absolute_time();
++		ep = mmc_rdata(18 | CMD_SEND_STOP, at[r], MMC_SECTOR, blocks, a, NULL);
++		t1 = mach_absolute_time();
++		ed = mmc_dma_rdata(18 | CMD_SEND_STOP, at[r], blocks, b);
++		t2 = mach_absolute_time();
++		for (uint32_t i = 0; i < blocks * MMC_SECTOR; i++) {
++			if (a[i] != b[i] && bad++ == 0) {
++				first = i;
++			}
 +		}
 +	}
 +	uint64_t pio_us = 0, dma_us = 0;
@@ -1131,14 +1168,15 @@ index 6f8dba3..607b88d 100644
 +	    mmc_stat_bytes >> 20, busy_ms,
 +	    busy_ms ? (mmc_stat_bytes >> 10) * 1000ull / busy_ms : 0ull,
 +	    mmc_stat_cmds, now_ns / 1000000000ull);
-+	printf("SWEET MMC: dma %s, %llu dma reads, %u failures; test pio %d dma %d bad %u; last rint 0x%x ids 0x%x\n",
-+	    md.why ? md.why : "self-test not run", md.reads, md.failures, md.ep, md.ed, md.bad, md.rint, md.ids);
++	printf("SWEET MMC: dma %s, %llu dma reads (ri %llu, dto %llu), %u failures; test pio %d dma %d bad %u; last rint 0x%x ids 0x%x hcon 0x%x\n",
++	    md.why ? md.why : "self-test not run", md.reads, md.ri, md.dto_only, md.failures,
++	    md.ep, md.ed, md.bad, md.rint, md.ids, md.hcon);
 +}
 +
  /* Read nblk 512-byte sectors at lba (card address) into dst. */
  static int
  mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
-@@ -326,8 +576,44 @@ mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
+@@ -326,8 +614,44 @@ mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
  	if (nblk > MAX_XFER_BLOCKS || lba + nblk > UINT32_MAX) {
  		return EINVAL;
  	}
@@ -1185,7 +1223,7 @@ index 6f8dba3..607b88d 100644
  }
  
  /* Copy up to want bytes from src into the FIFO's free entries. */
-@@ -965,6 +1251,9 @@ sweet_mmc_init(void)
+@@ -965,6 +1289,9 @@ sweet_mmc_init(void)
  	if (!error) {
  		error = mmc_gpt(want);
  	}
@@ -1195,7 +1233,7 @@ index 6f8dba3..607b88d 100644
  	lck_mtx_unlock(&sweet_mmc_lock);
  	if (error) {
  		return error;
-@@ -986,6 +1275,9 @@ sweet_mmc_init(void)
+@@ -986,6 +1313,9 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
