@@ -1,0 +1,114 @@
+diff --git a/osfmk/arm/commpage/commpage.c b/osfmk/arm/commpage/commpage.c
+index ee9f8de..05d6646 100644
+--- a/osfmk/arm/commpage/commpage.c
++++ b/osfmk/arm/commpage/commpage.c
+@@ -41,6 +41,7 @@
+ #include <mach/machine.h>
+ #include <mach/vm_map.h>
+ #include <machine/cpu_capabilities.h>
++#include <pexpert/arm64/board_config.h>  /* SWEET_GIC_V2 (A510F) */
+ #include <machine/commpage.h>
+ #include <machine/config.h>
+ #include <machine/pmap.h>
+@@ -167,7 +168,18 @@ commpage_populate(void)
+ 	*((uint32_t*)(_COMM_PAGE_CPUFAMILY + _COMM_PAGE_RW_OFFSET)) = (uint32_t)cpufamily;
+ 	*((uint32_t*)(_COMM_PAGE_DEV_FIRM_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint32_t)PE_i_can_has_debugger(NULL);
+ 	*((uint32_t*)(_COMM_PAGE_DEV_FIRM + _COMM_PAGE_RO_OFFSET)) = (uint32_t)PE_i_can_has_debugger(NULL);
++#if defined(SWEET_GIC_V2)
++	/*
++	 * A510F: the cores' virtual counters have different offsets (only the
++	 * kernel corrects for that, per core), so user space must not compute
++	 * mach_absolute_time() from CNTVCT itself: NONE makes libsystem take the
++	 * kernel trap. EL0 counter access stays enabled (CNTKCTL) for code that
++	 * reads it directly.
++	 */
++	*((uint8_t*)(_COMM_PAGE_USER_TIMEBASE + _COMM_PAGE_RW_OFFSET)) = USER_TIMEBASE_NONE;
++#else
+ 	*((uint8_t*)(_COMM_PAGE_USER_TIMEBASE + _COMM_PAGE_RW_OFFSET)) = user_timebase_type();
++#endif
+ 	*((uint8_t*)(_COMM_PAGE_CONT_HWCLOCK + _COMM_PAGE_RW_OFFSET)) = (uint8_t)user_cont_hwclock_allowed();
+ 	*((uint8_t*)(_COMM_PAGE_KERNEL_PAGE_SHIFT_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) page_shift;
+ 	*((uint8_t*)(_COMM_PAGE_KERNEL_PAGE_SHIFT + _COMM_PAGE_RO_OFFSET)) = (uint8_t) page_shift;
+diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
+index b082a10..f431fb1 100644
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -978,6 +978,59 @@ sweet_cpu_signal_is_enabled(unsigned int cpu)
+ #endif
+ 
+ 
++#if defined(SWEET_GIC_V2)
++/*
++ * A510F: S-Boot leaves the boot core's virtual counter with a huge offset
++ * (CNTVCT near 2^63, CNTVOFF set for it alone); the other cores count from a
++ * different base, and EL1 cannot change CNTVOFF_EL2. Each secondary measures
++ * its offset to the boot core once (SweetCPU.cpp answers from the boot core
++ * while waiting for the core) and adds it to its cpu_base_timebase, so
++ * mach_absolute_time() agrees on all cores. Best of 16 round trips.
++ */
++uint64_t sweet_tb_req, sweet_tb_resp, sweet_tb_boot;
++static int64_t sweet_tb_delta[MAX_CPUS];
++static uint8_t sweet_tb_done[MAX_CPUS];
++
++static int64_t
++sweet_tb_measure(void)
++{
++	uint64_t freq = __builtin_arm_rsr64("CNTFRQ_EL0") & 0xffffffff;
++	uint64_t best_rtt = ~0ULL;
++	int64_t best = 0;
++	for (int r = 0; r < 16; r++) {
++		uint64_t seq = os_atomic_load(&sweet_tb_req, relaxed) + 1;
++		__builtin_arm_isb(ISB_SY);
++		uint64_t t1 = __builtin_arm_rsr64("CNTVCT_EL0");
++		os_atomic_store(&sweet_tb_req, seq, release);
++		bool answered = false;
++		for (;;) {
++			if (os_atomic_load(&sweet_tb_resp, acquire) == seq) {
++				answered = true;
++				break;
++			}
++			__builtin_arm_isb(ISB_SY);
++			if (__builtin_arm_rsr64("CNTVCT_EL0") - t1 > freq / 10) {
++				break;          /* 100 ms: boot core busy, try again */
++			}
++		}
++		__builtin_arm_isb(ISB_SY);
++		uint64_t t2 = __builtin_arm_rsr64("CNTVCT_EL0");
++		if (!answered) {
++			continue;
++		}
++		uint64_t boot = os_atomic_load(&sweet_tb_boot, relaxed);
++		uint64_t rtt = t2 - t1;
++		if (rtt < best_rtt) {
++			best_rtt = rtt;
++			best = (int64_t)(boot - (t1 + rtt / 2));
++		}
++	}
++	kprintf("SWEET TB: cpu %d counter offset to the boot core %lld (best round trip %llu ticks)" "\n",
++	    cpu_number(), best, best_rtt);
++	return best;
++}
++#endif /* SWEET_GIC_V2 */
++
+ void
+ cpu_timebase_init(boolean_t from_boot)
+ {
+@@ -1012,6 +1065,18 @@ cpu_timebase_init(boolean_t from_boot)
+ 	cdp->cpu_decrementer = 0x7FFFFFFFUL;
+ 	cdp->cpu_timebase = 0x0UL;
+ 	cdp->cpu_base_timebase = rtclock_base_abstime;
++#if defined(SWEET_GIC_V2)
++	if (cdp != &BootCpuData) {
++		int n = cdp->cpu_number;
++		if (n >= 0 && n < MAX_CPUS) {
++			if (!sweet_tb_done[n]) {
++				sweet_tb_delta[n] = sweet_tb_measure();
++				sweet_tb_done[n] = 1;
++			}
++			cdp->cpu_base_timebase = rtclock_base_abstime + (uint64_t)sweet_tb_delta[n];
++		}
++	}
++#endif
+ }
+ 
+ int
