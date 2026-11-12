@@ -17,10 +17,11 @@ no wallpaper provider):
                   the app extensions. sweet-root-tweaks.py skips it through
                   LastSystemVersion, which left LaunchServices with 1 of 524
                   extensions on sailfish; that is undone here.
-  stock apps      every app in /private/var/staged_system_apps moves into
-                  /Applications (Weather, Calendar, Clock, Reminders, ... and
-                  their widget/poster extensions). iOS installs them on the
-                  first boot, which fails on code signing here.
+  stock apps      the apps in /private/var/staged_system_apps listed in
+                  a510f/apps.txt move into /Applications (with their widget
+                  and poster extensions); the others are deleted. iOS would
+                  install them on the first boot, which fails on code signing
+                  here. No apps.txt: all of them.
   wallpapers      the stock wallpapers' HEIC layers get PNG twins and each
                   main.caml points at them: there is no hardware HEVC decoder.
                   Needs heif-convert (libheif-examples). The HEIC files stay.
@@ -28,6 +29,7 @@ no wallpaper provider):
 import glob, os, plistlib, shutil, subprocess, sys
 
 MOBILE = 501
+KEEP_FREE = 2 << 30          # PNG wallpapers never take the volume under 2 GiB free
 
 
 def feature_flag(root):
@@ -63,17 +65,43 @@ def migration(root):
     print('migration: runs once on the first boot (datamigrator/migrate)')
 
 
+APPS_TXT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../apps.txt')
+
+
+def chosen_apps():
+    """Names from a510f/apps.txt ('Weather.app'; # comments); None: no file = all."""
+    if not os.path.exists(APPS_TXT):
+        return None
+    names = set()
+    for line in open(APPS_TXT, encoding='utf-8'):
+        line = line.split('#', 1)[0].strip()
+        if line:
+            names.add(line if line.endswith('.app') else line + '.app')
+    return names
+
+
 def stock_apps(root):
     staged = os.path.join(root, 'private/var/staged_system_apps')
-    moved = 0
+    want = chosen_apps()
+    moved, removed = [], []
     for app in sorted(glob.glob(os.path.join(staged, '*.app'))):
-        dst = os.path.join(root, 'Applications', os.path.basename(app))
+        name = os.path.basename(app)
+        if want is not None and name not in want:
+            shutil.rmtree(app)                 # not chosen: not installed, space freed
+            removed.append(name)
+            continue
+        dst = os.path.join(root, 'Applications', name)
         if os.path.exists(dst):
             print('kept existing', os.path.relpath(dst, root))
             continue
         os.rename(app, dst)                    # same volume: owners and modes stay
-        moved += 1
-    print(f'stock apps: {moved} moved from staged_system_apps to /Applications')
+        moved.append(name)
+    print(f'stock apps: {len(moved)} into /Applications: {" ".join(moved)}')
+    print(f'stock apps: {len(removed)} left out: {" ".join(removed)}')
+    if want is not None:
+        missing = sorted(want - set(moved) - {os.path.basename(a) for a in glob.glob(os.path.join(root, 'Applications', '*.app'))})
+        if missing:
+            print('apps.txt names not found:', ' '.join(missing))
 
 
 def wallpapers(root):
@@ -82,14 +110,27 @@ def wallpapers(root):
         print('no', os.path.relpath(base, root))
         return
     converted = 0
-    for dirpath, _, files in os.walk(base):
+    failed = []
+    low = False
+    free0 = shutil.disk_usage(root).free
+    for dirpath, _, files in list(os.walk(base)):
         for name in files:
             if not name.lower().endswith('.heic'):
                 continue
             heic = os.path.join(dirpath, name)
             png = os.path.splitext(heic)[0] + '.png'
+            if not os.path.exists(png) and shutil.disk_usage(root).free < KEEP_FREE:
+                if not low:
+                    print(f'wallpapers: stopped converting, under {KEEP_FREE >> 30} GiB free')
+                low = True
+                continue
             if not os.path.exists(png):
-                subprocess.run(['heif-convert', heic, png], check=True, stdout=subprocess.DEVNULL)
+                r = subprocess.run(['heif-convert', heic, png], stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True)
+                if r.returncode != 0 or not os.path.exists(png):
+                    failed.append(os.path.relpath(heic, root))
+                    print('heif-convert failed:', os.path.relpath(heic, root), r.stdout.strip()[-300:])
+                    continue
                 st = os.stat(heic)
                 os.chown(png, st.st_uid, st.st_gid)
                 os.chmod(png, st.st_mode & 0o7777)
@@ -103,11 +144,19 @@ def wallpapers(root):
             text = f.read()
         if b'.HEIC"' not in text and b'.heic"' not in text:
             continue
-        new = text.replace(b'.HEIC"', b'.png"').replace(b'.heic"', b'.png"')
+        new = text
+        for name in os.listdir(os.path.join(dirpath, 'assets')) if os.path.isdir(os.path.join(dirpath, 'assets')) else []:
+            stem, ext = os.path.splitext(name)
+            if ext.lower() == '.heic' and os.path.exists(os.path.join(dirpath, 'assets', stem + '.png')):
+                new = new.replace(name.encode() + b'"', stem.encode() + b'.png"')
+        if new == text:
+            continue
         with open(caml, 'wb') as f:
             f.write(new)
         edited += 1
-    print(f'wallpapers: {converted} HEIC layers as PNG, {edited} main.caml edited')
+    free1 = shutil.disk_usage(root).free
+    print(f'wallpapers: {converted} HEIC layers as PNG, {len(failed)} failed, {edited} main.caml edited, '
+          f'{(free0 - free1) >> 20} MiB used, {free1 >> 20} MiB free')
 
 
 def main():

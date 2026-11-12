@@ -20,6 +20,7 @@ on:
       - "tools/mkiosroot.sh"
       - "tools/sweet-root-tweaks.py"
       - "a510f/tools/a510f-root-tweaks.py"
+      - "a510f/apps.txt"
       - ".github/workflows/a510f-iosroot.yml"
 
 concurrency:
@@ -113,7 +114,9 @@ jobs:
           sudo python3 tools/sweet-root-tweaks.py /mnt/iosroot
           # A510F: wallpapers and widgets (ExtensionKit flag, first-boot migration,
           # stock apps into /Applications, HEIC wallpaper layers as PNG).
-          sudo python3 a510f/tools/a510f-root-tweaks.py /mnt/iosroot
+          sudo python3 a510f/tools/a510f-root-tweaks.py /mnt/iosroot | tee /tmp/a510f-tweaks
+          grep -E '^(stock apps|wallpapers|heif-convert failed|apps.txt)' /tmp/a510f-tweaks | head -20 |
+            while IFS= read -r l; do echo "::notice title=A510F root::$l"; done || true
           df -m /mnt/iosroot | tee /tmp/df0
           # Odin's ustar members must stay under 8 GiB, and USERDATA holds
           # most of the files: drop every localization but English/Base
@@ -178,3 +181,5 @@ jobs:
           tail -45 /tmp/steplog | cut -c1-200 > /tmp/msg || true
           df -h / /mnt >> /tmp/msg || true
           echo "::error title=iOS root build failed::$(sed ':a;N;$!ba;s/\n/%0A/g' /tmp/msg)"
+          grep -A20 '^Traceback' /tmp/steplog | head -25 | cut -c1-300 |
+            while IFS= read -r l; do echo "::error title=Python error::$l"; done || true

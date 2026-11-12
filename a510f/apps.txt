@@ -1,0 +1,33 @@
+# Stock iOS apps installed into /Applications when the A510F iOS root is built
+# (a510f/tools/a510f-root-tweaks.py). Apps not listed are deleted from the root.
+# One .app name per line; '#' starts a comment.
+# Left out on request: Bridge.app (Watch), MobileStore.app (iTunes Store),
+# Passbook.app (Wallet), FindMy.app (Find My).
+AppleTV.app
+Books.app
+Calculator.app
+Compass.app
+Contacts.app
+FaceTime.app
+Files.app
+Fitness.app
+Freeform.app
+Health.app
+Home.app
+Magnifier.app
+Maps.app
+Measure.app
+MobileCal.app
+MobileMail.app
+MobileNotes.app
+MobileTimer.app
+Music.app
+News.app
+Podcasts.app
+Reminders.app
+SequoiaTranslator.app
+Shortcuts.app
+Stocks.app
+Tips.app
+VoiceMemos.app
+Weather.app
