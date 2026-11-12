@@ -1,0 +1,113 @@
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 1aa173a..914dd25 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -24,6 +24,7 @@ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+ class SweetCPU;
+ static SweetCPU *sweet_cpus[MAX_CPUS];
+ static uint32_t sweet_cpus_registered;
++static uint64_t sweet_boot_cntvct;  /* boot core's CNTVCT at the last CPU_ON */
+ 
+ /* SMCCC 1.0: x0 is the signed PSCI result; do not assume x1-x17 survive. */
+ static int32_t
+@@ -74,7 +75,12 @@ SweetCPU::start(IOService *provider)
+ 		return false;
+ 	}
+ 	/* MPIDR Aff1 = core: 0x000-0x500 A55, 0x600/0x700 A76 */
++#if defined(SWEET_GIC_V2)
++	/* A510F: 2 clusters x 4 Cortex-A53, MPIDR Aff1 = cluster, Aff0 = core. */
++	if ((cpu->phys_id & ~0x103u) != 0 ||
++#else
+ 	if (cpu->phys_id > 0x700 || (cpu->phys_id & 0xff) != 0 ||
++#endif
+ 	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
+ 		panic("SWEET CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
+ 		    cpu->cpu_id, cpu->phys_id, topology->num_cpus);
+@@ -200,6 +206,10 @@ SweetCPU::initCPU(bool boot)
+ 	 * Waiting here with DAIF.I set would deadlock every secondary. */
+ 	signalCPU(this);
+ 	setCPUState(kIOCPUStateRunning);
++	/* A510F: this core's counter vs the boot core's just before CPU_ON. */
++	__builtin_arm_isb(ISB_SY);
++	kprintf("SWEET CPU: cpu=%u cntvct 0x%llx (boot core 0x%llx at CPU_ON)\n", getCPUNumber(),
++	    __builtin_arm_rsr64("CNTVCT_EL0"), __atomic_load_n(&sweet_boot_cntvct, __ATOMIC_ACQUIRE));
+ 	kprintf("SWEET CPU: cpu=%u entered initCPU mpidr=0x%llx EL%llu IRQs=%u\n",
+ 	    getCPUNumber(), __builtin_arm_rsr64("MPIDR_EL1") & 0xffffULL,
+ 	    __builtin_arm_rsr64("CurrentEL") >> 2, ml_get_interrupts_enabled());
+@@ -236,6 +246,8 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
+ 	vm_offset_t entry = ml_static_vtop((vm_offset_t)&sweet_secondary_entry);
+ 	IOLog("SWEET CPU: cpu=%u CPU_ON target=0x%x entry_pa=0x%llx context=%u\n",
+ 	    getCPUNumber(), cpu->phys_id, (uint64_t)entry, getCPUNumber());
++	__builtin_arm_isb(ISB_SY);
++	__atomic_store_n(&sweet_boot_cntvct, __builtin_arm_rsr64("CNTVCT_EL0"), __ATOMIC_RELEASE);
+ 	__builtin_arm_dsb(DSB_SY);
+ 	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
+ 	IOLog("SWEET CPU: cpu=%u PSCI CPU_ON rc=%d\n", getCPUNumber(), rc);
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index b09e193..976b335 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -306,11 +306,13 @@ LEXT(sweet_secondary_entry)
+ 	mov		x1, #3
+ 	msr		CNTHCTL_EL2, x1
+ 	msr		CNTVOFF_EL2, xzr
++#if !defined(SWEET_GIC_V2)
+ 	/* Permit ICC_SRE_EL1 and GIC CPU interface system-register access. */
+ 	mrs		x1, ICC_SRE_EL2
+ 	orr		x1, x1, #1
+ 	orr		x1, x1, #8
+ 	msr		ICC_SRE_EL2, x1
++#endif /* A510F GIC-400: memory-mapped CPU interface, no ICC_* registers */
+ 	/* Known Armv8 SCTLR RES1 bits, M/C/I off, little endian. */
+ 	MOV64	x1, 0x30d00800
+ 	msr		SCTLR_EL1, x1
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+index 4c64e5c..90cd312 100644
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -54,6 +54,12 @@ _gic_write32(vm_offset_t addr, uint32_t value)
+ /* gicr_base holds the GICv2 CPU interface (GICC) mapping on the A510F. */
+ #define gicc_base gicr_base
+ static vm_offset_t sweet_pmu_base;
++/*
++ * GIC-400 CPU interface bit of each core, indexed cluster * 4 + core and
++ * read by the core itself from its banked GICD_ITARGETSR0 (0 = not yet).
++ */
++#define GICD_ITARGETSR0_V2  0x800
++static volatile uint8_t sweet_gic_iface[8];
+ 
+ unsigned long long
+ sweet_gic_ack(void)
+@@ -77,9 +83,13 @@ sweet_gic_sgi(unsigned long long target_mpidr, unsigned int sgi_id)
+ 	if (target == self) {
+ 		sgir = GICD_SGIR_TARGET_SELF | sgi_id;
+ 	} else {
+-		/* GIC-400 CPU interface n = cluster * 4 + core (2 x 4 Cortex-A53) */
+-		unsigned int iface = (unsigned int)(((target >> 8) & 0xff) * 4 + (target & 0xff));
+-		sgir = GICD_SGIR_TARGET_LIST | ((1U << iface) << 16) | sgi_id;
++		/* The interface the target core reported; else assume cluster * 4 + core. */
++		unsigned int idx = (unsigned int)(((target >> 8) & 0xff) * 4 + (target & 0xff));
++		uint32_t mask = idx < 8 ? sweet_gic_iface[idx] : 0;
++		if (mask == 0) {
++			mask = 1U << (idx & 7);
++		}
++		sgir = GICD_SGIR_TARGET_LIST | (mask << 16) | sgi_id;
+ 	}
+ 	__builtin_arm_dsb(DSB_ISHST);
+ 	_gic_write32(gicd_base + GICD_SGIR_V2, sgir);
+@@ -91,6 +101,15 @@ sweet_gic_v2_init_cpu(void)
+ {
+ 	/* Banked per CPU: SGIs/PPIs 0-31. Group writes are WI from non-secure. */
+ 	_gic_write32(gicd_base + GICD_IGROUPR0_V2, 0xFFFFFFFF);
++	{
++		uint64_t me = __builtin_arm_rsr64("MPIDR_EL1");
++		unsigned int idx = (unsigned int)(((me >> 8) & 0xff) * 4 + (me & 0xff));
++		uint8_t mask = (uint8_t)(_gic_read32(gicd_base + GICD_ITARGETSR0_V2) & 0xff);
++		if (idx < 8) {
++			sweet_gic_iface[idx] = mask;
++		}
++		kprintf("SWEET GIC: core 0x%llx is GIC CPU interface mask 0x%x\n", me & 0xffff, mask);
++	}
+ 	for (unsigned int i = 0; i < 32; i += 4) {
+ 		_gic_write32(gicd_base + GICD_IPRIORITYR_V2 + i, 0xA0A0A0A0);
+ 	}
