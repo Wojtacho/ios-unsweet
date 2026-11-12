@@ -97,6 +97,12 @@ def iphone8plus(root):
             # interrupts, function-button_* phandles) that drivers would match.
             props = [(k, v) for k, v in props
                      if k in ('button-names', 'home-button-type', 'opposed-power-vol-buttons')]
+        if props is not None and name == 'product':
+            # The A510F panel is sRGB. With "P3" iOS picks deep-color surfaces
+            # (MaterialKit b3a8, CA w30r) that CoreAnimation's CPU renderer cannot
+            # draw into: backgrounds and widgets stay white (joranv1/ios-sailfish).
+            props = [(k, mkadt.cstr('sRGB') if k in ('artwork-display-gamut', 'display-gamut') else v)
+                     for k, v in props]
         root.children = [c for c in root.children if c.name != name]
         if props is not None:
             n = mkadt.node(name, [('AAPL,phandle', struct.pack('<I', 900 + len(root.children)))] + props)

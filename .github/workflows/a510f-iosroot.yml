@@ -19,6 +19,7 @@ on:
     paths:
       - "tools/mkiosroot.sh"
       - "tools/sweet-root-tweaks.py"
+      - "a510f/tools/a510f-root-tweaks.py"
       - ".github/workflows/a510f-iosroot.yml"
 
 concurrency:
@@ -57,7 +58,8 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q fuse3 cmake g++ libfuse3-dev zlib1g-dev libbz2-dev \
-            libattr1-dev hfsprogs rsync android-sdk-libsparse-utils
+            libattr1-dev hfsprogs rsync android-sdk-libsparse-utils libheif-examples
+          command -v heif-convert
           sudo modprobe hfsplus || { sudo apt-get install -y -q "linux-modules-extra-$(uname -r)" && sudo modprobe hfsplus; }
           git clone -q --recursive https://github.com/sgan81/apfs-fuse /tmp/apfs-fuse
           git -C /tmp/apfs-fuse log -1 --format='apfs-fuse %h %cs'
@@ -109,6 +111,9 @@ jobs:
           sudo mkdir -p /mnt/iosroot
           sudo mount -t hfsplus -o loop,force "$W/root.img" /mnt/iosroot
           sudo python3 tools/sweet-root-tweaks.py /mnt/iosroot
+          # A510F: wallpapers and widgets (ExtensionKit flag, first-boot migration,
+          # stock apps into /Applications, HEIC wallpaper layers as PNG).
+          sudo python3 a510f/tools/a510f-root-tweaks.py /mnt/iosroot
           df -m /mnt/iosroot | tee /tmp/df0
           # Odin's ustar members must stay under 8 GiB, and USERDATA holds
           # most of the files: drop every localization but English/Base
