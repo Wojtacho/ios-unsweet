@@ -792,6 +792,18 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
     Open for speed: CPU clock (S-Boot's DVFS level unknown), the CPU copy +
     scale of every frame in SweetFramebuffer (no GPU, software rendering),
     polled eMMC, core 0x001 still the display refresher.
+  - **CPU clock (commit 8c942a1 boot, photo):** both clusters CMU_CPU
+    0x10900000 / CMU_APL 0x10800000 PLL_CON0 = 0xa00f0041, en 1 lock 1,
+    mux sel 0 (cluster PLL), DIV_0 0x03717700, DIV_1 0x2. pll_2555x layout
+    from Samsung composite.h: M bit 12 (0x3ff), P bit 4 (0x3f), S bit 0 (7)
+    -> M 240 P 4 S 1 -> **780 MHz** (the report's own M/P/S decode was
+    wrong). Samsung table_cpu/table_apl (clk-exynos7580.c): 1.6 GHz = P 4
+    M 246 S 0; 1.2 GHz = P 4 M 368 S 1. Voltage (dtsi operating-points):
+    1.6 GHz 1.2875 V ... 900 MHz 1.0 V. Rails (S2MPU03, a5xelte dts):
+    BUCK2 "cpu-cluster.0" vsel reg 0x1D, BUCK1 "cpu-cluster.1" vsel reg 0x1B,
+    V = 400 mV + sel * 6.25 mV (1.2875 V = 0x8E). Before raising: Samsung's
+    DVFS sequence (mux to bus PLL, reprogram PLL, lock, back, per-rate
+    DIV_CPU_0/1 values) from their exynos7580 cpufreq/CAL code.
 - First boot logs (pulled in TWRP, twrp-write/pulled/b8p): no crash, no
   panic; SpringBoard up at +1 min; datamigrator ran 7 passes (exit 0) and
   recorded LastSystemVersion 20H392; Setup marked done by the root tweaks.
