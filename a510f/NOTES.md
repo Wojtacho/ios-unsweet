@@ -851,6 +851,33 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
     when enabled in IDINTEN: write RI|NI (CTRL.INT_ENABLE masked while
     polling). A DATA_OVER + empty-FIFO fallback exists but was never needed.
     Self-test: three 124 KiB reads (LBA 0, 8192, root start) vs PIO.
+  - **Boot waits (0115, IMG_4729):** empty IOAcceleratorES (topaz 0138,
+    QuartzCore polled 300 x 100 ms per backboardd start), no IOKit-daemon
+    busy hold (topaz 0128), SWEET AKS lines capped: logo 0:50, lock screen
+    1:23, responsive **1:38** (was ~2:00 with DMA, ~4:40 before).
+  - **Battery (0116):** SM5705 fuel gauge at 0x71 on a bit-banged GPIO I2C
+    bus (gpb0-2 SDA, gpb0-3 SCL; a510f_fg_read in a510f_touch.c, read only);
+    SOC/990 like Samsung, polled every 5 s; charging = current > 20 mA.
+    User confirmed the percentage matches.
+  - **Wallpaper/widgets (2026-11-12):** PosterBoard crashed in
+    _stateLock_setupSwitcherConfigurationForFirstTime (no wallpaper
+    provider); widgets white; 32 stock apps stuck in staged_system_apps.
+    Fix (all from joranv1/ios-sailfish), a510f/tools/a510f-root-tweaks.py:
+    ExtensionKit enforce_xpc_cache_code_signing off; DataMigration on first
+    boot (migrate sentinel, LastSystemVersion skip removed - it registers the
+    app extensions); apps from a510f/apps.txt into /Applications (user chose
+    28; Watch, iTunes Store, Wallet, Find My left out); HEIC wallpaper layers
+    to PNG (heif-convert needs libheif-plugin-libde265 on Ubuntu 24.04: 48
+    layers, 44 MiB); artwork-display-gamut sRGB in mkadt_a510f.py.
+  - **First boot of that root hung in DataMigration 1.5 h:** stackshots
+    (CrashReporter/stacks+com.apple.datamigrator-*.ips, "PRECAUTIONARY
+    stackshot - migration might be hung") named CoreLocationMigrator;
+    locationd waits on fairplayd.H2, which exits at launch (no FairPlay).
+    Fixed on the phone in place (twrp-write/patch_block.py: 2 bytes in one
+    4 KiB block of launchd.plist, fairplayd MachServices renamed to
+    com.apple.fairplayX*, block verified before and after), and for future
+    roots by removing the fairplayd.H2 job in a510f-root-tweaks.py.
+  - Date is 1969-12-31 at every boot (no RTC driver yet).
 - First boot logs (pulled in TWRP, twrp-write/pulled/b8p): no crash, no
   panic; SpringBoard up at +1 min; datamigrator ran 7 passes (exit 0) and
   recorded LastSystemVersion 20H392; Setup marked done by the root tweaks.
