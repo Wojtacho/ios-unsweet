@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..77936f8
+index 0000000..dca13c9
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,759 @@
+@@ -0,0 +1,861 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -635,6 +635,103 @@ index 0000000..77936f8
 +	}
 +}
 +
++/*
++ * A510F CPU clock (boot-arg a510fcpufreq=1200): S-Boot leaves both
++ * clusters at 780 MHz (PLL M 240 P 4 S 1). Raise them to 1.2 GHz the way
++ * Samsung's exynos-smp-cpufreq.c goes up: voltage first, then the
++ * dividers, then the PLL with the cluster parked on the bus PLL meanwhile.
++ *   cluster 0: CMU_CPU 0x10900000, BUCK2 (vsel 0x1D)
++ *   cluster 1: CMU_APL 0x10800000, BUCK1 (vsel 0x1B)
++ * 1.18125 V (vsel 0x7D, 400 mV + n * 6.25 mV) is the highest voltage of any
++ * ASV group/table at 1.2 GHz (asv-exynos7580.h); ABB is bypassed there.
++ * Divider and PLL values: Samsung's apll_freq[] / table_cpu[].
++ */
++static int a510f_cpufreq;
++
++static bool
++cmu_wait(vm_offset_t b, uint32_t off, uint32_t mask, uint32_t want)
++{
++	for (int i = 0; i < 10000; i++) {               /* 10 ms */
++		if ((rd(b, off) & mask) == want) {
++			return true;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++static void
++a510f_cpu_raise(void)
++{
++	static const struct { const char *name; uint32_t pa; uint8_t vreg; } cl[2] = {
++		{ "cluster0/CPU", 0x10900000u, 0x1D }, { "cluster1/APL", 0x10800000u, 0x1B },
++	};
++	if (a510f_cpufreq != 1200) {
++		printf("A510F CLK: left at the boot clock (a510fcpufreq=%d)\n", a510f_cpufreq);
++		return;
++	}
++	for (int c = 0; c < 2; c++) {
++		vm_offset_t b = ml_io_map(cl[c].pa, 0x1000);
++		if (b == 0) {
++			continue;
++		}
++		uint8_t v = 0xee;
++		int e = pmic_read(cl[c].vreg, &v);
++		printf("A510F CLK: %s now pll 0x%x div0 0x%x div1 0x%x, vsel %d 0x%02x (%u uV)\n",
++		    cl[c].name, rd(b, 0x100), rd(b, 0x600), rd(b, 0x604), e, v, 400000u + v * 6250u);
++		/* Expect 0.9 .. 1.18125 V for 780 MHz; anything else: leave it alone. */
++		if (e || v < 0x50 || v > 0x7D) {
++			printf("A510F CLK: %s voltage reading not plausible, clock unchanged\n", cl[c].name);
++			continue;
++		}
++		if (v != 0x7D) {
++			int ew = pmic_write(cl[c].vreg, 0x7D);
++			IOSleep(2);
++			uint8_t back = 0xee;
++			int er = pmic_read(cl[c].vreg, &back);
++			printf("A510F CLK: %s vsel -> 0x7D: write %d, read %d 0x%02x\n", cl[c].name, ew, er, back);
++			if (ew || er || back != 0x7D) {
++				printf("A510F CLK: %s voltage not confirmed, clock unchanged\n", cl[c].name);
++				continue;
++			}
++		}
++		IOSleep(2);                                     /* ramp 12 mV/us: plenty */
++
++		/* Dividers for 1.2 GHz (Samsung apll_freq[1200000]). */
++		wr(b, 0x600, 0x03727700);
++		bool d0 = cmu_wait(b, 0x700, 0xffffffffu, 0);
++		wr(b, 0x604, 0x76);
++		bool d1 = cmu_wait(b, 0x704, 0xffffffffu, 0);
++
++		/* Park on the bus PLL (MUX_SEL_x_2 bit 0 = 1, MUX_STAT reads 2). */
++		uint32_t sel = rd(b, 0x208);
++		wr(b, 0x208, sel | 1u);
++		bool parked = cmu_wait(b, 0x408, 0x7, 0x2);
++
++		/* PLL to 1.2 GHz: P 4 M 368 S 1 (composite.c pll255xx_set_rate). */
++		uint32_t con = rd(b, 0x100);
++		wr(b, 0x000, 4 * 200);                          /* lock time = P * 200 */
++		con &= ~((0x3ffu << 12) | (0x3fu << 4) | 0x7u);
++		con |= (368u << 12) | (4u << 4) | 1u;
++		con &= ~(1u << 31);
++		wr(b, 0x100, con);
++		con |= 1u << 31;
++		wr(b, 0x100, con);
++		bool locked = cmu_wait(b, 0x100, 1u << 29, 1u << 29);
++
++		bool back_on_pll = false;
++		if (locked) {
++			wr(b, 0x208, sel & ~1u);
++			back_on_pll = cmu_wait(b, 0x408, 0x7, 0x1);
++		}
++		uint32_t now = rd(b, 0x100);
++		uint32_t m = (now >> 12) & 0x3ff, p = (now >> 4) & 0x3f, s = now & 0x7;
++		printf("A510F CLK: %s div %d/%d parked %d locked %d on pll %d: pll 0x%x = %u MHz\n",
++		    cl[c].name, d0, d1, parked, locked, back_on_pll, now,
++		    p ? (unsigned)((26ull * m) / ((uint64_t)p << s)) : 0);
++	}
++}
++
 +/* Touch unavailable: keep the buttons working. */
 +static void
 +keys_only_loop(void)
@@ -703,6 +800,10 @@ index 0000000..77936f8
 +		IOSleep(5);
 +	}
 +
++	if (bat_ok) {
++		a510f_cpu_raise();
++	}
++
 +	if (t.mode < 2) {
 +		printf("A510F TOUCH: probe only (a510ftouch=1), done\n");
 +		keys_only_loop();
@@ -756,6 +857,7 @@ index 0000000..77936f8
 +	started = true;
 +	t.mode = 0;
 +	PE_parse_boot_argn("a510ftouch", &t.mode, sizeof(t.mode));
++	PE_parse_boot_argn("a510fcpufreq", &a510f_cpufreq, sizeof(a510f_cpufreq));
 +	int fit = 0;
 +	PE_parse_boot_argn("sweetfb_fit", &fit, sizeof(fit));
 +	t.yadj = fit ? 0 : TOUCH_Y_ADJUST;
