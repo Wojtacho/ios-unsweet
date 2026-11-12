@@ -1,13 +1,61 @@
 diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
-index 1aa173a..c805316 100644
+index 1aa173a..062dd98 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
-@@ -24,6 +24,31 @@ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+@@ -24,6 +24,79 @@ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
  class SweetCPU;
  static SweetCPU *sweet_cpus[MAX_CPUS];
  static uint32_t sweet_cpus_registered;
 +static uint64_t sweet_boot_cntvct;  /* boot core's CNTVCT at the last CPU_ON */
 +static int32_t sweet_last_cpu_on_rc;
++static uint64_t sweet_last_entry_pa;
++extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++/* SMCCC 1.0 call with up to three arguments; x0 is the result. */
++static int64_t
++sweet_psci_call(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
++{
++	register uint64_t x0 __asm__("x0") = fn;
++	register uint64_t x1 __asm__("x1") = a1;
++	register uint64_t x2 __asm__("x2") = a2;
++	register uint64_t x3 __asm__("x3") = a3;
++	__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : :
++	    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
++	    "x14", "x15", "x16", "x17", "cc", "memory");
++	return (int64_t)x0;
++}
++
++/*
++ * A510F: what the firmware and the hardware say about a core that never
++ * reached its entry stub. Read-only: PSCI VERSION / AFFINITY_INFO, the
++ * entry instruction word read back through a fresh mapping of entry_pa, and
++ * the Exynos PMU per-core status words (0x2004 + 0x80 * n, as on other
++ * Exynos chips; unverified for the 7580, reads only).
++ */
++static void
++sweet_smp_diag_panic(unsigned int i, uint32_t mpidr, uint32_t stage, uint32_t inited)
++{
++	int64_t ver = sweet_psci_call(0x84000000ULL, 0, 0, 0);
++	int64_t aff = sweet_psci_call(0xC4000004ULL, mpidr, 0, 0);
++	uint32_t want = *(const volatile uint32_t *)(uintptr_t)&sweet_secondary_entry;
++	uint32_t got = 0xdeadbeef;
++	vm_offset_t pg = ml_io_map((vm_offset_t)(sweet_last_entry_pa & ~0xfffULL), 0x1000);
++	if (pg) {
++		got = *(volatile uint32_t *)(pg + (sweet_last_entry_pa & 0xfff));
++	}
++	uint32_t pmu[8] = { 0 };
++	vm_offset_t pb = ml_io_map(0x10460000, 0x4000);
++	if (pb) {
++		for (int n = 0; n < 8; n++) {
++			pmu[n] = *(volatile uint32_t *)(pb + 0x2004 + 0x80 * n);
++		}
++	}
++	panic("SWEET CPU: cpu=%u mpidr 0x%x startup timeout: stage 0x%x, CPU_ON rc %d, initCPU %u | "
++	    "psci ver 0x%llx affinity %lld | entry pa 0x%llx word 0x%08x want 0x%08x | "
++	    "pmu status %x %x %x %x %x %x %x %x",
++	    i, mpidr, stage, sweet_last_cpu_on_rc, inited, (uint64_t)ver, (long long)aff,
++	    sweet_last_entry_pa, got, want, pmu[0], pmu[1], pmu[2], pmu[3], pmu[4], pmu[5], pmu[6], pmu[7]);
++}
 +/*
 + * A510F: last bring-up stage a starting core reached (osfmk/arm64/start.s):
 + * 0x100|EL entry stub, 0x20 past EL switch, 0x30 CPU data found, 0xE0 no CPU
@@ -34,7 +82,7 @@ index 1aa173a..c805316 100644
  
  /* SMCCC 1.0: x0 is the signed PSCI result; do not assume x1-x17 survive. */
  static int32_t
-@@ -74,7 +99,12 @@ SweetCPU::start(IOService *provider)
+@@ -74,7 +147,12 @@ SweetCPU::start(IOService *provider)
  		return false;
  	}
  	/* MPIDR Aff1 = core: 0x000-0x500 A55, 0x600/0x700 A76 */
@@ -47,18 +95,17 @@ index 1aa173a..c805316 100644
  	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
  		panic("SWEET CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
  		    cpu->cpu_id, cpu->phys_id, topology->num_cpus);
-@@ -161,7 +191,9 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
+@@ -161,7 +239,8 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
  			if (mach_absolute_time() > deadline) {
  				IOLog("SWEET CPU: cpu=%u mpidr=0x%x NOT alive after 5s\n",
  				    i, topology->cpus[i].phys_id);
 -				panic("SWEET CPU: cpu=%u startup timeout (reset/MMU/GIC/SGI)", i);
-+				panic("SWEET CPU: cpu=%u startup timeout: stage 0x%x, CPU_ON rc %d, initCPU %u",
-+				    i, sweet_smp_trace_read(), sweet_last_cpu_on_rc,
++				sweet_smp_diag_panic(i, topology->cpus[i].phys_id, sweet_smp_trace_read(),
 +				    __atomic_load_n(&cpu->initialized, __ATOMIC_ACQUIRE));
  			}
  			IOSleep(1);
  		}
-@@ -200,6 +232,12 @@ SweetCPU::initCPU(bool boot)
+@@ -200,6 +279,12 @@ SweetCPU::initCPU(bool boot)
  	 * Waiting here with DAIF.I set would deadlock every secondary. */
  	signalCPU(this);
  	setCPUState(kIOCPUStateRunning);
@@ -71,7 +118,7 @@ index 1aa173a..c805316 100644
  	kprintf("SWEET CPU: cpu=%u entered initCPU mpidr=0x%llx EL%llu IRQs=%u\n",
  	    getCPUNumber(), __builtin_arm_rsr64("MPIDR_EL1") & 0xffffULL,
  	    __builtin_arm_rsr64("CurrentEL") >> 2, ml_get_interrupts_enabled());
-@@ -236,8 +274,13 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
+@@ -236,8 +321,14 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
  	vm_offset_t entry = ml_static_vtop((vm_offset_t)&sweet_secondary_entry);
  	IOLog("SWEET CPU: cpu=%u CPU_ON target=0x%x entry_pa=0x%llx context=%u\n",
  	    getCPUNumber(), cpu->phys_id, (uint64_t)entry, getCPUNumber());
@@ -80,6 +127,7 @@ index 1aa173a..c805316 100644
 +	__atomic_store_n(&sweet_smp_trace, 0, __ATOMIC_RELEASE);
 +	sweet_smp_trace_sync();
  	__builtin_arm_dsb(DSB_SY);
++	sweet_last_entry_pa = entry;
  	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
 +	sweet_last_cpu_on_rc = rc;
  	IOLog("SWEET CPU: cpu=%u PSCI CPU_ON rc=%d\n", getCPUNumber(), rc);
