@@ -878,10 +878,57 @@ index 0000000..dca13c9
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..4fc6fde 100644
+index 6f8dba3..d8cfb9f 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
-@@ -986,6 +986,9 @@ sweet_mmc_init(void)
+@@ -316,6 +316,26 @@ mmc_rdata(uint32_t op, uint32_t arg, uint32_t blksz, uint32_t nblk, uint8_t *dst
+ 	return got == total ? 0 : EIO;
+ }
+ 
++/*
++ * A510F read statistics: bytes, commands and time spent inside reads (the
++ * polled PIO loop holds the CPU and the driver lock), printed every 64 MiB
++ * with the time since boot, to see how much of the boot is eMMC reading.
++ */
++static uint64_t mmc_stat_bytes, mmc_stat_abs, mmc_stat_cmds, mmc_stat_next = 64ull << 20;
++
++static void
++mmc_stat_report(void)
++{
++	uint64_t busy_ns = 0, now_ns = 0;
++	absolutetime_to_nanoseconds(mmc_stat_abs, &busy_ns);
++	absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
++	uint64_t busy_ms = busy_ns / 1000000ull;
++	printf("SWEET MMC: read %llu MiB in %llu ms busy (%llu KiB/s), %llu cmds, %llu s since boot\n",
++	    mmc_stat_bytes >> 20, busy_ms,
++	    busy_ms ? (mmc_stat_bytes >> 10) * 1000ull / busy_ms : 0ull,
++	    mmc_stat_cmds, now_ns / 1000000000ull);
++}
++
+ /* Read nblk 512-byte sectors at lba (card address) into dst. */
+ static int
+ mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
+@@ -326,8 +346,17 @@ mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
+ 	if (nblk > MAX_XFER_BLOCKS || lba + nblk > UINT32_MAX) {
+ 		return EINVAL;
+ 	}
+-	return mmc_rdata(nblk > 1 ? (18 | CMD_SEND_STOP) : 17, (uint32_t)lba,
+-	           MMC_SECTOR, nblk, dst, NULL);
++	uint64_t t0 = mach_absolute_time();
++	int error = mmc_rdata(nblk > 1 ? (18 | CMD_SEND_STOP) : 17, (uint32_t)lba,
++	    MMC_SECTOR, nblk, dst, NULL);
++	mmc_stat_abs += mach_absolute_time() - t0;
++	mmc_stat_bytes += (uint64_t)nblk * MMC_SECTOR;
++	mmc_stat_cmds++;
++	if (mmc_stat_bytes >= mmc_stat_next) {
++		mmc_stat_next += 64ull << 20;
++		mmc_stat_report();
++	}
++	return error;
+ }
+ 
+ /* Copy up to want bytes from src into the FIFO's free entries. */
+@@ -986,6 +1015,9 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
