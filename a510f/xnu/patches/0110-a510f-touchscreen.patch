@@ -878,13 +878,227 @@ index 0000000..dca13c9
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..d8cfb9f 100644
+index 6f8dba3..c63cad8 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
-@@ -316,6 +316,26 @@ mmc_rdata(uint32_t op, uint32_t arg, uint32_t blksz, uint32_t nblk, uint8_t *dst
+@@ -316,6 +316,240 @@ mmc_rdata(uint32_t op, uint32_t arg, uint32_t blksz, uint32_t nblk, uint8_t *dst
  	return got == total ? 0 : EIO;
  }
  
++/*
++ * A510F: reads by the DesignWare internal DMA (IDMAC), as S-Boot and
++ * Samsung's dw_mmc.c do. Polled PIO costs ~1.4 us per 8-byte FIFO entry
++ * (two 32-bit SFR reads), i.e. ~5.7 MB/s, and the boot is ~98% eMMC-bound.
++ * Exynos 7580 descriptors: 32 words (128 bytes); des0 control, des2 buffer
++ * size (bits 12:0; FAS/DAS = 0: FMP bypass, no encryption), des4/5 buffer
++ * address, des6/7 next descriptor. One page holds 32 of them; Samsung keeps
++ * each buffer within 4 KiB (DW_MMC_MAX_TRANSFER_SIZE). Writes stay PIO.
++ * Checked at init against PIO (mmc_dma_selftest); boot-arg mmcdma=0 = off.
++ */
++#define MMC_PLDMND      0x084
++#define MMC_DBADDRL     0x088
++#define MMC_DBADDRU     0x08c
++#define MMC_IDSTS       0x090
++#define MMC_IDINTEN     0x094
++#define CTRL_DMA_RESET  (1u << 2)
++#define BMOD_SWRESET    (1u << 0)
++#define BMOD_FB         (1u << 1)
++#define IDSTS_RI        (1u << 1)
++#define IDSTS_ERR       ((1u << 2) | (1u << 4) | (1u << 5) | (1u << 9))   /* FBE DU CES AIS */
++#define DES0_DIC        (1u << 1)
++#define DES0_LD         (1u << 2)
++#define DES0_FD         (1u << 3)
++#define DES0_CH         (1u << 4)
++#define DES0_OWN        (1u << 31)
++#define MMC_NDESC       32u
++#define MMC_DMA_MAX_BLOCKS 248u                 /* 124 KiB: at most 32 pages */
++
++struct mmc_desc {
++	uint32_t w[32];
++};
++
++extern vm_offset_t ml_vtophys(vm_offset_t va);
++static uint8_t *mmc_alloc(size_t size);
++
++static struct {
++	bool on;                                /* passed the self-test */
++	unsigned failures;
++	struct mmc_desc *desc;                  /* one page, page aligned */
++	uint64_t desc_pa;
++} md;
++
++static void
++mmc_dcache_flush(const void *p, size_t len)
++{
++	uintptr_t a = (uintptr_t)p & ~(uintptr_t)63, end = (uintptr_t)p + len;
++	for (; a < end; a += 64) {
++		__asm__ volatile ("dc civac, %0" : : "r"(a) : "memory");
++	}
++	__asm__ volatile ("dsb sy" : : : "memory");
++}
++
++static void
++mmc_dma_cleanup(void)
++{
++	mmc_wr(MMC_CTRL, mmc_rd(MMC_CTRL) & ~CTRL_USE_IDMAC);
++	mmc_wr(MMC_CTRL, mmc_rd(MMC_CTRL) | CTRL_DMA_RESET);
++	(void)mmc_wait_clear(MMC_CTRL, CTRL_DMA_RESET, CMD_TIMEOUT_NS);
++	mmc_wr(MMC_BMOD, mmc_rd(MMC_BMOD) & ~(BMOD_IDMAC_EN | BMOD_FB));
++	mmc_wr(MMC_IDSTS, 0xffffffff);
++	mmc_wr(MMC_RINTSTS, 0xffffffff);
++}
++
++/* nblk (<= MMC_DMA_MAX_BLOCKS) 512-byte blocks by IDMAC into dst. */
++static int
++mmc_dma_rdata(uint32_t op, uint32_t arg, uint32_t nblk, uint8_t *dst)
++{
++	uint32_t total = nblk * MMC_SECTOR, off = 0;
++	unsigned n = 0;
++	bzero(md.desc, PAGE_SIZE);
++	while (off < total) {
++		if (n == MMC_NDESC) {
++			return E2BIG;
++		}
++		vm_offset_t va = (vm_offset_t)dst + off;
++		uint32_t len = MIN((uint32_t)(PAGE_SIZE - (va & PAGE_MASK)), total - off);
++		uint64_t pa = ml_vtophys(va);
++		if (pa == 0) {
++			return EFAULT;
++		}
++		uint64_t next = md.desc_pa + (uint64_t)(n + 1) * sizeof(struct mmc_desc);
++		md.desc[n].w[0] = DES0_OWN | DES0_DIC | DES0_CH;
++		md.desc[n].w[2] = len & 0x1fff;
++		md.desc[n].w[4] = (uint32_t)pa;
++		md.desc[n].w[5] = (uint32_t)(pa >> 32);
++		md.desc[n].w[6] = (uint32_t)next;
++		md.desc[n].w[7] = (uint32_t)(next >> 32);
++		n++;
++		off += len;
++	}
++	md.desc[0].w[0] |= DES0_FD;
++	md.desc[n - 1].w[0] &= ~(DES0_CH | DES0_DIC);
++	md.desc[n - 1].w[0] |= DES0_LD;
++	mmc_dcache_flush(md.desc, n * sizeof(struct mmc_desc));
++	mmc_dcache_flush(dst, total);           /* no dirty line may land on top of the data */
++
++	if (!mmc_wait_clear(MMC_STATUS, STATUS_DATA_BUSY, DATA_TIMEOUT_NS)) {
++		return EBUSY;
++	}
++	int error = mmc_reset_fifo();
++	if (error) {
++		return error;
++	}
++	mmc_wr(MMC_RINTSTS, 0xffffffff);
++	mmc_wr(MMC_IDSTS, 0xffffffff);
++	mmc_wr(MMC_BLKSIZ, MMC_SECTOR);
++	mmc_wr(MMC_BYTCNT, total);
++	/* Samsung's dw_mci_idmac_init + start_dma, before the command. */
++	mmc_wr(MMC_CTRL, mmc_rd(MMC_CTRL) | CTRL_USE_IDMAC);
++	mmc_wr(MMC_BMOD, BMOD_SWRESET);
++	(void)mmc_wait_clear(MMC_BMOD, BMOD_SWRESET, CMD_TIMEOUT_NS);
++	mmc_wr(MMC_IDINTEN, 0);
++	mmc_wr(MMC_DBADDRL, (uint32_t)md.desc_pa);
++	mmc_wr(MMC_DBADDRU, (uint32_t)(md.desc_pa >> 32));
++	mmc_wr(MMC_BMOD, mmc_rd(MMC_BMOD) | BMOD_IDMAC_EN | BMOD_FB);
++	__asm__ volatile ("dsb sy" : : : "memory");
++	mmc_wr(MMC_PLDMND, 1);
++
++	mmc_wr(MMC_CMDARG, arg);
++	mmc_wr(MMC_CMD, CMD_DAT_EXP | CMD_R1 | CMD_PRV_DAT_WAIT | op | CMD_START | CMD_USE_HOLD);
++	if (!mmc_wait_clear(MMC_CMD, CMD_START, CMD_TIMEOUT_NS)) {
++		mmc_dma_cleanup();
++		return ETIMEDOUT;
++	}
++	uint64_t end = deadline_after(DATA_TIMEOUT_NS);
++	uint32_t s = 0, ids = 0, seen = 0;
++	for (;;) {
++		s = mmc_rd(MMC_RINTSTS);
++		ids = mmc_rd(MMC_IDSTS);
++		seen |= s;
++		if ((s & (INT_CMD_ERR | INT_DATA_ERR)) || (ids & IDSTS_ERR)) {
++			error = EIO;
++			break;
++		}
++		if ((s & INT_DATA_OVER) && (ids & IDSTS_RI)) {
++			break;
++		}
++		if (mach_absolute_time() > end) {
++			error = ETIMEDOUT;
++			break;
++		}
++	}
++	if (!error && nblk > 1) {
++		uint64_t stop_end = deadline_after(CMD_TIMEOUT_NS);
++		while (!((seen |= mmc_rd(MMC_RINTSTS)) & INT_ACD)) {
++			if (mach_absolute_time() > stop_end) {
++				break;
++			}
++		}
++	}
++	if (error) {
++		if (md.failures < 5) {
++			printf("SWEET MMC: DMA read lba %u x%u %s: rintsts 0x%x idsts 0x%x\n",
++			    arg, nblk, error == EIO ? "error" : "timeout", s, ids);
++		}
++		mmc_dma_cleanup();
++		mmc_abort();
++		return error;
++	}
++	mmc_dma_cleanup();
++	mmc_dcache_flush(dst, total);           /* drop lines fetched while the DMA ran */
++	return 0;
++}
++
++/*
++ * Before the first DMA read is trusted: read the same 64 KiB by PIO and by
++ * DMA (into a buffer full of a dirty pattern, to catch cache mistakes) and
++ * compare. Any difference or error leaves DMA off for this boot.
++ */
++static void
++mmc_dma_selftest(void)
++{
++	uint32_t want = 1;
++	PE_parse_boot_argn("mmcdma", &want, sizeof(want));
++	if (!want) {
++		printf("SWEET MMC: DMA off (mmcdma=0)\n");
++		return;
++	}
++	md.desc = (struct mmc_desc *)(void *)kalloc_data(PAGE_SIZE, Z_WAITOK | Z_ZERO);
++	if (md.desc == NULL || ((vm_offset_t)md.desc & PAGE_MASK)) {
++		printf("SWEET MMC: DMA off: no page-aligned descriptor page\n");
++		return;
++	}
++	md.desc_pa = ml_vtophys((vm_offset_t)md.desc);
++	const uint32_t blocks = 128;
++	uint8_t *a = mmc_alloc(blocks * MMC_SECTOR), *b = mmc_alloc(blocks * MMC_SECTOR);
++	if (a == NULL || b == NULL || md.desc_pa == 0) {
++		printf("SWEET MMC: DMA off: no test buffers\n");
++		return;
++	}
++	memset(b, 0xa5, blocks * MMC_SECTOR);
++	uint64_t t0 = mach_absolute_time();
++	int ep = mmc_rdata(18 | CMD_SEND_STOP, 0, MMC_SECTOR, blocks, a, NULL);
++	uint64_t t1 = mach_absolute_time();
++	int ed = mmc_dma_rdata(18 | CMD_SEND_STOP, 0, blocks, b);
++	uint64_t t2 = mach_absolute_time();
++	uint32_t bad = 0, first = 0;
++	for (uint32_t i = 0; i < blocks * MMC_SECTOR; i++) {
++		if (a[i] != b[i] && bad++ == 0) {
++			first = i;
++		}
++	}
++	uint64_t pio_us = 0, dma_us = 0;
++	absolutetime_to_nanoseconds(t1 - t0, &pio_us);
++	absolutetime_to_nanoseconds(t2 - t1, &dma_us);
++	pio_us /= 1000;
++	dma_us /= 1000;
++	md.on = (ep == 0 && ed == 0 && bad == 0);
++	printf("SWEET MMC: DMA self-test %s: pio %d %llu us, dma %d %llu us, %u bytes differ (first %u), desc pa 0x%llx\n",
++	    md.on ? "OK, reads use DMA" : "FAILED, reads stay PIO", ep, pio_us, ed, dma_us, bad, first, md.desc_pa);
++	kfree_data(a, blocks * MMC_SECTOR);
++	kfree_data(b, blocks * MMC_SECTOR);
++}
++
 +/*
 + * A510F read statistics: bytes, commands and time spent inside reads (the
 + * polled PIO loop holds the CPU and the driver lock), printed every 64 MiB
@@ -908,15 +1122,39 @@ index 6f8dba3..d8cfb9f 100644
  /* Read nblk 512-byte sectors at lba (card address) into dst. */
  static int
  mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
-@@ -326,8 +346,17 @@ mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
+@@ -326,8 +560,41 @@ mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
  	if (nblk > MAX_XFER_BLOCKS || lba + nblk > UINT32_MAX) {
  		return EINVAL;
  	}
 -	return mmc_rdata(nblk > 1 ? (18 | CMD_SEND_STOP) : 17, (uint32_t)lba,
 -	           MMC_SECTOR, nblk, dst, NULL);
 +	uint64_t t0 = mach_absolute_time();
-+	int error = mmc_rdata(nblk > 1 ? (18 | CMD_SEND_STOP) : 17, (uint32_t)lba,
-+	    MMC_SECTOR, nblk, dst, NULL);
++	int error = 0;
++	bool pio = !md.on;
++	if (md.on) {
++		/* DMA in chunks that fit 32 descriptors; PIO for a chunk that fails. */
++		for (uint32_t done = 0; done < nblk;) {
++			uint32_t n = MIN(nblk - done, MMC_DMA_MAX_BLOCKS);
++			uint32_t at = (uint32_t)lba + done;
++			error = mmc_dma_rdata(n > 1 ? (18 | CMD_SEND_STOP) : 17, at, n, dst + done * MMC_SECTOR);
++			if (error) {
++				if (++md.failures >= 8) {
++					md.on = false;
++					printf("SWEET MMC: DMA disabled after %u failures\n", md.failures);
++				}
++				error = mmc_rdata(n > 1 ? (18 | CMD_SEND_STOP) : 17, at, MMC_SECTOR, n,
++				    dst + done * MMC_SECTOR, NULL);
++				if (error) {
++					break;
++				}
++			}
++			done += n;
++		}
++	}
++	if (pio) {
++		error = mmc_rdata(nblk > 1 ? (18 | CMD_SEND_STOP) : 17, (uint32_t)lba,
++		    MMC_SECTOR, nblk, dst, NULL);
++	}
 +	mmc_stat_abs += mach_absolute_time() - t0;
 +	mmc_stat_bytes += (uint64_t)nblk * MMC_SECTOR;
 +	mmc_stat_cmds++;
@@ -928,7 +1166,17 @@ index 6f8dba3..d8cfb9f 100644
  }
  
  /* Copy up to want bytes from src into the FIFO's free entries. */
-@@ -986,6 +1015,9 @@ sweet_mmc_init(void)
+@@ -965,6 +1232,9 @@ sweet_mmc_init(void)
+ 	if (!error) {
+ 		error = mmc_gpt(want);
+ 	}
++	if (!error) {
++		mmc_dma_selftest();
++	}
+ 	lck_mtx_unlock(&sweet_mmc_lock);
+ 	if (error) {
+ 		return error;
+@@ -986,6 +1256,9 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
