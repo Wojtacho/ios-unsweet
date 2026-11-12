@@ -804,6 +804,24 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
     V = 400 mV + sel * 6.25 mV (1.2875 V = 0x8E). Before raising: Samsung's
     DVFS sequence (mux to bus PLL, reprogram PLL, lock, back, per-rate
     DIV_CPU_0/1 values) from their exynos7580 cpufreq/CAL code.
+  - **CPU clock raise plan (from Samsung a3xelte kernel: drivers/cpufreq/
+    exynos-smp-cpufreq.c, drivers/clk/samsung/composite.c, mach
+    asv-exynos7580.h):**
+    - Cluster 0 = CMU_CPU 0x10900000 + BUCK2 (vsel 0x1D); cluster 1 =
+      CMU_APL 0x10800000 + BUCK1 (vsel 0x1B). V = 400 mV + sel*6.25 mV.
+    - Target 1: **1.2 GHz at 1.18125 V (sel 0x7D)** = highest ASV voltage of
+      any group/table at 1.2 GHz; ABB bypass for all groups. (1.4 GHz max
+      1.21875 V; 1.6 GHz max 1.325 V and needs ABB for slow groups.)
+    - Going up (exynos_cpufreq_scale / exynos_set_rate up=true): voltage
+      first (ramp 12 mV/us, wait >=1 ms), then dividers, then PLL:
+      DIV_x_0 (+0x600) = 0x03727700, wait DIV_STAT_x_0 (+0x700) == 0;
+      DIV_x_1 (+0x604) = 0x76 (1.2 GHz; 0x77 at 1.6), wait +0x704 == 0;
+      MUX_SEL_x_2 (+0x208) bit0 = 1 (bus PLL), wait MUX_STAT_x_2 (+0x408) == 2;
+      PLL: LOCK (+0x000) = P*200; CON0 (+0x100): new M/P/S (1.2 GHz
+      368/4/1 = 0x170041 in the fields), enable bit 31 cleared, write, set,
+      write, wait bit 29; mux back (sel 0, stat 1).
+    - Gate with a boot-arg (a510fcpufreq=1200), abort if the read voltage
+      is implausible or a read-back differs; print every step.
 - First boot logs (pulled in TWRP, twrp-write/pulled/b8p): no crash, no
   panic; SpringBoard up at +1 min; datamigrator ran 7 passes (exit 0) and
   recorded LastSystemVersion 20H392; Setup marked done by the root tweaks.
