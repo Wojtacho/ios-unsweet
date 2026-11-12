@@ -1,14 +1,26 @@
 diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
-index 1aa173a..062dd98 100644
+index 1aa173a..1cc9128 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
-@@ -24,6 +24,79 @@ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+@@ -24,6 +24,91 @@ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
  class SweetCPU;
  static SweetCPU *sweet_cpus[MAX_CPUS];
  static uint32_t sweet_cpus_registered;
 +static uint64_t sweet_boot_cntvct;  /* boot core's CNTVCT at the last CPU_ON */
 +static int32_t sweet_last_cpu_on_rc;
 +static uint64_t sweet_last_entry_pa;
++static uint32_t sweet_pmu_before, sweet_pmu_after;     /* target's PMU status around CPU_ON */
++static vm_offset_t sweet_pmu_va;
++
++static uint32_t
++sweet_pmu_core_status(uint32_t mpidr)
++{
++	if (sweet_pmu_va == 0) {
++		return 0xdeadbeef;
++	}
++	unsigned int n = ((mpidr >> 8) & 0xff) * 4 + (mpidr & 0xff);
++	return *(volatile uint32_t *)(sweet_pmu_va + 0x2004 + 0x80 * n);
++}
 +extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +
 +/* SMCCC 1.0 call with up to three arguments; x0 is the result. */
@@ -43,18 +55,18 @@ index 1aa173a..062dd98 100644
 +	if (pg) {
 +		got = *(volatile uint32_t *)(pg + (sweet_last_entry_pa & 0xfff));
 +	}
-+	uint32_t pmu[8] = { 0 };
-+	vm_offset_t pb = ml_io_map(0x10460000, 0x4000);
-+	if (pb) {
-+		for (int n = 0; n < 8; n++) {
-+			pmu[n] = *(volatile uint32_t *)(pb + 0x2004 + 0x80 * n);
-+		}
-+	}
-+	panic("SWEET CPU: cpu=%u mpidr 0x%x startup timeout: stage 0x%x, CPU_ON rc %d, initCPU %u | "
-+	    "psci ver 0x%llx affinity %lld | entry pa 0x%llx word 0x%08x want 0x%08x | "
-+	    "pmu status %x %x %x %x %x %x %x %x",
-+	    i, mpidr, stage, sweet_last_cpu_on_rc, inited, (uint64_t)ver, (long long)aff,
-+	    sweet_last_entry_pa, got, want, pmu[0], pmu[1], pmu[2], pmu[3], pmu[4], pmu[5], pmu[6], pmu[7]);
++	(void)ver;
++	(void)aff;
++	uint32_t now = sweet_pmu_core_status(mpidr);
++	/* Second CPU_ON, exactly as Samsung's Linux (x3 = 0). */
++	int64_t rc2 = sweet_psci_call(0xC4000003ULL, mpidr, sweet_last_entry_pa, 0);
++	__asm__ volatile ("sev");
++	IOSleep(500);
++	uint32_t stage2 = sweet_smp_trace_read();
++	panic("SWEET CPU: cpu=%u mpidr 0x%x timeout: stage 0x%x, CPU_ON rc %d, initCPU %u | "
++	    "entry 0x%llx ok %d | pmu before %x after %x now %x | retry rc %lld stage 0x%x pmu %x",
++	    i, mpidr, stage, sweet_last_cpu_on_rc, inited, sweet_last_entry_pa, got == want,
++	    sweet_pmu_before, sweet_pmu_after, now, (long long)rc2, stage2, sweet_pmu_core_status(mpidr));
 +}
 +/*
 + * A510F: last bring-up stage a starting core reached (osfmk/arm64/start.s):
@@ -82,7 +94,7 @@ index 1aa173a..062dd98 100644
  
  /* SMCCC 1.0: x0 is the signed PSCI result; do not assume x1-x17 survive. */
  static int32_t
-@@ -74,7 +147,12 @@ SweetCPU::start(IOService *provider)
+@@ -74,7 +159,12 @@ SweetCPU::start(IOService *provider)
  		return false;
  	}
  	/* MPIDR Aff1 = core: 0x000-0x500 A55, 0x600/0x700 A76 */
@@ -95,7 +107,7 @@ index 1aa173a..062dd98 100644
  	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
  		panic("SWEET CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
  		    cpu->cpu_id, cpu->phys_id, topology->num_cpus);
-@@ -161,7 +239,8 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
+@@ -161,8 +251,10 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
  			if (mach_absolute_time() > deadline) {
  				IOLog("SWEET CPU: cpu=%u mpidr=0x%x NOT alive after 5s\n",
  				    i, topology->cpus[i].phys_id);
@@ -103,9 +115,11 @@ index 1aa173a..062dd98 100644
 +				sweet_smp_diag_panic(i, topology->cpus[i].phys_id, sweet_smp_trace_read(),
 +				    __atomic_load_n(&cpu->initialized, __ATOMIC_ACQUIRE));
  			}
++			__asm__ volatile ("sev");  /* in case the firmware parks the core in WFE */
  			IOSleep(1);
  		}
-@@ -200,6 +279,12 @@ SweetCPU::initCPU(bool boot)
+ 		IOLog("SWEET CPU: cpu=%u mpidr=0x%x came alive; SGI1 OK\n",
+@@ -200,6 +292,12 @@ SweetCPU::initCPU(bool boot)
  	 * Waiting here with DAIF.I set would deadlock every secondary. */
  	signalCPU(this);
  	setCPUState(kIOCPUStateRunning);
@@ -118,7 +132,7 @@ index 1aa173a..062dd98 100644
  	kprintf("SWEET CPU: cpu=%u entered initCPU mpidr=0x%llx EL%llu IRQs=%u\n",
  	    getCPUNumber(), __builtin_arm_rsr64("MPIDR_EL1") & 0xffffULL,
  	    __builtin_arm_rsr64("CurrentEL") >> 2, ml_get_interrupts_enabled());
-@@ -236,8 +321,14 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
+@@ -236,8 +334,22 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
  	vm_offset_t entry = ml_static_vtop((vm_offset_t)&sweet_secondary_entry);
  	IOLog("SWEET CPU: cpu=%u CPU_ON target=0x%x entry_pa=0x%llx context=%u\n",
  	    getCPUNumber(), cpu->phys_id, (uint64_t)entry, getCPUNumber());
@@ -127,9 +141,18 @@ index 1aa173a..062dd98 100644
 +	__atomic_store_n(&sweet_smp_trace, 0, __ATOMIC_RELEASE);
 +	sweet_smp_trace_sync();
  	__builtin_arm_dsb(DSB_SY);
+-	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
 +	sweet_last_entry_pa = entry;
- 	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
++	if (sweet_pmu_va == 0) {
++		sweet_pmu_va = ml_io_map(0x10460000, 0x4000);
++	}
++	sweet_pmu_before = sweet_pmu_core_status(cpu->phys_id);
++	/* A510F: PSCI 0.1 firmware; call it exactly as Samsung's Linux does (x3 = 0). */
++	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, 0);
 +	sweet_last_cpu_on_rc = rc;
++	__asm__ volatile ("dsb sy; sev");
++	IODelay(1000);
++	sweet_pmu_after = sweet_pmu_core_status(cpu->phys_id);
  	IOLog("SWEET CPU: cpu=%u PSCI CPU_ON rc=%d\n", getCPUNumber(), rc);
  	/* cpu_start() discards PE_cpu_start's return; do not silently carry on. */
  	if (rc != 0) {
