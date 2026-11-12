@@ -840,6 +840,17 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
     backboardd polls IOServiceNotificationUser IOAcceleratorES ("0 found")
     continuously, each printed - see ios-topaz/ios-sailfish's
     IOAcceleratorES finding for the faster boot.
+  - **eMMC DMA WORKS (commit 41d8a6a, image a510f-ios-boot-dmafix,
+    IMG_4728): 61459 KiB/s** (1152 MiB in 19.2 s busy, 60 s since boot),
+    36765 DMA reads, all completed by IDSTS.RI, 0 failures. **~11x the PIO
+    speed; boot to a usable lock screen ~2 min (was ~4:40).** History:
+    2c40a81 waited for IDSTS.RI with IDINTEN 0 - RI never set (ids 0x0)
+    though DMA data matched PIO exactly (bd284d7 status line: "test pio 0
+    dma 60 bad 0; rint 0x402c ids 0x0"). On this DW-MMC 2.70a (HCON
+    0x8e42541, 64-bit IDMAC: IDSTS 0x90, IDINTEN 0x94) IDSTS bits only latch
+    when enabled in IDINTEN: write RI|NI (CTRL.INT_ENABLE masked while
+    polling). A DATA_OVER + empty-FIFO fallback exists but was never needed.
+    Self-test: three 124 KiB reads (LBA 0, 8192, root start) vs PIO.
 - First boot logs (pulled in TWRP, twrp-write/pulled/b8p): no crash, no
   panic; SpringBoard up at +1 min; datamigrator ran 7 passes (exit 0) and
   recorded LastSystemVersion 20H392; Setup marked done by the root tweaks.
