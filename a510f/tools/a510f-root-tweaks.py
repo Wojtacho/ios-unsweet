@@ -3,6 +3,8 @@
 
   sudo a510f-root-tweaks.py MOUNTED_ROOT
 
+fairplayd       removed from launchd.plist (first-boot migration hang).
+
 Wallpapers and widgets (all four found by joranv1/ios-sailfish, which hit the
 same PosterBoard crash: _stateLock_setupSwitcherConfigurationForFirstTime,
 no wallpaper provider):
@@ -30,6 +32,25 @@ import glob, os, plistlib, shutil, subprocess, sys
 
 MOBILE = 501
 KEEP_FREE = 2 << 30          # PNG wallpapers never take the volume under 2 GiB free
+
+
+def no_fairplayd(root):
+    """fairplayd.H2 out of launchd.plist (as joranv1/ios-sailfish). No FairPlay
+    kext: it exits at launch, launchd relaunches it, and MIG requests queued on
+    its ports never get a reply. locationd blocks on one and with it the
+    CoreLocation data migrator: the first-boot migration hung for an hour+."""
+    path = os.path.join(root, 'System/Library/xpc/launchd.plist')
+    st = os.stat(path)
+    with open(path, 'rb') as f:
+        plist = plistlib.load(f)
+    gone = [k for k in plist['LaunchDaemons'] if k.endswith('/com.apple.fairplayd.H2.plist')]
+    for k in gone:
+        del plist['LaunchDaemons'][k]
+    with open(path, 'wb') as f:
+        plistlib.dump(plist, f, fmt=plistlib.FMT_BINARY)
+    os.chown(path, st.st_uid, st.st_gid)
+    os.chmod(path, st.st_mode & 0o7777)
+    print('launchd.plist: fairplayd.H2 removed' if gone else 'launchd.plist: no fairplayd.H2 job')
 
 
 def feature_flag(root):
@@ -165,6 +186,7 @@ def main():
     if len(sys.argv) != 2 or not os.path.isdir(os.path.join(sys.argv[1], 'System/Library/xpc')):
         sys.exit(__doc__)
     root = sys.argv[1]
+    no_fairplayd(root)
     feature_flag(root)
     migration(root)
     stock_apps(root)
