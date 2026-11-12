@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..dca13c9
+index 0000000..3085a78
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,861 @@
+@@ -0,0 +1,1048 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -40,6 +40,7 @@ index 0000000..dca13c9
 +#include <sys/errno.h>
 +#include <kern/clock.h>
 +#include <kern/thread.h>
++#include <kern/locks.h>
 +#include <kern/sched_prim.h>
 +#include <machine/machine_routines.h>
 +#include <pexpert/pexpert.h>
@@ -876,6 +877,192 @@ index 0000000..dca13c9
 +		thread_deallocate(th);
 +	}
 +}
++/*
++ * A510F battery gauge: Silicon Mitus SM5705 fuel gauge, 7-bit address 0x71,
++ * on a bit-banged I2C bus (Samsung dts "i2c-gpio": SDA gpb0-2, SCL gpb0-3,
++ * pinctrl 0x139C0000 bank gpb0 at +0, delay 2 us, pull-ups on the board).
++ * Open drain: a line is pulled low as an output holding 0 and released as an
++ * input. Read only: the gauge runs from the battery and keeps the setup
++ * S-Boot/Android gave it. Words are little endian (Linux smbus block read).
++ * Registers (sm5705_fuelgauge_impl.h): 0x00 device id, 0x05 SOC, 0x07
++ * voltage, 0x08 current, 0x09 temperature. Used by SweetBattery.cpp.
++ */
++#define FG_GPIO_PA      0x139C0000u
++#define FG_SDA          2
++#define FG_SCL          3
++#define FG_ADDR         0x71
++#define FG_HALF_US      5
++
++static vm_offset_t fg_gpio;
++static LCK_GRP_DECLARE(a510f_fg_grp, "a510f_fg");
++static LCK_MTX_DECLARE(fg_lock, &a510f_fg_grp);
++
++static void
++fg_line(int pin, bool high)
++{
++	uint32_t con = rd(fg_gpio, 0x0);
++	con &= ~(0xfu << (pin * 4));
++	if (!high) {
++		con |= 0x1u << (pin * 4);               /* output, DAT bit is 0 */
++	}
++	wr(fg_gpio, 0x0, con);
++}
++
++static bool
++fg_get(int pin)
++{
++	return (rd(fg_gpio, 0x4) >> pin) & 1u;
++}
++
++static bool
++fg_scl_high(void)
++{
++	fg_line(FG_SCL, true);
++	for (int i = 0; i < 1000; i++) {                /* clock stretching: 1 ms */
++		if (fg_get(FG_SCL)) {
++			delay(FG_HALF_US);
++			return true;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++static void
++fg_scl_low(void)
++{
++	fg_line(FG_SCL, false);
++	delay(FG_HALF_US);
++}
++
++static bool
++fg_start(void)
++{
++	fg_line(FG_SDA, true);
++	delay(FG_HALF_US);
++	if (!fg_scl_high()) {
++		return false;
++	}
++	fg_line(FG_SDA, false);
++	delay(FG_HALF_US);
++	fg_scl_low();
++	return true;
++}
++
++static void
++fg_stop(void)
++{
++	fg_line(FG_SDA, false);
++	delay(FG_HALF_US);
++	(void)fg_scl_high();
++	fg_line(FG_SDA, true);
++	delay(FG_HALF_US);
++}
++
++/* true when the device acknowledged */
++static bool
++fg_write_byte(uint8_t v)
++{
++	for (int i = 7; i >= 0; i--) {
++		fg_line(FG_SDA, (v >> i) & 1u);
++		delay(FG_HALF_US);
++		if (!fg_scl_high()) {
++			return false;
++		}
++		fg_scl_low();
++	}
++	fg_line(FG_SDA, true);
++	delay(FG_HALF_US);
++	if (!fg_scl_high()) {
++		return false;
++	}
++	bool ack = !fg_get(FG_SDA);
++	fg_scl_low();
++	return ack;
++}
++
++static uint8_t
++fg_read_byte(bool ack)
++{
++	uint8_t v = 0;
++	fg_line(FG_SDA, true);
++	for (int i = 0; i < 8; i++) {
++		delay(FG_HALF_US);
++		(void)fg_scl_high();
++		v = (uint8_t)((v << 1) | (fg_get(FG_SDA) ? 1u : 0u));
++		fg_scl_low();
++	}
++	fg_line(FG_SDA, !ack);
++	delay(FG_HALF_US);
++	(void)fg_scl_high();
++	fg_scl_low();
++	fg_line(FG_SDA, true);
++	return v;
++}
++
++/* A slave left mid-byte holds SDA low: clock it out, then STOP. */
++static void
++fg_recover(void)
++{
++	fg_line(FG_SDA, true);
++	for (int i = 0; i < 9 && !fg_get(FG_SDA); i++) {
++		(void)fg_scl_high();
++		fg_scl_low();
++	}
++	fg_stop();
++}
++
++static int
++fg_init(void)
++{
++	if (fg_gpio != 0) {
++		return 0;
++	}
++	vm_offset_t g = ml_io_map(FG_GPIO_PA, 0x1000);
++	if (g == 0) {
++		return ENOMEM;
++	}
++	fg_gpio = g;
++	/* Both lines released (inputs), DAT 0 for when they are driven, no pulls. */
++	wr(fg_gpio, 0x4, rd(fg_gpio, 0x4) & ~((1u << FG_SDA) | (1u << FG_SCL)));
++	fg_line(FG_SDA, true);
++	fg_line(FG_SCL, true);
++	wr(fg_gpio, 0x8, rd(fg_gpio, 0x8) & ~((3u << (FG_SDA * 2)) | (3u << (FG_SCL * 2))));
++	delay(50);
++	fg_recover();
++	return 0;
++}
++
++int a510f_fg_read(uint8_t reg, uint16_t *out);
++
++int
++a510f_fg_read(uint8_t reg, uint16_t *out)
++{
++	int error = fg_init();
++	if (error) {
++		return error;
++	}
++	lck_mtx_lock(&fg_lock);
++	error = EIO;
++	for (int attempt = 0; attempt < 3 && error; attempt++) {
++		if (attempt) {
++			fg_recover();
++		}
++		if (!fg_start() || !fg_write_byte(FG_ADDR << 1) || !fg_write_byte(reg) ||
++		    !fg_start() || !fg_write_byte((FG_ADDR << 1) | 1)) {
++			fg_stop();
++			continue;
++		}
++		uint8_t lo = fg_read_byte(true);
++		uint8_t hi = fg_read_byte(false);
++		fg_stop();
++		*out = (uint16_t)(lo | ((uint16_t)hi << 8));
++		error = 0;
++	}
++	lck_mtx_unlock(&fg_lock);
++	return error;
++}
++
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
 index 6f8dba3..25c064f 100644

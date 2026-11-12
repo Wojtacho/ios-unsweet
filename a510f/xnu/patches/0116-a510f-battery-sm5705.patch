@@ -1,0 +1,189 @@
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 9969739..8e1f5dc 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -12,10 +12,23 @@
+ #include <IOKit/pwr_mgt/IOPMPowerSource.h>
+ #include <libkern/c++/OSCollectionIterator.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/arm64/board_config.h>
+ /* bsd/dev/sweet_spmi.c */
+ extern "C" int sweet_spmi_init(void);
+ extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
+ 
++#if defined(SWEET_GIC_V2)
++/*
++ * A510F: Silicon Mitus SM5705 fuel gauge (bsd/dev/a510f_touch.c reads it
++ * over its GPIO I2C bus) and the 2900 mAh EB-BA510ABE battery. On by
++ * default; boot-arg sweetbattery=0 keeps the static 100% fallback.
++ */
++extern "C" int a510f_fg_read(uint8_t reg, uint16_t *out);
++#define SWEET_BATT_MAH 2900u
++#else
++#define SWEET_BATT_MAH 5020u
++#endif
++
+ class SweetBattery : public IOPMPowerSource {
+ 	OSDeclareDefaultStructors(SweetBattery);
+ public:
+@@ -28,6 +41,11 @@ private:
+ 	IOTimerEventSource *fTimer;
+ 	bool fTimerAdded, fRunning, fReal;
+ 	int fLastMode;
++	bool fA510F;                    /* SM5705 gauge instead of the PM6150 */
++	UInt32 fTempCenti;              /* Temperature, centidegrees C */
++	unsigned fPolls, fFails;
++	int fLastExt, fLastChg;
++	void pollA510F(void);
+ 	void putNumber(const char *key, UInt32 value);
+ 	void putBool(const char *key, bool value);
+ 	void publish(unsigned percent, unsigned mv, int ma, bool external,
+@@ -72,6 +90,10 @@ SweetBattery::init(OSDictionary *dictionary)
+ 		}
+ 	}
+ 	fLastMode = -1;
++	fA510F = false;
++	fTempCenti = 2500;
++	fPolls = fFails = 0;
++	fLastExt = fLastChg = -1;
+ 	return true;
+ }
+ 
+@@ -101,11 +123,11 @@ void
+ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
+     bool capable, bool charging, bool full, bool measured, bool currentValid)
+ {
+-	/* Use consistent mAh units (DT nominal=5020). powerd computes C*100/M. */
+-	const unsigned capacity = (5020u * percent + 50u) / 100u;
++	/* Use consistent mAh units (DT nominal). powerd computes C*100/M. */
++	const unsigned capacity = (SWEET_BATT_MAH * percent + 50u) / 100u;
+ 	setBatteryInstalled(true);
+ 	setCurrentCapacity(capacity);
+-	setMaxCapacity(5020);
++	setMaxCapacity(SWEET_BATT_MAH);
+ 	setExternalConnected(external);
+ 	setExternalChargeCapable(capable);
+ 	setIsCharging(charging);
+@@ -119,11 +141,11 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
+ 	putBool("FullyCharged", full);
+ 	putBool("AppleRawExternalConnected", external);
+ 	putNumber("AppleRawCurrentCapacity", capacity);
+-	putNumber("AppleRawMaxCapacity", 5020);
+-	putNumber("DesignCapacity", 5020);
++	putNumber("AppleRawMaxCapacity", SWEET_BATT_MAH);
++	putNumber("DesignCapacity", SWEET_BATT_MAH);
+ 	putNumber("InstantAmperage", (UInt32)ma);
+-	/* iOS battery convention: centidegrees C; fixed 25 C, NOT measured. */
+-	putNumber("Temperature", 2500);
++	/* iOS battery convention: centidegrees C; 25 C unless the gauge has one. */
++	putNumber("Temperature", fTempCenti);
+ 	putBool("SweetBatteryHardwareSampleValid", measured);
+ 	putBool("SweetBatteryCurrentValid", currentValid);
+ 	putBool("SweetBatterySOCEstimated", measured);
+@@ -137,7 +159,7 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
+ 		const char *keys[] = {kIOBatteryCurrentChargeKey, kIOBatteryCapacityKey,
+ 		    kIOBatteryVoltageKey, kIOBatteryAmperageKey, kIOBatteryCycleCountKey,
+ 		    kIOBatteryFlagsKey};
+-		UInt32 values[] = {capacity, 5020, mv, (UInt32)ma, 0,
++		UInt32 values[] = {capacity, SWEET_BATT_MAH, mv, (UInt32)ma, 0,
+ 		    (UInt32)(kIOBatteryInstalled | (external ? kIOBatteryChargerConnect : 0) |
+ 		    (charging ? kIOBatteryCharge : 0))};
+ 		for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
+@@ -154,7 +176,7 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
+ 	int mode = measured ? 1 : 0;
+ 	if (mode != fLastMode) {
+ 		IOLog("SWEET BATTERY: %s, %u%% %umV external=%d charging=%d\n",
+-		    measured ? "PM6150 / estimated SOC" : "static fallback",
++		    !measured ? "static fallback" : fA510F ? "SM5705 fuel gauge" : "PM6150 / estimated SOC",
+ 		    percent, mv, external, charging);
+ 		fLastMode = mode;
+ 	}
+@@ -203,9 +225,67 @@ SweetBattery::estimatePercent(unsigned mv)
+ 	return 100;
+ }
+ 
++#if defined(SWEET_GIC_V2)
++/*
++ * SM5705 words (Samsung sm5705_fuelgauge.c): SOC 8.8 percent; voltage
++ * [13:11] V + [10:0]/2048 V; current [15] sign (set = discharging),
++ * [12:11] A + [10:0]/2048 A; temperature [15] sign, [14:8] C + [7:4]/16.
++ * Samsung's UI level is the raw SOC scaled by capacity_max 990 (99.0 %).
++ * There is no charger-chip reading yet: charging = more than 20 mA into the
++ * battery; external power = charging, or full (>= 99 %) and not discharging.
++ */
++void
++SweetBattery::pollA510F(void)
++{
++	uint16_t soc = 0, volt = 0, cur = 0, temp = 0;
++	bool ok = !a510f_fg_read(0x05, &soc) && !a510f_fg_read(0x07, &volt) &&
++	    !a510f_fg_read(0x08, &cur) && !a510f_fg_read(0x09, &temp);
++	unsigned mv = ((volt & 0x3800u) >> 11) * 1000u + ((volt & 0x07ffu) * 1000u) / 2048u;
++	unsigned raw = ((soc & 0xff00u) >> 8) * 10u + ((soc & 0x00ffu) * 10u) / 256u;     /* 0.1 % */
++	unsigned percent = (raw * 100u + 495u) / 990u;
++	if (percent > 100) {
++		percent = 100;
++	}
++	/* Zero, floating (0xffff) or implausible data must not become 0 %. */
++	if (!ok || mv < 2800 || mv > 4600 || soc == 0xffff || (percent == 0 && mv > 3500)) {
++		if (fFails++ < 5) {
++			IOLog("SWEET BATTERY: SM5705 read %s: soc 0x%04x volt 0x%04x cur 0x%04x temp 0x%04x\n",
++			    ok ? "implausible" : "failed", soc, volt, cur, temp);
++		}
++		publish(100, 4200, 0, true, true, false, true, false, false);
++		return;
++	}
++	int ma = (int)(((cur & 0x1800u) >> 11) * 1000u + ((cur & 0x07ffu) * 1000u) / 2048u);
++	if (cur & 0x8000u) {
++		ma = -ma;
++	}
++	int t = (int)(((temp & 0x7f00u) >> 8) * 10u + ((temp & 0x00f0u) * 10u) / 256u);   /* 0.1 C */
++	if (temp & 0x8000u) {
++		t = -t;
++	}
++	fTempCenti = (t > -300 && t < 800) ? (UInt32)(t * 10) : 2500;
++	bool charging = ma > 20;
++	bool external = charging || (percent >= 99 && ma > -15);
++	bool full = external && percent >= 100;
++	publish(percent, mv, ma, external, external, charging && !full, full, true, true);
++	if (fPolls++ < 3 || (fPolls % 20) == 0 || (int)external != fLastExt || (int)charging != fLastChg) {
++		IOLog("SWEET BATTERY: SM5705 %u%% (raw %u.%u%%) %umV %dmA %d.%dC external %d charging %d\n",
++		    percent, raw / 10, raw % 10, mv, ma, t / 10, (t < 0 ? -t : t) % 10, external, charging);
++	}
++	fLastExt = external;
++	fLastChg = charging;
++}
++#endif
++
+ void
+ SweetBattery::poll(void)
+ {
++#if defined(SWEET_GIC_V2)
++	if (fA510F) {
++		pollA510F();
++		return;
++	}
++#endif
+ 	uint8_t type, present, usb, path, charger, error, temperature;
+ 	uint16_t rawVoltage;
+ 	bool valid = fReal &&
+@@ -262,9 +342,20 @@ SweetBattery::start(IOService *provider)
+ 	if (!IOPMPowerSource::start(provider)) {
+ 		return false;
+ 	}
++#if defined(SWEET_GIC_V2)
++	int real = 1;
++	(void)PE_parse_boot_argn("sweetbattery", &real, sizeof(real));
++	uint16_t id = 0;
++	int e = real ? a510f_fg_read(0x00, &id) : -1;
++	IOLog("SWEET BATTERY: SM5705 fuel gauge %s (device id read %d: 0x%04x)\n",
++	    !real ? "off (sweetbattery=0)" : e ? "not answering" : "found", e, id);
++	fA510F = real && e == 0;
++	fReal = fA510F;
++#else
+ 	int real = 0;
+ 	(void)PE_parse_boot_argn("sweetbattery", &real, sizeof(real));
+ 	fReal = real == 1 && sweet_spmi_init() == 0;
++#endif
+ 	/* Publish a complete source BEFORE registerService wakes powerd. */
+ 	poll();
+ 	if (fReal) {

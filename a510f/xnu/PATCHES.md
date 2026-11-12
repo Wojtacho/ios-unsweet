@@ -16,5 +16,6 @@
 - `0113-a510f-smp.patch` (SMP on 2 x 4 Cortex-A53: MPIDR Aff1:Aff0 topology, GIC-400 interface per core from ITARGETSR0, no ICC_SRE_EL2 on the EL2 entry path, CNTVCT check per core)
 - `0114-a510f-physical-counter.patch` (kernel time from the system-wide CNTPCT, as Samsung's use-physical-timer; user space takes the mach_absolute_time trap)
 - `0115-a510f-boot-waits.patch` (from MakrSas/ios-topaz 0138/0128: empty IOAcceleratorES service so QuartzCore stops its 30 s poll at every backboardd start, `sweetaccel=0` off; no registry busy hold for an IOKit daemon that never reports in, `sweetiokitdhold=1` restores it; SWEET AKS console lines capped at 48, `sweetakslog=1` all)
+- `0116-a510f-battery-sm5705.patch` (SweetBattery reads the SM5705 fuel gauge: level, voltage, current, temperature; 2900 mAh; charging = current into the battery; `sweetbattery=0` keeps the static 100%. The GPIO-I2C gauge reader `a510f_fg_read` is in 0110)
 
 See a510f/NOTES.md for what each boot showed.
