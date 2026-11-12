@@ -34,7 +34,12 @@ mkadt.GICR, mkadt.GICR_SIZE = 0x10c02000, 0x2000
 mkadt.VTIMER_INTID = 27                      # PPI 11, standard numbering
 
 # Cortex-A53 x8: cluster 0 = MPIDR 0x000-0x003, cluster 1 = 0x100-0x103.
-MPIDR = [(c // 4) << 8 | (c % 4) for c in range(8)]
+# Core 0x001 is NOT xnu's: the shim starts it before xnu as the display
+# refresher (the panel is in MIPI command mode and needs a DECON trigger
+# every frame, shim/shim.c) and it runs that loop forever. PSCI CPU_ON for
+# it "succeeds" (PSCI 0.1 firmware, no state check) but nothing happens -
+# the cpus=4 tests timed out at stage 0. xnu gets the other seven.
+MPIDR = [0x000, 0x002, 0x003, 0x100, 0x101, 0x102, 0x103]
 CPU_HZ = 1600000000
 
 
@@ -114,16 +119,20 @@ def build():
     iphone8plus(root)
     # No UFS on this phone (eMMC); sweet_ufs must not probe Qualcomm MMIO.
     root.children = [c for c in root.children if c.name != 'sweet-ufs']
-    for i, cpu in enumerate(child(root, 'cpus').children):
-        setprop(cpu, 'reg', struct.pack('<I', MPIDR[i]))
+    cpus = child(root, 'cpus')
+    cpus.children = cpus.children[:len(MPIDR)]
+    for i, cpu in enumerate(cpus.children):
+        mpidr = MPIDR[i]
+        setprop(cpu, 'reg', struct.pack('<I', mpidr))
+        setprop(cpu, 'cpu-id', struct.pack('<I', i))
         # 'qcom,kryo470' stays: sweet's SweetCPU driver matches it
         # (IONameMatch in KernelConfigTables.cpp). Without a CPU driver the
         # boot CPU never registers with IOKit and the kernel waits silently
         # (sixth boot: output stopped after SWEET FB, no panic).
         setprop(cpu, 'compatible', mkadt.cstr('arm,cortex-a53') + mkadt.cstr('qcom,kryo470') + mkadt.cstr('ARM,v8'))
-        setprop(cpu, 'cluster-core-id', struct.pack('<I', i % 4))
+        setprop(cpu, 'cluster-core-id', struct.pack('<I', mpidr & 0xff))
         setprop(cpu, 'clock-frequency', struct.pack('<I', CPU_HZ))
-        setprop(cpu, 'l2-cache-id', struct.pack('<I', i // 4))
+        setprop(cpu, 'l2-cache-id', struct.pack('<I', mpidr >> 8))
     # Keep the sweet compatibles the kernel's platform expert matches on.
     compat = root.prop('compatible')
     setprop(root, 'compatible', compat + mkadt.cstr('samsung,a5xelte') + mkadt.cstr('samsung,exynos7580'))
