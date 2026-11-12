@@ -1,0 +1,75 @@
+diff --git a/osfmk/arm/commpage/commpage.c b/osfmk/arm/commpage/commpage.c
+index ee9f8de..dce2748 100644
+--- a/osfmk/arm/commpage/commpage.c
++++ b/osfmk/arm/commpage/commpage.c
+@@ -41,6 +41,7 @@
+ #include <mach/machine.h>
+ #include <mach/vm_map.h>
+ #include <machine/cpu_capabilities.h>
++#include <pexpert/arm64/board_config.h>  /* SWEET_GIC_V2 (A510F) */
+ #include <machine/commpage.h>
+ #include <machine/config.h>
+ #include <machine/pmap.h>
+@@ -167,7 +168,19 @@ commpage_populate(void)
+ 	*((uint32_t*)(_COMM_PAGE_CPUFAMILY + _COMM_PAGE_RW_OFFSET)) = (uint32_t)cpufamily;
+ 	*((uint32_t*)(_COMM_PAGE_DEV_FIRM_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint32_t)PE_i_can_has_debugger(NULL);
+ 	*((uint32_t*)(_COMM_PAGE_DEV_FIRM + _COMM_PAGE_RO_OFFSET)) = (uint32_t)PE_i_can_has_debugger(NULL);
++#if defined(SWEET_GIC_V2)
++	/*
++	 * A510F: the cores' virtual counters have different offsets (firmware
++	 * CNTVOFF), so the kernel keeps time on the physical counter
++	 * (machine_routines.c nonspeculative_timebase). User space must not
++	 * compute mach_absolute_time() from CNTVCT itself: NONE makes libsystem
++	 * take the kernel trap. EL0 counter access stays enabled (CNTKCTL) for
++	 * code that reads it directly.
++	 */
++	*((uint8_t*)(_COMM_PAGE_USER_TIMEBASE + _COMM_PAGE_RW_OFFSET)) = USER_TIMEBASE_NONE;
++#else
+ 	*((uint8_t*)(_COMM_PAGE_USER_TIMEBASE + _COMM_PAGE_RW_OFFSET)) = user_timebase_type();
++#endif
+ 	*((uint8_t*)(_COMM_PAGE_CONT_HWCLOCK + _COMM_PAGE_RW_OFFSET)) = (uint8_t)user_cont_hwclock_allowed();
+ 	*((uint8_t*)(_COMM_PAGE_KERNEL_PAGE_SHIFT_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) page_shift;
+ 	*((uint8_t*)(_COMM_PAGE_KERNEL_PAGE_SHIFT + _COMM_PAGE_RO_OFFSET)) = (uint8_t) page_shift;
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+index a1f2a91..7e6fcba 100644
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -27,6 +27,7 @@
+  */
+ 
+ #include <arm64/machine_machdep.h>
++#include <pexpert/arm64/board_config.h>  /* SWEET_GIC_V2 (A510F) */
+ #include <arm64/proc_reg.h>
+ #include <arm/machine_cpu.h>
+ #include <arm/cpu_internal.h>
+@@ -2073,8 +2074,18 @@ nonspeculative_timebase(void)
+ 	// "Reads of CNT[PV]CT[_EL0] can occur speculatively and out of order relative
+ 	// to other instructions executed on the same processor."
+ 	__builtin_arm_isb(ISB_SY);
++#if defined(SWEET_GIC_V2)
++	/*
++	 * A510F (Exynos 7580): the firmware leaves a different CNTVOFF on each
++	 * core (the boot core's CNTVCT is near 2^63), so the virtual counters
++	 * disagree. Use the system-wide physical counter, as Samsung's kernel
++	 * does (exynos7580.dtsi timer: use-physical-timer).
++	 */
++	return __builtin_arm_rsr64("CNTPCT_EL0");
++#else
+ 	return __builtin_arm_rsr64("CNTVCT_EL0");
+ #endif
++#endif
+ }
+ 
+ 
+@@ -2145,7 +2156,11 @@ ml_get_speculative_timebase(void)
+ 	do {
+ 		timebase = getCpuDatap()->cpu_base_timebase;
+ 		os_compiler_barrier();
++#if defined(SWEET_GIC_V2)
++		clock = __builtin_arm_rsr64("CNTPCT_EL0");   /* A510F: see nonspeculative_timebase() */
++#else
+ 		clock = __builtin_arm_rsr64("CNTVCT_EL0");
++#endif
+ 
+ 		os_compiler_barrier();
+ 	} while (getCpuDatap()->cpu_base_timebase != timebase);

@@ -766,6 +766,24 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
   the lock screen: TWRP + hfsremote.py (move hfscache aside first) to pull
   /private/var/mobile/Library/Logs/CrashReporter and logs.
   Next after that: SMP (8 x A53 via PSCI cpu_on 0xC4000003).
+- **SMP bring-up (2026-11-12), patch 0113 + ADT + 0114:**
+  - cpus=4 boots: cpu=1 (MPIDR 0x001) never ran the entry stub (breadcrumb
+    stage 0x0), CPU_ON rc 0, PSCI 0.1 (VERSION/AFFINITY_INFO -1), entry word
+    at entry_pa correct. Cause: **core 0x001 is the shim's display refresher**
+    (shim/shim.c, started before xnu, loops forever); PSCI 0.1 CPU_ON on it
+    "succeeds" and does nothing. ADT now lists 0x000, 0x002, 0x003,
+    0x100-0x103 (cpus=7). Idea for later: kick DECON from xnu's 60 Hz vsync
+    timer and give core 0x001 back to xnu (8 cores).
+  - cpus=7: two secondaries run xnu, then "Non-monotonic time": the cores'
+    CNTVCT differ wildly (boot core near 2^63; firmware CNTVOFF per core).
+    A per-core offset handshake (first 0114) measured nothing (boot core
+    busy in early boot). Samsung's exynos7580 timer node says
+    **use-physical-timer**: 0114 now reads CNTPCT_EL0 (system-wide) in
+    nonspeculative_timebase / ml_get_speculative_timebase; virtual timer
+    interrupts stay (TVAL is relative). Commpage USER_TIMEBASE = NONE so
+    libsystem's mach_absolute_time() takes the kernel trap.
+  - Note: darwin-xnu-build SKIPS patches that do not apply (warning only):
+    always grep the built kernel for a string from each new patch.
 - First boot logs (pulled in TWRP, twrp-write/pulled/b8p): no crash, no
   panic; SpringBoard up at +1 min; datamigrator ran 7 passes (exit 0) and
   recorded LastSystemVersion 20H392; Setup marked done by the root tweaks.
