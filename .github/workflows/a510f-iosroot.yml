@@ -59,7 +59,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q fuse3 cmake g++ libfuse3-dev zlib1g-dev libbz2-dev \
-            libattr1-dev hfsprogs rsync android-sdk-libsparse-utils libheif-examples
+            libattr1-dev hfsprogs rsync android-sdk-libsparse-utils libheif-examples libheif-plugin-libde265
           command -v heif-convert
           sudo modprobe hfsplus || { sudo apt-get install -y -q "linux-modules-extra-$(uname -r)" && sudo modprobe hfsplus; }
           git clone -q --recursive https://github.com/sgan81/apfs-fuse /tmp/apfs-fuse
@@ -115,7 +115,7 @@ jobs:
           # A510F: wallpapers and widgets (ExtensionKit flag, first-boot migration,
           # stock apps into /Applications, HEIC wallpaper layers as PNG).
           sudo python3 a510f/tools/a510f-root-tweaks.py /mnt/iosroot | tee /tmp/a510f-tweaks
-          grep -E '^(stock apps|wallpapers|heif-convert failed|apps.txt)' /tmp/a510f-tweaks | head -20 |
+          { grep -E '^(stock apps|wallpapers|apps.txt)' /tmp/a510f-tweaks; grep '^heif-convert failed' /tmp/a510f-tweaks | head -3; } |
             while IFS= read -r l; do echo "::notice title=A510F root::$l"; done || true
           df -m /mnt/iosroot | tee /tmp/df0
           # Odin's ustar members must stay under 8 GiB, and USERDATA holds

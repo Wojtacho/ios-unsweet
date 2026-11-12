@@ -157,6 +157,8 @@ def wallpapers(root):
     free1 = shutil.disk_usage(root).free
     print(f'wallpapers: {converted} HEIC layers as PNG, {len(failed)} failed, {edited} main.caml edited, '
           f'{(free0 - free1) >> 20} MiB used, {free1 >> 20} MiB free')
+    if failed and converted == 0:
+        sys.exit('wallpapers: no HEIC layer could be converted (is the libde265 plugin installed?)')
 
 
 def main():
