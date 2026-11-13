@@ -878,6 +878,22 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
     com.apple.fairplayX*, block verified before and after), and for future
     roots by removing the fairplayd.H2 job in a510f-root-tweaks.py.
   - Date is 1969-12-31 at every boot (no RTC driver yet).
+  - **RAM 1004 -> 1708 MB (2026-11-13):** log showed 243422 free pages and
+    10.5 GB read from eMMC in 9 min (thrashing). TWRP /proc/iomem: System
+    RAM 0x40000000-0xbe7fffff; /reserved-memory starts at video_ext
+    0xaec00000; S-Boot initrd at 0x42000000 (ours ends 0x42fcd6f0), DTB
+    0x48000000. Shim moves DECON win0 from 0x67000000 to 0x40800000
+    (VIDW_ADD0 +0x880, SHADOWCON +0x30 bit 8 protect/unprotect, DECON_UPDATE
+    +0x710 bit 0 standalone; first try without the protect dance showed
+    nothing because the shim drew only into the new buffer). The FB must be
+    in the kernel's first 1 GB (0102 early V=P map). RAM 0x44000000..
+    0xaec00000 (0118, mkadt_a510f.py).
+    Then kmem_range_init panicked: compressor VA claim. This macOS-target
+    build sizes the pool 16 x max_mem (27 GB) -> 0119 makes it 4 x. Trap:
+    boot-arg vm_compression_limit is in VM pages, which are 16 KB here
+    (page_shift 14), and when set it bypasses the formula: 1750000 =
+    28.7 GB, exactly the same panic (proved by disassembling
+    vm_compressor_set_size from the kernel's own symbol table). Removed.
 - First boot logs (pulled in TWRP, twrp-write/pulled/b8p): no crash, no
   panic; SpringBoard up at +1 min; datamigrator ran 7 passes (exit 0) and
   recorded LastSystemVersion 20H392; Setup marked done by the root tweaks.
