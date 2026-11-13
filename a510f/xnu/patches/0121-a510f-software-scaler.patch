@@ -1,0 +1,299 @@
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index 2f11f4b..1c01b4a 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -453,6 +453,9 @@ IOCoreSurfaceRoot::start(IOService *provider)
+ 	setProperty(kIOUserClientClassKey, "IOSurfaceRootUserClient");
+ 	registerService();
+ 	IOLog("SWEET SURF: IOCoreSurfaceRoot registered\n");
++	/* A510F: software scaler (defined at the end of this file). */
++	extern void sweet_scaler_publish(IOService *provider);
++	sweet_scaler_publish(this);
+ 	return true;
+ }
+ 
+@@ -1404,4 +1407,284 @@ IOSurfaceRootUserClient::getTargetAndTrapForIndex(IOService **targetP, UInt32 in
+ 	*targetP = this;
+ 	return &sweet_surface_traps[index];
+ }
++
++/*
++ * A510F: software AppleM2ScalerCSCDriver. SpringBoard turns the wallpaper
++ * into the compact copies the home screen shows (420f, half size, ...) with
++ * IOSurfaceAcceleratorTransferSurface; without this service nothing wrote
++ * them and the home screen showed whatever memory they got (log:
++ * "IOServiceMatchingfailed for: AppleM2ScalerCSCDriver").
++ * IOSurfaceAccelerator.framework (iOS 16.7.16, from the phone's dyld cache):
++ * IOSurfaceAcceleratorCreate = IOServiceOpen(IOServiceMatching(
++ * "AppleM2ScalerCSCDriver"), type 0); TransferSurface = selector 1,
++ * IOConnectCallStructMethod with a 0x170-byte request, no output:
++ *   +0x00 u32 source surface id, +0x04 u32 destination surface id,
++ *   +0x20 u64 option bits, then rectangles and the rest.
++ * This does the whole source onto the whole destination: nearest-neighbour
++ * scaling and colour conversion between BGRA, L008 and 420f/420v (BT.601),
++ * on the caller's thread, then bumps the destination's seed.
++ */
++#define SWEET_FMT_BGRA  0x42475241u     /* 'BGRA' */
++#define SWEET_FMT_L008  0x4c303038u     /* 'L008' */
++#define SWEET_FMT_420F  0x34323066u     /* '420f' full range */
++#define SWEET_FMT_420V  0x34323076u     /* '420v' video range */
++#ifndef MIN
++#define MIN(a, b) ((a) < (b) ? (a) : (b))
++#endif
++#ifndef MAX
++#define MAX(a, b) ((a) > (b) ? (a) : (b))
++#endif
++
++static void
++sweet_scaler_cache(uintptr_t a, size_t len)
++{
++	uintptr_t p = a & ~(uintptr_t)63, end = a + len;
++	for (; p < end; p += 64) {
++		__asm__ volatile ("dc civac, %0" : : "r"(p) : "memory");
++	}
++	__asm__ volatile ("dsb sy" : : : "memory");
++}
++
++static inline uint8_t
++sweet_clamp8(int v)
++{
++	return v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v;
++}
++
++/* Byte range [first, end) of the pixels the conversion touches. */
++static bool
++sweet_scaler_span(SweetSurface *s, uint64_t *first, uint64_t *end)
++{
++	if (s->pixelFormat == SWEET_FMT_420F || s->pixelFormat == SWEET_FMT_420V) {
++		if (s->planeCount < 2) {
++			return false;
++		}
++		*first = MIN(s->planes[0].offset, s->planes[1].offset);
++		*end = MAX((uint64_t)s->planes[0].offset + s->planes[0].bytesPerRow * s->planes[0].height,
++		    (uint64_t)s->planes[1].offset + s->planes[1].bytesPerRow * s->planes[1].height);
++	} else if (s->pixelFormat == SWEET_FMT_BGRA || s->pixelFormat == SWEET_FMT_L008) {
++		*first = s->offset;
++		*end = (uint64_t)s->offset + (uint64_t)s->bytesPerRow * s->height;
++	} else {
++		return false;
++	}
++	return s->memory != NULL && *end <= s->memory->getLength() && *end > *first;
++}
++
++/* RGB of pixel (x, y). */
++static inline void
++sweet_scaler_get(SweetSurface *s, const uint8_t *base, uint32_t x, uint32_t y, int rgb[3])
++{
++	switch (s->pixelFormat) {
++	case SWEET_FMT_BGRA: {
++		const uint8_t *p = base + s->offset + (uint64_t)y * s->bytesPerRow + (uint64_t)x * 4;
++		rgb[0] = p[2]; rgb[1] = p[1]; rgb[2] = p[0];
++		break;
++	}
++	case SWEET_FMT_L008: {
++		int l = base[s->offset + (uint64_t)y * s->bytesPerRow + x];
++		rgb[0] = rgb[1] = rgb[2] = l;
++		break;
++	}
++	default: {      /* 420f / 420v */
++		int yy = base[s->planes[0].offset + (uint64_t)y * s->planes[0].bytesPerRow + x];
++		const uint8_t *c = base + s->planes[1].offset + (uint64_t)(y / 2) * s->planes[1].bytesPerRow + (x / 2) * 2;
++		int cb = c[0] - 128, cr = c[1] - 128;
++		if (s->pixelFormat == SWEET_FMT_420V) {
++			yy = ((yy - 16) * 298) >> 8;
++			cb = (cb * 291) >> 8;           /* 255/224 */
++			cr = (cr * 291) >> 8;
++		}
++		rgb[0] = yy + ((359 * cr) >> 8);
++		rgb[1] = yy - ((88 * cb + 183 * cr) >> 8);
++		rgb[2] = yy + ((454 * cb) >> 8);
++		break;
++	}
++	}
++}
++
++static inline void
++sweet_scaler_put(SweetSurface *d, uint8_t *base, uint32_t x, uint32_t y, const int rgb[3])
++{
++	int r = sweet_clamp8(rgb[0]), g = sweet_clamp8(rgb[1]), b = sweet_clamp8(rgb[2]);
++	switch (d->pixelFormat) {
++	case SWEET_FMT_BGRA: {
++		uint8_t *p = base + d->offset + (uint64_t)y * d->bytesPerRow + (uint64_t)x * 4;
++		p[0] = (uint8_t)b; p[1] = (uint8_t)g; p[2] = (uint8_t)r; p[3] = 0xff;
++		break;
++	}
++	case SWEET_FMT_L008:
++		base[d->offset + (uint64_t)y * d->bytesPerRow + x] = (uint8_t)((77 * r + 150 * g + 29 * b) >> 8);
++		break;
++	default: {      /* 420f / 420v */
++		int yy = (77 * r + 150 * g + 29 * b) >> 8;
++		if (d->pixelFormat == SWEET_FMT_420V) {
++			yy = 16 + ((yy * 219) >> 8);
++		}
++		base[d->planes[0].offset + (uint64_t)y * d->planes[0].bytesPerRow + x] = (uint8_t)yy;
++		if (((x | y) & 1) == 0) {
++			int cb = ((-43 * r - 85 * g + 128 * b) >> 8), cr = ((128 * r - 107 * g - 21 * b) >> 8);
++			if (d->pixelFormat == SWEET_FMT_420V) {
++				cb = (cb * 224) >> 8;
++				cr = (cr * 224) >> 8;
++			}
++			uint8_t *c = base + d->planes[1].offset + (uint64_t)(y / 2) * d->planes[1].bytesPerRow + x;
++			c[0] = sweet_clamp8(cb + 128);
++			c[1] = sweet_clamp8(cr + 128);
++		}
++		break;
++	}
++	}
++}
++
++static uint32_t sweet_scaler_logged;
++
++static IOReturn
++sweet_scaler_transfer(const uint8_t *req, uint32_t len)
++{
++	if (len < 0x28) {
++		return kIOReturnBadArgument;
++	}
++	uint32_t sid, did;
++	uint64_t flags;
++	memcpy(&sid, req, 4);
++	memcpy(&did, req + 4, 4);
++	memcpy(&flags, req + 0x20, 8);
++	SweetSurface *s = sweet_surface_copy(sid), *d = sweet_surface_copy(did);
++	IOReturn ret = kIOReturnSuccess;
++	uint64_t sf = 0, se = 0, df = 0, de = 0;
++	bool ok = s != NULL && d != NULL && sweet_scaler_span(s, &sf, &se) && sweet_scaler_span(d, &df, &de);
++	uintptr_t sb = ok ? s->kernelAddress() : 0, db = ok ? d->kernelAddress() : 0;
++	if (ok && sb != 0 && db != 0 && d->width != 0 && d->height != 0 && s->width != 0 && s->height != 0) {
++		const uint8_t *src = (const uint8_t *)sb + (s->wrapped ? s->wrapDelta : 0);
++		uint8_t *dst = (uint8_t *)db + (d->wrapped ? d->wrapDelta : 0);
++		sweet_scaler_cache((uintptr_t)src + sf, (size_t)(se - sf));
++		uint64_t stepx = ((uint64_t)s->width << 16) / d->width, stepy = ((uint64_t)s->height << 16) / d->height;
++		uint32_t w = d->width & ~1u, h = d->height & ~1u;
++		if (d->pixelFormat == SWEET_FMT_BGRA || d->pixelFormat == SWEET_FMT_L008) {
++			w = d->width;
++			h = d->height;
++		}
++		for (uint32_t y = 0; y < h; y++) {
++			uint32_t syy = (uint32_t)MIN((y * stepy) >> 16, (uint64_t)s->height - 1);
++			uint64_t fx = 0;
++			for (uint32_t x = 0; x < w; x++, fx += stepx) {
++				int rgb[3];
++				uint32_t sxx = (uint32_t)MIN(fx >> 16, (uint64_t)s->width - 1);
++				sweet_scaler_get(s, src, sxx, syy, rgb);
++				sweet_scaler_put(d, dst, x, y, rgb);
++			}
++		}
++		sweet_scaler_cache((uintptr_t)dst + df, (size_t)(de - df));
++		OSIncrementAtomic((volatile SInt32 *)sweet_surface_seed(d));
++	} else {
++		ret = kIOReturnUnsupported;
++	}
++	if (sweet_scaler_logged++ < 24) {
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		IOLog("SWEET SCALER: %s %u %ux%u 0x%x -> %u %ux%u 0x%x flags 0x%llx: 0x%x\n", name,
++		    sid, s ? s->width : 0, s ? s->height : 0, s ? s->pixelFormat : 0,
++		    did, d ? d->width : 0, d ? d->height : 0, d ? d->pixelFormat : 0, flags, ret);
++		if (sweet_scaler_logged <= 6 && len >= 0x60) {
++			const uint32_t *w32 = (const uint32_t *)(const void *)req;
++			IOLog("SWEET SCALER: req %08x %08x %08x %08x %08x %08x %08x %08x | %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
++			    w32[0], w32[1], w32[2], w32[3], w32[4], w32[5], w32[6], w32[7], w32[8], w32[9],
++			    w32[10], w32[11], w32[12], w32[13], w32[14], w32[15], w32[16], w32[17], w32[18],
++			    w32[19], w32[20], w32[21], w32[22], w32[23]);
++		}
++	}
++	OSSafeReleaseNULL(s);
++	OSSafeReleaseNULL(d);
++	return ret;
++}
++
++class AppleM2ScalerCSCUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(AppleM2ScalerCSCUserClient);
++
++public:
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(AppleM2ScalerCSCUserClient, IOUserClient);
++
++IOReturn
++AppleM2ScalerCSCUserClient::clientClose(void)
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++AppleM2ScalerCSCUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++    IOExternalMethodDispatch *, OSObject *, void *)
++{
++	if (selector == 1) {
++		uint32_t len = 0;
++		uint8_t *req = sweet_struct_in(args, &len);
++		if (req == NULL) {
++			return kIOReturnBadArgument;
++		}
++		IOReturn ret = sweet_scaler_transfer(req, len);
++		IOFreeData(req, len);
++		return ret;
++	}
++	static uint32_t told;
++	if (told++ < 16) {
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		IOLog("SWEET SCALER: %s selector %u (in %u/%u out %u/%u): ok\n", name, selector,
++		    args->scalarInputCount, args->structureInputSize, args->scalarOutputCount, args->structureOutputSize);
++	}
++	if (args->scalarOutput != NULL) {
++		for (uint32_t i = 0; i < args->scalarOutputCount; i++) {
++			args->scalarOutput[i] = 0;
++		}
++	}
++	return kIOReturnSuccess;
++}
++
++class AppleM2ScalerCSCDriver : public IOService {
++	OSDeclareDefaultStructors(AppleM2ScalerCSCDriver);
++
++public:
++	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(AppleM2ScalerCSCDriver, IOService);
++
++IOReturn
++AppleM2ScalerCSCDriver::newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler)
++{
++	AppleM2ScalerCSCUserClient *uc = OSTypeAlloc(AppleM2ScalerCSCUserClient);
++	if (uc == NULL) {
++		return kIOReturnNoMemory;
++	}
++	if (!uc->initWithTask(owningTask, securityID, type) || !uc->attach(this)) {
++		uc->release();
++		return kIOReturnError;
++	}
++	if (!uc->start(this)) {
++		uc->detach(this);
++		uc->release();
++		return kIOReturnError;
++	}
++	*handler = uc;
++	return kIOReturnSuccess;
++}
++
++void sweet_scaler_publish(IOService *provider);
++
++void
++sweet_scaler_publish(IOService *provider)
++{
++	AppleM2ScalerCSCDriver *sc = OSTypeAlloc(AppleM2ScalerCSCDriver);
++	if (sc != NULL && sc->init() && sc->attach(provider)) {
++		sc->registerService();
++		IOLog("SWEET SCALER: software AppleM2ScalerCSCDriver published\n");
++	}
++	OSSafeReleaseNULL(sc);
++}
+ #endif /* SWEET */
