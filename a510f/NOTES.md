@@ -903,6 +903,22 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
     HTO, idsts 0xe000 = FSM DMA_WR stuck): split at 4 KiB like Samsung.
     1708 MB boot (ram6) reached the lock screen on PIO; 87 extension check-in
     timeouts; AegirPoster (Astronomy wallpaper, needs Metal) crashed 93x.
+  - **Software scaler (0121)**: AppleM2ScalerCSCDriver reversed from
+    IOSurfaceAccelerator.framework in the phone's dyld cache (subcache .25,
+    symbols from .42.dyldlinkedit via a510f/tools/dsc_*.py): Create =
+    IOServiceOpen type 0, TransferSurface = selector 1 struct 0x170 (src id
+    +0, dst id +4, options +0x20). Home screen still grey/white after
+    wallpaper changes; not analysed yet (user moved on to the GPU).
+  - **GPU milestone 1 (IMG_4748): Mali-T720 r1p0 answers.** S-Boot leaves
+    the G3D domain on (st 0x3000f) and BUCK4 at 1.0 V (vsel 0x60); G3D PLL
+    0xa010a0d1, mout_g3d was the PLL. Switched to aclk_g3d_400 (mux stat 2,
+    pclk 400/3). GPU_ID 0x07201000, L2_FEAT 0x07110206, TILER_FEAT 0x809,
+    MEM_FEAT 0x1, MMU_FEAT 0x2821 (33-bit VA, 40-bit PA), AS 0xf, JS 0x7,
+    shader 0x3 (MP2), tiler 0x1, L2 0x1. Soft reset + L2/tiler/shader
+    power-up: all ready, irq raw 0x600. Plan: kernel MMU + job submission
+    (Panfrost kernel driver), then Mesa Panfrost for iOS in sailfish's
+    sweetgl frame (EAGL shim + DRM emulation); risk: CA wants ES 3, Mesa
+    lists T720 (Midgard v4) as ES 2.0 (MESA_GLES_VERSION_OVERRIDE=3.0 to try).
 - First boot logs (pulled in TWRP, twrp-write/pulled/b8p): no crash, no
   panic; SpringBoard up at +1 min; datamigrator ran 7 passes (exit 0) and
   recorded LastSystemVersion 20H392; Setup marked done by the root tweaks.
