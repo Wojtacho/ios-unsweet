@@ -1,6 +1,6 @@
 diff --git a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
 new file mode 100644
-index 0000000..2b7085b
+index 0000000..9a2f2af
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
 @@ -0,0 +1,770 @@
@@ -42,6 +42,8 @@ index 0000000..2b7085b
 +#include <libkern/c++/OSArray.h>
 +#include <pexpert/pexpert.h>
 +#include <kern/clock.h>
++#include <IOKit/system.h>
++#include <sys/proc.h>
 +
 +extern "C" void sweet_mali_publish(IOService *provider);
 +
@@ -50,8 +52,6 @@ index 0000000..2b7085b
 +
 +extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +extern "C" vm_offset_t ml_vtophys(vm_offset_t va);
-+extern "C" void proc_selfname(char *buf, int size);
-+extern task_t kernel_task;
 +
 +#define MALI_PA         0x11400000u
 +#define PMU_PD_PA       0x10464000u
@@ -775,15 +775,24 @@ index 0000000..2b7085b
 +#endif /* SWEET_GIC_V2 */
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
-index 1c01b4a..973a0b7 100644
+index 1c01b4a..19e7e00 100644
 --- a/iokit/Kernel/arm/SweetSurface.cpp
 +++ b/iokit/Kernel/arm/SweetSurface.cpp
-@@ -456,6 +456,9 @@ IOCoreSurfaceRoot::start(IOService *provider)
+@@ -434,6 +434,9 @@ SweetSurfaceRef::free()
+ 	OSObject::free();
+ }
+ 
++/* iokit/Kernel/arm/SweetMali.cpp (empty stub on boards without the Mali). */
++extern "C" void sweet_mali_publish(IOService *provider);
++
+ class IOCoreSurfaceRoot : public IOService {
+ 	OSDeclareDefaultStructors(IOCoreSurfaceRoot);
+ 
+@@ -456,6 +459,8 @@ IOCoreSurfaceRoot::start(IOService *provider)
  	/* A510F: software scaler (defined at the end of this file). */
  	extern void sweet_scaler_publish(IOService *provider);
  	sweet_scaler_publish(this);
 +	/* A510F: Mali-T720 driver (iokit/Kernel/arm/SweetMali.cpp). */
-+	extern "C" void sweet_mali_publish(IOService *provider);
 +	sweet_mali_publish(this);
  	return true;
  }
