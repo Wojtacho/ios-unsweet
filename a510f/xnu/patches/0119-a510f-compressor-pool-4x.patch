@@ -1,0 +1,20 @@
+diff --git a/osfmk/vm/vm_compressor.c b/osfmk/vm/vm_compressor.c
+index 1e7ca07..7e6e028 100644
+--- a/osfmk/vm/vm_compressor.c
++++ b/osfmk/vm/vm_compressor.c
+@@ -823,6 +823,15 @@ vm_compressor_set_size(void)
+ 		} else {
+ 			compressor_pool_size = 2ULL * max_mem;
+ 		}
++#if defined(__arm64__) && !defined(ARM_LARGE_MEMORY)
++		/*
++		 * A510F: a macOS-platform arm64 build with 4K pages has the iOS
++		 * kernel VA layout (~48 GB free for kmem claims). 16 x max_mem of
++		 * compressor VA (27 GB at 1.7 GB of RAM) plus the 24 GB zone map
++		 * does not fit and kmem_range_init panics. iOS uses 1 x; take 4 x.
++		 */
++		compressor_pool_size = 4ULL * max_mem;
++#endif
+ 	}
+ 	/*
+ 	 * Cap the compressor pool size to a max of 192G
