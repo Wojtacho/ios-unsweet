@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..3085a78
+index 0000000..ac100be
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,1048 @@
+@@ -0,0 +1,1171 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -733,6 +733,127 @@ index 0000000..3085a78
 +	}
 +}
 +
++/*
++ * A510F GPU milestone 1 (boot-arg a510fgpu, default 1; 0 = skip): power the
++ * Mali-T720 and read it. Samsung (e7580.dtsi, gpu_exynos7580.c,
++ * clk-exynos7580.c, s2mpu03.c):
++ *   Mali 0x11400000 (JOB/MMU/GPU irq SPI 282/283/281)
++ *   PMU G3D_CONFIGURATION 0x10464060 = 0xF (LOCAL_PWR_CFG), G3D_STATUS +4
++ *   CMU_G3D 0x11460000 (only while powered): MUX_SEL_G3D2 bit 0 = 1 picks
++ *     aclk_g3d_400 instead of the G3D PLL; DIV_G3D [2:0] aclk, [6:4] pclk;
++ *     EN_ACLK_G3D bits 0,1,4,5,7; EN_PCLK_G3D bits 0,4
++ *   CMU_TOP 0x10010000: DIV_TOP1 [31:28] dout_aclk_g3d_400, EN_ACLK_TOP bit 14
++ *   G3D supply: PMIC S2MPU03 BUCK4 (B4CTRL1 0x20, B4CTRL2 0x21 vsel,
++ *     400 mV + n x 6.25 mV); 1.0 V covers 350-534 MHz in Samsung's table.
++ * Then what Panfrost does: soft reset, power L2/tiler/shader cores.
++ */
++#define GPU_PA          0x11400000u
++#define PMU_PD_PA       0x10464000u
++#define CMU_G3D_PA      0x11460000u
++#define CMU_TOP_PA      0x10010000u
++
++static int a510f_gpu = 1;
++
++static bool
++gpu_wait(vm_offset_t b, uint32_t off, uint32_t mask, uint32_t want, int ms)
++{
++	for (int i = 0; i < ms * 10; i++) {
++		if ((rd(b, off) & mask) == want) {
++			return true;
++		}
++		delay(100);
++	}
++	return false;
++}
++
++static void
++a510f_gpu_probe(void)
++{
++	if (!a510f_gpu) {
++		printf("A510F GPU: skipped (a510fgpu=0)\n");
++		return;
++	}
++	vm_offset_t pmu = ml_io_map(PMU_PD_PA, 0x1000), top = ml_io_map(CMU_TOP_PA, 0x1000);
++	if (pmu == 0 || top == 0) {
++		return;
++	}
++	uint8_t b4c = 0xee, b4v = 0xee;
++	int e1 = bat_ok ? pmic_read(0x20, &b4c) : -1, e2 = bat_ok ? pmic_read(0x21, &b4v) : -1;
++	printf("A510F GPU: 1 pd cfg 0x%x st 0x%x | top div1 0x%08x en_aclk 0x%08x | buck4 ctrl %d 0x%02x vsel %d 0x%02x (%u uV)\n",
++	    rd(pmu, 0x60), rd(pmu, 0x64), rd(top, 0x604), rd(top, 0x800), e1, b4c, e2, b4v, 400000u + b4v * 6250u);
++
++	/* power domain */
++	if ((rd(pmu, 0x64) & 0xf) != 0xf) {
++		wr(pmu, 0x60, 0xf);
++	}
++	bool on = gpu_wait(pmu, 0x64, 0xf, 0xf, 100);
++	printf("A510F GPU: 2 power domain %s (st 0x%x)\n", on ? "on" : "DID NOT COME UP", rd(pmu, 0x64));
++	if (!on) {
++		return;
++	}
++	IOSleep(2);
++
++	/* supply: raise BUCK4 to 1.0 V if it reads plausibly lower */
++	if (bat_ok && pmic_read(0x21, &b4v) == 0 && b4v >= 0x40 && b4v < 0x60) {
++		int ew = pmic_write(0x21, 0x60);
++		IOSleep(2);
++		uint8_t back = 0xee;
++		int er = pmic_read(0x21, &back);
++		printf("A510F GPU: 3 buck4 vsel -> 0x60: write %d read %d 0x%02x\n", ew, er, back);
++	} else {
++		printf("A510F GPU: 3 buck4 vsel 0x%02x left alone\n", b4v);
++	}
++
++	vm_offset_t g3d = ml_io_map(CMU_G3D_PA, 0x1000);
++	if (g3d == 0) {
++		return;
++	}
++	printf("A510F GPU: 4 cmu_g3d pll 0x%08x sel0 0x%x sel2 0x%x stat2 0x%x div 0x%x en_aclk 0x%x en_pclk 0x%x\n",
++	    rd(g3d, 0x100), rd(g3d, 0x200), rd(g3d, 0x208), rd(g3d, 0x408), rd(g3d, 0x600), rd(g3d, 0x800), rd(g3d, 0x900));
++
++	/* clocks: aclk_g3d_400 on, GPU from it, pclk = 400 / 3 */
++	wr(top, 0x800, rd(top, 0x800) | (1u << 14));
++	wr(g3d, 0x208, rd(g3d, 0x208) | 1u);
++	bool muxed = gpu_wait(g3d, 0x408, 0x7, 0x2, 10);
++	wr(g3d, 0x600, (rd(g3d, 0x600) & ~0x77u) | (2u << 4));
++	bool div = gpu_wait(g3d, 0x700, 0xffffffffu, 0, 10);
++	wr(g3d, 0x800, rd(g3d, 0x800) | 0xb3u);
++	wr(g3d, 0x900, rd(g3d, 0x900) | 0x11u);
++	printf("A510F GPU: 5 clocks: mux %d (stat2 0x%x) div %d (0x%x) en_aclk 0x%x en_pclk 0x%x top en_aclk 0x%08x\n",
++	    muxed, rd(g3d, 0x408), div, rd(g3d, 0x600), rd(g3d, 0x800), rd(g3d, 0x900), rd(top, 0x800));
++	if (!muxed) {
++		printf("A510F GPU: no GPU clock confirmed, not touching the Mali\n");
++		return;
++	}
++
++	vm_offset_t gpu = ml_io_map(GPU_PA, 0x5000);
++	if (gpu == 0) {
++		return;
++	}
++	printf("A510F GPU: 6 reading the Mali...\n");
++	printf("A510F GPU: 6 GPU_ID 0x%08x L2_FEAT 0x%08x TILER_FEAT 0x%08x MEM_FEAT 0x%08x MMU_FEAT 0x%08x\n",
++	    rd(gpu, 0x000), rd(gpu, 0x004), rd(gpu, 0x00c), rd(gpu, 0x010), rd(gpu, 0x014));
++	printf("A510F GPU: 6 AS 0x%x JS 0x%x shader 0x%x tiler 0x%x l2 0x%x status 0x%x irq raw 0x%x\n",
++	    rd(gpu, 0x018), rd(gpu, 0x01c), rd(gpu, 0x100), rd(gpu, 0x110), rd(gpu, 0x120), rd(gpu, 0x034), rd(gpu, 0x020));
++
++	/* soft reset (GPU_COMMAND 1), wait RESET_COMPLETED (irq bit 8) */
++	wr(gpu, 0x028, 0);
++	wr(gpu, 0x024, 0xffffffffu);
++	wr(gpu, 0x030, 1);
++	bool reset = gpu_wait(gpu, 0x020, 1u << 8, 1u << 8, 100);
++	wr(gpu, 0x024, 0xffffffffu);
++	/* power L2, tiler, shader cores (as panfrost_gpu_power_on) */
++	uint32_t l2 = rd(gpu, 0x120), tiler = rd(gpu, 0x110), shader = rd(gpu, 0x100);
++	wr(gpu, 0x1a0, l2);
++	bool l2ok = gpu_wait(gpu, 0x160, l2, l2, 100);
++	wr(gpu, 0x190, tiler);
++	bool tok = gpu_wait(gpu, 0x150, tiler, tiler, 100);
++	wr(gpu, 0x180, shader);
++	bool sok = gpu_wait(gpu, 0x140, shader, shader, 100);
++	printf("A510F GPU: 7 reset %d | l2 %d ready 0x%x | tiler %d ready 0x%x | shader %d ready 0x%x | status 0x%x irq raw 0x%x\n",
++	    reset, l2ok, rd(gpu, 0x160), tok, rd(gpu, 0x150), sok, rd(gpu, 0x140), rd(gpu, 0x034), rd(gpu, 0x020));
++}
++
 +/* Touch unavailable: keep the buttons working. */
 +static void
 +keys_only_loop(void)
@@ -804,6 +925,7 @@ index 0000000..3085a78
 +	if (bat_ok) {
 +		a510f_cpu_raise();
 +	}
++	a510f_gpu_probe();
 +
 +	if (t.mode < 2) {
 +		printf("A510F TOUCH: probe only (a510ftouch=1), done\n");
@@ -859,6 +981,7 @@ index 0000000..3085a78
 +	t.mode = 0;
 +	PE_parse_boot_argn("a510ftouch", &t.mode, sizeof(t.mode));
 +	PE_parse_boot_argn("a510fcpufreq", &a510f_cpufreq, sizeof(a510f_cpufreq));
++	PE_parse_boot_argn("a510fgpu", &a510f_gpu, sizeof(a510f_gpu));
 +	int fit = 0;
 +	PE_parse_boot_argn("sweetfb_fit", &fit, sizeof(fit));
 +	t.yadj = fit ? 0 : TOUCH_Y_ADJUST;
