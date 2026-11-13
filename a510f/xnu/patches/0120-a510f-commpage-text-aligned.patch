@@ -1,0 +1,21 @@
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index f3cdb9f..9ac75be 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -10892,6 +10892,16 @@ pmap_create_commpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kern
+ 
+ 	do {
+ 		int text_leaf_index = random() % num_ptes;
++		/*
++		 * A510F (4K hardware pages, 16K VM pages): the text page is entered
++		 * as one VM page, PAGE_RATIO leaf entries written together by
++		 * write_pte_fast, which panics on a ptep that is not aligned to
++		 * them ("PTE write is unaligned"). The early random() sequence is
++		 * fixed per kernel/memory layout: with 1708 MB of RAM it gave leaf
++		 * 146. Round down to a VM-page boundary (a no-op where the VM page
++		 * is one leaf entry).
++		 */
++		text_leaf_index &= ~(int)((PAGE_SIZE >> pt_attr_leaf_shift(pt_attr)) - 1);
+ 
+ 		// Generate a VA for the commpage text with the same root and twig index as data
+ 		// comm page, but with new leaf index we've just generated.

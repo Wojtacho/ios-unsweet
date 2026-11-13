@@ -19,6 +19,7 @@
 - `0116-a510f-battery-sm5705.patch` (SweetBattery reads the SM5705 fuel gauge: level, voltage, current, temperature; 2900 mAh; charging = current into the battery; `sweetbattery=0` keeps the static 100%. The GPIO-I2C gauge reader `a510f_fg_read` is in 0110)
 - `0117-a510f-surfaces.patch` (SweetSurface fixes from MakrSas/ios-topaz 0131-0137 and 0139, merged without topaz's Qualcomm scanout code: surface values/attachments kept instead of zeroes, client-memory surfaces, detach/zombie-state lifetime fixes, IOSurfaceAddress surfaces published with real ids; framebuffer converts 10-bit l10r/w30r layers; one log line per new layer format and per new process+surface format)
 - `0118-a510f-framebuffer-low-ram.patch` (SWEET_FB_BASE 0x40800000: the shim moves DECON window 0 there from S-Boot's 0x67000000, so RAM is 0x44000000..0xaec00000, 1708 MB instead of 1004 MB; goes with a510f/shim and mkadt_a510f.py)
-- `0119-a510f-compressor-pool-4x.patch` (compressor pool 4 x RAM instead of the macOS 16 x: with 1.7 GB of RAM the 27 GB compressor VA claim plus the 24 GB zone map no longer fit the 4K iOS VA layout; the vm_compression_limit boot-arg did not take effect)
+- `0119-a510f-compressor-pool-4x.patch` (compressor pool 4 x RAM instead of the macOS 16 x: with 1.7 GB of RAM the 27 GB compressor VA claim plus the 24 GB zone map no longer fit the 4K iOS VA layout; the vm_compression_limit boot-arg is in 16 KB VM pages and bypasses the formula, so it is not used)
+- `0120-a510f-commpage-text-aligned.patch` (commpage text page at a random leaf rounded to a 16 KB VM page: write_pte_fast writes 4 leaf PTEs and panicked on leaf 146, which the fixed early random() sequence picked once RAM was 1708 MB)
 
 See a510f/NOTES.md for what each boot showed.
