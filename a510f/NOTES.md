@@ -955,3 +955,8 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
    (undefined-instruction handler), at a speed cost.
 3. eMMC driver (DW-MMC), GICv2, Exynos HS-I2C touch, S2MPU05 PMIC: new
    drivers compared to sweet.
+
+GPU milestone 2b confirmed (boot of 82e687f, IMG_4759): SweetMali publishes, the
+self-test WRITE_VALUE job through its own MMU tables ran in 55 us
+(cycles 0x54f088 -> ok). GPU_ID 0x07201000, 3 shader cores, AS0 table 0x47400000.
+Boot unchanged (Apple logo ~0:47). Next: 2c, a fragment job that draws.
