@@ -12,7 +12,7 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..4d2636b
+index 0000000..fadd086
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
 @@ -0,0 +1,1274 @@
@@ -753,7 +753,7 @@ index 0000000..4d2636b
 +#define CMU_G3D_PA      0x11460000u
 +#define CMU_TOP_PA      0x10010000u
 +
-+static int a510f_gpu = 1;
++static int a510f_gpu = 0;       /* SweetMali (iokit) owns the GPU now; a510fgpu=1: this probe instead */
 +
 +static bool
 +gpu_wait(vm_offset_t b, uint32_t off, uint32_t mask, uint32_t want, int ms)

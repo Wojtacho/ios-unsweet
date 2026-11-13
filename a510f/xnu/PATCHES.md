@@ -22,5 +22,6 @@
 - `0119-a510f-compressor-pool-4x.patch` (compressor pool 4 x RAM instead of the macOS 16 x: with 1.7 GB of RAM the 27 GB compressor VA claim plus the 24 GB zone map no longer fit the 4K iOS VA layout; the vm_compression_limit boot-arg is in 16 KB VM pages and bypasses the formula, so it is not used)
 - `0120-a510f-commpage-text-aligned.patch` (commpage text page at a random leaf rounded to a 16 KB VM page: write_pte_fast writes 4 leaf PTEs and panicked on leaf 146, which the fixed early random() sequence picked once RAM was 1708 MB)
 - `0121-a510f-software-scaler.patch` (software AppleM2ScalerCSCDriver: IOSurfaceAccelerator selector 1, 0x170-byte request with source/destination surface ids at +0/+4; whole-surface nearest-neighbour scale and BGRA/L008/420f/420v conversion on the CPU, destination seed bumped. SpringBoard's home-screen wallpaper copies were never written without it)
+- `0122-a510f-sweetmali-gpu-driver.patch` (SweetMali: Mali-T720 kernel driver after Linux panfrost: power/clock/reset, AS0 with on-demand Mali LPAE tables and lock+FLUSH_PT, wired or IOSurface-backed BOs mapped write-combined into the client, synchronous job submit on JS0 (fragment) / JS1 with fault recovery, panfrost GET_PARAM values; user client selectors 10-15; boot self-test job; `sweetmali=0` off)
 
 See a510f/NOTES.md for what each boot showed.
