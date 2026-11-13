@@ -2,11 +2,15 @@
 #include <stdint.h>
 
 /*
- * A510F: the splash framebuffer S-Boot leaves programmed in DECON window 0
- * (found by the a510f probe, see a510f/NOTES.md). a8r8g8b8.
- * Must match SWEET_FB_* in a510f/xnu/patches/0102 and FB in mkadt_a510f.py.
+ * A510F framebuffer, a8r8g8b8. S-Boot leaves DECON window 0 scanning out of
+ * FB_SBOOT (found by the a510f probe, see a510f/NOTES.md), in the middle of
+ * RAM; shim.c moves the scanout to FB_BASE in low memory (below the
+ * ramdisk, inside the kernel's first 1 GB, as patch 0102's early mapping
+ * needs) so xnu gets one RAM range 0x44000000..0xaec00000 (1708 MB).
+ * Must match SWEET_FB_BASE (a510f/xnu/patches/0118) and FB in mkadt_a510f.py.
  */
-#define FB_BASE		0x67000000UL
+#define FB_SBOOT	0x67000000UL
+#define FB_BASE		0x40800000UL
 #define FB_W		1080
 #define FB_H		1920
 #define FB_STRIDE	(FB_W * 4)

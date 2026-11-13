@@ -1,0 +1,21 @@
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index 178b5a3..9c783be 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -34,11 +34,13 @@
+ #define HAS_GIC_V3                1
+ 
+ /*
+- * A510F: splash framebuffer S-Boot leaves programmed in DECON window 0
+- * (probe run, a510f/NOTES.md): 1080x1920 a8r8g8b8, stride 4320 bytes.
++ * A510F framebuffer: 1080x1920 a8r8g8b8, stride 4320 bytes. S-Boot scans out
++ * of 0x67000000 (mid-RAM); the shim (a510f/shim/shim.c) moves DECON window 0
++ * to 0x40800000, below the ramdisk and in the kernel's first 1 GB as the
++ * early V=P mapping needs, so RAM is one range 0x44000000..0xaec00000.
+  * SWEET_FB_SIZE is the mapped size: whole 2MB blocks (4K pages).
+  */
+-#define SWEET_FB_BASE             0x67000000
++#define SWEET_FB_BASE             0x40800000
+ #define SWEET_FB_WIDTH            1080
+ #define SWEET_FB_HEIGHT           1920
+ #define SWEET_FB_STRIDE           4320

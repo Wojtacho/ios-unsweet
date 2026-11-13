@@ -15,15 +15,18 @@ sys.path.insert(0, os.path.join(HERE, '../../tools'))
 import adt     # noqa: E402
 import mkadt   # noqa: E402
 
-# Kernel RAM: above the S-Boot framebuffer (0x67000000 + 8MB) and the
-# shim/ramdisk/DTB in low memory, below the first reserved carve-out
-# (video_ext 0xaec00000; CP 0xb0000000; EL3 monitor 0xbee00000).
-PHYS_BASE = 0x70000000
+# Kernel RAM: one range from above the shim (0x40205000), the moved
+# framebuffer (0x40800000, shim.c) and S-Boot's ramdisk (0x42000000, ~17 MB
+# payload) up to the first reserved carve-out (Samsung's /reserved-memory:
+# video_ext 0xaec00000, then MFC, video, common, FIMC; EL3 0xbee00000).
+# 1708 MB; it was 0x70000000.. (1004 MB) while S-Boot's framebuffer at
+# 0x67000000 was still in use. The DTB at 0x48000000 is only read before.
+PHYS_BASE = 0x44000000
 PHYS_END = 0xaec00000
 
 mkadt.PHYS_BASE = PHYS_BASE
 mkadt.MEM_SIZE = PHYS_END - PHYS_BASE
-mkadt.FB, mkadt.FB_SIZE = 0x67000000, 0x800000
+mkadt.FB, mkadt.FB_SIZE = 0x40800000, 0x800000     # a510f/shim/console.h FB_BASE
 mkadt.FB_W, mkadt.FB_H, mkadt.FB_STRIDE = 1080, 1920, 1080 * 4
 mkadt.TIMEBASE = 26000000                   # timer clock-frequency
 # GIC-400 (GICv2): GICD 0x10c01000, GICC 0x10c02000. sweet's kernel drives

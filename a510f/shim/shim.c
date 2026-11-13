@@ -21,6 +21,8 @@
 #define DECON_WINCON0		(DECON_BASE + 0x0050)
 #define DECON_ADD0_W0		(DECON_BASE + 0x0880)
 #define DECON_TRIGCON		(DECON_BASE + 0x06B0)
+#define DECON_UPDATE		(DECON_BASE + 0x0710)	/* regs-decon.h (decon_7580) */
+#define UPDATE_STANDALONE_F	(1u << 0)
 #define TRIG_SWTRIGEN		(1u << 0)
 #define TRIG_SWTRIGCMD		(1u << 1)
 #define TRIG_HWTRIGEN		(1u << 3)
@@ -93,6 +95,33 @@ static void decon_kick(void)
 		wr32(DECON_TRIGCON, t | TRIG_HWTRIGMASK);
 }
 
+/*
+ * Move DECON window 0 from S-Boot's buffer (FB_SBOOT, mid-RAM) to FB_BASE:
+ * copy the splash (MMU off: 8-byte words), set the window's start address
+ * (VIDW_ADD0, the only buffer register: size and offsets stay) and request
+ * a standalone shadow update, which DECON applies at the next frame and then
+ * clears. Returns 0 when the new address is live.
+ */
+static int fb_move(void)
+{
+	if (rd32(DECON_ADD0_W0) != FB_SBOOT)
+		return -1;
+	volatile uint64_t *d = (volatile uint64_t *)FB_BASE;
+	volatile const uint64_t *s = (volatile const uint64_t *)FB_SBOOT;
+	for (uint64_t i = 0; i < (uint64_t)FB_H * FB_STRIDE / 8; i++)
+		d[i] = s[i];
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr32(DECON_ADD0_W0, (uint32_t)FB_BASE);
+	wr32(DECON_UPDATE, rd32(DECON_UPDATE) | UPDATE_STANDALONE_F);
+	for (int i = 0; i < 20; i++) {
+		decon_kick();
+		delay_ms(17);
+		if (!(rd32(DECON_UPDATE) & UPDATE_STANDALONE_F))
+			return 0;
+	}
+	return -2;
+}
+
 /* ---- CPU1: display refresher ---- */
 
 void secondary_main(uint64_t idx)
@@ -126,6 +155,7 @@ void shim_main(uint64_t dtb)
 {
 	stage = "start";
 	decon_kick();
+	int moved = fb_move();
 	con_clear(RED);
 	con_str("SHIM", "a510f: S-Boot -> xnu loader");
 	con_skip();
@@ -133,8 +163,9 @@ void shim_main(uint64_t dtb)
 	uint32_t wincon = rd32(DECON_WINCON0), add0 = rd32(DECON_ADD0_W0);
 	con_hex2("DECON", "win0=", wincon, "add0=", add0);
 	con_hex2("DTB", "at=", dtb, "mpidr=", rsr("mpidr_el1"));
+	con_hex2("FBMOVE", "rc=", (uint32_t)moved, "upd=", rd32(DECON_UPDATE));
 	if (add0 != FB_BASE)
-		con_str("WARN", "framebuffer moved: kernel console off-screen");
+		con_str("WARN", "framebuffer not moved: screen shows old buffer");
 
 	stage = "refresher";
 	uint64_t self = rsr("mpidr_el1") & 0xffff;

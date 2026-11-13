@@ -18,5 +18,6 @@
 - `0115-a510f-boot-waits.patch` (from MakrSas/ios-topaz 0138/0128: empty IOAcceleratorES service so QuartzCore stops its 30 s poll at every backboardd start, `sweetaccel=0` off; no registry busy hold for an IOKit daemon that never reports in, `sweetiokitdhold=1` restores it; SWEET AKS console lines capped at 48, `sweetakslog=1` all)
 - `0116-a510f-battery-sm5705.patch` (SweetBattery reads the SM5705 fuel gauge: level, voltage, current, temperature; 2900 mAh; charging = current into the battery; `sweetbattery=0` keeps the static 100%. The GPIO-I2C gauge reader `a510f_fg_read` is in 0110)
 - `0117-a510f-surfaces.patch` (SweetSurface fixes from MakrSas/ios-topaz 0131-0137 and 0139, merged without topaz's Qualcomm scanout code: surface values/attachments kept instead of zeroes, client-memory surfaces, detach/zombie-state lifetime fixes, IOSurfaceAddress surfaces published with real ids; framebuffer converts 10-bit l10r/w30r layers; one log line per new layer format and per new process+surface format)
+- `0118-a510f-framebuffer-low-ram.patch` (SWEET_FB_BASE 0x40800000: the shim moves DECON window 0 there from S-Boot's 0x67000000, so RAM is 0x44000000..0xaec00000, 1708 MB instead of 1004 MB; goes with a510f/shim and mkadt_a510f.py)
 
 See a510f/NOTES.md for what each boot showed.
