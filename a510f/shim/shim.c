@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include "console.h"
 #include "loader.h"
+#include "fdt.h"
 
 #define DECON_BASE		0x14830000UL
 #define DECON_WINCON0		(DECON_BASE + 0x0050)
@@ -23,6 +24,8 @@
 #define DECON_TRIGCON		(DECON_BASE + 0x06B0)
 #define DECON_UPDATE		(DECON_BASE + 0x0710)	/* regs-decon.h (decon_7580) */
 #define UPDATE_STANDALONE_F	(1u << 0)
+#define DECON_SHADOWCON		(DECON_BASE + 0x0030)
+#define SHADOWCON_WIN0_PROTECT	(1u << 8)
 #define TRIG_SWTRIGEN		(1u << 0)
 #define TRIG_SWTRIGCMD		(1u << 1)
 #define TRIG_HWTRIGEN		(1u << 3)
@@ -111,14 +114,20 @@ static int fb_move(void)
 	for (uint64_t i = 0; i < (uint64_t)FB_H * FB_STRIDE / 8; i++)
 		d[i] = s[i];
 	__asm__ volatile("dsb sy" ::: "memory");
+	/* Linux (decon_reg_7580.c): protect, write, unprotect, standalone update. */
+	wr32(DECON_SHADOWCON, rd32(DECON_SHADOWCON) | SHADOWCON_WIN0_PROTECT);
 	wr32(DECON_ADD0_W0, (uint32_t)FB_BASE);
+	wr32(DECON_SHADOWCON, rd32(DECON_SHADOWCON) & ~SHADOWCON_WIN0_PROTECT);
 	wr32(DECON_UPDATE, rd32(DECON_UPDATE) | UPDATE_STANDALONE_F);
-	for (int i = 0; i < 20; i++) {
+	for (int i = 0; i < 60; i++) {
 		decon_kick();
 		delay_ms(17);
 		if (!(rd32(DECON_UPDATE) & UPDATE_STANDALONE_F))
 			return 0;
 	}
+	/* Not applied: back to S-Boot's buffer, nothing boots with this layout. */
+	wr32(DECON_ADD0_W0, (uint32_t)FB_SBOOT);
+	wr32(DECON_UPDATE, rd32(DECON_UPDATE) | UPDATE_STANDALONE_F);
 	return -2;
 }
 
@@ -155,17 +164,21 @@ void shim_main(uint64_t dtb)
 {
 	stage = "start";
 	decon_kick();
-	int moved = fb_move();
+	/* Draw on S-Boot's buffer first: visible whatever happens to the move. */
+	con_fb = (volatile uint32_t *)FB_SBOOT;
 	con_clear(RED);
 	con_str("SHIM", "a510f: S-Boot -> xnu loader");
 	con_skip();
 
 	uint32_t wincon = rd32(DECON_WINCON0), add0 = rd32(DECON_ADD0_W0);
 	con_hex2("DECON", "win0=", wincon, "add0=", add0);
+	con_hex2("DECON2", "shadow=", rd32(DECON_SHADOWCON), "upd=", rd32(DECON_UPDATE));
+	con_hex2("DECON3", "trig=", rd32(DECON_TRIGCON), "fbnew=", (uint32_t)FB_BASE);
 	con_hex2("DTB", "at=", dtb, "mpidr=", rsr("mpidr_el1"));
-	con_hex2("FBMOVE", "rc=", (uint32_t)moved, "upd=", rd32(DECON_UPDATE));
-	if (add0 != FB_BASE)
-		con_str("WARN", "framebuffer not moved: screen shows old buffer");
+	uint64_t rd_s = 0, rd_e = 0;
+	fdt_chosen_u64(dtb, "linux,initrd-start", &rd_s);
+	fdt_chosen_u64(dtb, "linux,initrd-end", &rd_e);
+	con_hex2("INITRD", "lo=", (uint32_t)rd_s, "hi=", (uint32_t)rd_e);
 
 	stage = "refresher";
 	uint64_t self = rsr("mpidr_el1") & 0xffff;
@@ -176,6 +189,21 @@ void shim_main(uint64_t dtb)
 	con_hex2("CPU1", "on=", (uint32_t)rc, "alive=", (uint32_t)refresher_alive);
 	if (!refresher_alive)
 		con_str("WARN", "no refresher: screen may freeze");
+
+	stage = "fbmove";
+	con_str("FBMOVE", "moving the framebuffer to low RAM...");
+	int moved = fb_move();
+	if (moved != 0) {
+		con_hex2("FBMOVE", "FAILED rc=", (uint32_t)moved, "upd=", rd32(DECON_UPDATE));
+		con_hex2("FBMOVE", "add0=", rd32(DECON_ADD0_W0), "shadow=", rd32(DECON_SHADOWCON));
+		con_str("OFF", "not booting (RAM layout needs the move); off in 60 s");
+		delay_ms(60000);
+		power_off();
+	}
+	con_fb = (volatile uint32_t *)FB_BASE;	/* the copy already shows the lines above */
+	con_hex2("FBMOVE", "ok add0=", rd32(DECON_ADD0_W0), "upd=", rd32(DECON_UPDATE));
+	con_str("WAIT", "8 s for a photo");
+	delay_ms(8000);
 	con_skip();
 
 	stage = "loader";
