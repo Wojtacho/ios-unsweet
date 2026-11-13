@@ -919,6 +919,14 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
     (Panfrost kernel driver), then Mesa Panfrost for iOS in sailfish's
     sweetgl frame (EAGL shim + DRM emulation); risk: CA wants ES 3, Mesa
     lists T720 (Midgard v4) as ES 2.0 (MESA_GLES_VERSION_OVERRIDE=3.0 to try).
+  - **GPU milestone 2a (IMG_4749): THE GPU RAN A JOB.** Tables L0 0x4aa6c000
+    L1 ..d000 L2 ..e000 L3 ..f000, leaf 0x4aa842c1 (type 1, HAP rw, SH outer,
+    attr 0). AS0 UPDATE ok; WRITE_VALUE (type 2 timestamp) on JS1 with
+    START_MMU + flush clean/inv start/end: job irq 0x2 after 1 ms, mmu irq 0,
+    JS1 status 0, header excp 0x1 (DONE), target 0xaaaa.. -> 0x0 (timestamp
+    counter not started: GPU_COMMAND CYCLE_COUNT_START not issued). Next: 2b,
+    a real driver (BOs, GPU VA allocator, submit/wait user client shaped
+    after the panfrost DRM uAPI for the DRM emulation layer).
 - First boot logs (pulled in TWRP, twrp-write/pulled/b8p): no crash, no
   panic; SpringBoard up at +1 min; datamigrator ran 7 passes (exit 0) and
   recorded LastSystemVersion 20H392; Setup marked done by the root tweaks.
