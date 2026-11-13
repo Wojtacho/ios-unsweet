@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..14f35fc
+index 0000000..4d2636b
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,1171 @@
+@@ -0,0 +1,1274 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -41,6 +41,7 @@ index 0000000..14f35fc
 +#include <kern/clock.h>
 +#include <kern/thread.h>
 +#include <kern/locks.h>
++#include <kern/kalloc.h>
 +#include <kern/sched_prim.h>
 +#include <machine/machine_routines.h>
 +#include <pexpert/pexpert.h>
@@ -766,6 +767,105 @@ index 0000000..14f35fc
 +	return false;
 +}
 +
++/*
++ * A510F GPU milestone 2a: one WRITE_VALUE job through the Mali MMU.
++ * Linux panfrost (panfrost_mmu.c, panfrost_job.c, panfrost_regs.h) and
++ * io-pgtable-arm.c (ARM_MALI_LPAE): 4-level 4K tables from level 0, table
++ * entries type 3, leaf entries type 1 (Mali), HAP read bit 6 / write bit 7,
++ * shareability outer (2 << 8), attr index 0 (non-coherent: no IOMMU_CACHE);
++ * MEMATTR 0x888D88; TRANSTAB = L0 | READ_INNER (4) | ADRMODE_TABLE (3).
++ * T720: HW_ISSUE_10649 -> JS_CONFIG_START_MMU; no flush reduction.
++ * Mesa genxml v4: Job Header 32 bytes (word 4: bit 0 is-64b, bits 7:1 type,
++ * bits 31:16 index; words 6-7 next), Write Value payload at +32: address,
++ * type (1 cycle counter, 2 system timestamp, 3 zero).
++ */
++#define GPU_TEST_VA     0x1000000ull
++extern vm_offset_t ml_vtophys(vm_offset_t va);
++
++static void
++gpu_dc_civac(void *p, size_t len)
++{
++	uintptr_t a = (uintptr_t)p & ~(uintptr_t)63, end = (uintptr_t)p + len;
++	for (; a < end; a += 64) {
++		__asm__ volatile ("dc civac, %0" : : "r"(a) : "memory");
++	}
++	__asm__ volatile ("dsb sy" : : : "memory");
++}
++
++static void
++a510f_gpu_job_test(vm_offset_t gpu, uint32_t shader)
++{
++	uint8_t *pt = (uint8_t *)kalloc_data(16384, Z_WAITOK | Z_ZERO);
++	uint8_t *mem = (uint8_t *)kalloc_data(16384, Z_WAITOK | Z_ZERO);
++	if (pt == NULL || mem == NULL || ((uintptr_t)pt & 0xfff) || ((uintptr_t)mem & 0xfff)) {
++		printf("A510F GPU: 8 no aligned memory for the job test\n");
++		return;
++	}
++	uint64_t *l0 = (uint64_t *)(void *)pt, *l1 = (uint64_t *)(void *)(pt + 4096);
++	uint64_t *l2 = (uint64_t *)(void *)(pt + 8192), *l3 = (uint64_t *)(void *)(pt + 12288);
++	uint64_t pl0 = ml_vtophys((vm_offset_t)l0), pl1 = ml_vtophys((vm_offset_t)l1);
++	uint64_t pl2 = ml_vtophys((vm_offset_t)l2), pl3 = ml_vtophys((vm_offset_t)l3);
++	l0[(GPU_TEST_VA >> 39) & 0x1ff] = (pl1 & ~0xfffull) | 3;
++	l1[(GPU_TEST_VA >> 30) & 0x1ff] = (pl2 & ~0xfffull) | 3;
++	l2[(GPU_TEST_VA >> 21) & 0x1ff] = (pl3 & ~0xfffull) | 3;
++	for (int i = 0; i < 4; i++) {
++		uint64_t pa = ml_vtophys((vm_offset_t)(mem + 4096 * i));
++		l3[((GPU_TEST_VA >> 12) & 0x1ff) + i] = (pa & ~0xfffull) | 1 | (3ull << 6) | (2ull << 8);
++	}
++
++	/* job header + write value payload; result at +0x100 */
++	uint32_t *w = (uint32_t *)(void *)mem;
++	w[4] = 1u | (2u << 1) | (1u << 16);             /* 64-bit, WRITE_VALUE, index 1 */
++	uint64_t target = GPU_TEST_VA + 0x100;
++	memcpy(mem + 0x20, &target, 8);
++	w[0x28 / 4] = 2;                                /* system timestamp */
++	uint64_t pattern = 0xaaaaaaaaaaaaaaaaull;
++	memcpy(mem + 0x100, &pattern, 8);
++	gpu_dc_civac(pt, 16384);
++	gpu_dc_civac(mem, 16384);
++	printf("A510F GPU: 8 tables L0 0x%llx L1 0x%llx L2 0x%llx L3 0x%llx, mem 0x%llx, l3[0] 0x%llx\n",
++	    pl0, pl1, pl2, pl3, ml_vtophys((vm_offset_t)mem), l3[(GPU_TEST_VA >> 12) & 0x1ff]);
++
++	/* address space 0 */
++	uint64_t transtab = (pl0 & ~0xfffull) | 4 | 3;
++	gpu_wait(gpu, 0x2428, 1, 0, 100);
++	wr(gpu, 0x2400, (uint32_t)transtab);
++	wr(gpu, 0x2404, (uint32_t)(transtab >> 32));
++	wr(gpu, 0x2408, 0x00888d88u);
++	wr(gpu, 0x240c, 0);
++	wr(gpu, 0x2418, 1);                             /* AS_COMMAND_UPDATE */
++	bool as_ok = gpu_wait(gpu, 0x2428, 1, 0, 100);
++	wr(gpu, 0x1004, 0xffffffffu);                   /* JOB_INT_CLEAR */
++	wr(gpu, 0x2004, 0xffffffffu);                   /* MMU_INT_CLEAR */
++
++	/* job slot 1 */
++	wr(gpu, 0x1880 + 0x40, (uint32_t)GPU_TEST_VA);  /* JS_HEAD_NEXT */
++	wr(gpu, 0x1880 + 0x44, (uint32_t)(GPU_TEST_VA >> 32));
++	wr(gpu, 0x1880 + 0x50, shader);                 /* JS_AFFINITY_NEXT */
++	wr(gpu, 0x1880 + 0x54, 0);
++	wr(gpu, 0x1880 + 0x58, 0u | (8u << 16) | (3u << 8) | (3u << 12) | (1u << 10));
++	wr(gpu, 0x1880 + 0x60, 1);                      /* JS_COMMAND_NEXT = START */
++	uint32_t raw = 0, mmu = 0;
++	int ms;
++	for (ms = 0; ms < 500; ms++) {
++		raw = rd(gpu, 0x1000);
++		mmu = rd(gpu, 0x2000);
++		if ((raw & ((1u << 1) | (1u << 17))) || mmu) {
++			break;
++		}
++		IOSleep(1);
++	}
++	gpu_dc_civac(mem, 16384);
++	uint64_t result;
++	memcpy(&result, mem + 0x100, 8);
++	printf("A510F GPU: 9 AS update %d | after %d ms: job irq 0x%x mmu irq 0x%x | JS1 status 0x%x head 0x%x | AS0 fault 0x%x at 0x%x\n",
++	    as_ok, ms, raw, mmu, rd(gpu, 0x1880 + 0x24), rd(gpu, 0x1880 + 0x00), rd(gpu, 0x241c), rd(gpu, 0x2420));
++	printf("A510F GPU: 9 header written back: excp 0x%x first 0x%x | result 0x%llx (was 0xaaaaaaaaaaaaaaaa) -> %s\n",
++	    w[0], w[1], result, result != pattern ? "THE GPU RAN A JOB" : "not written");
++	wr(gpu, 0x1004, 0xffffffffu);
++	wr(gpu, 0x2004, 0xffffffffu);
++}
++
 +static void
 +a510f_gpu_probe(bool bat_ok)
 +{
@@ -852,6 +952,9 @@ index 0000000..14f35fc
 +	bool sok = gpu_wait(gpu, 0x140, shader, shader, 100);
 +	printf("A510F GPU: 7 reset %d | l2 %d ready 0x%x | tiler %d ready 0x%x | shader %d ready 0x%x | status 0x%x irq raw 0x%x\n",
 +	    reset, l2ok, rd(gpu, 0x160), tok, rd(gpu, 0x150), sok, rd(gpu, 0x140), rd(gpu, 0x034), rd(gpu, 0x020));
++	if (reset && l2ok && tok && sok && a510f_gpu >= 1) {
++		a510f_gpu_job_test(gpu, shader);
++	}
 +}
 +
 +/* Touch unavailable: keep the buttons working. */
