@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..9a2f2af
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
-@@ -0,0 +1,770 @@
+@@ -0,0 +1,860 @@
 +/*
 + * SweetMali: kernel driver for the A510F's Mali-T720 MP2 (Exynos 7580),
 + * shaped after Linux panfrost (drivers/gpu/drm/panfrost) so that Mesa's
@@ -520,6 +520,95 @@ index 0000000..9a2f2af
 +	bo->release();
 +}
 +
++/*
++ * Milestone 2c: the GPU draws. One FRAGMENT job with no draws clears a 64x64
++ * RGBA8 linear render target to a known colour. Midgard v4 (T720) uses the
++ * single framebuffer descriptor (Mesa genxml v4.xml "Framebuffer", 320 bytes;
++ * pan_desc.c pan_emit_fbd for PAN_ARCH == 4): local storage at 0, parameters
++ * at 32, tiler context at 192, weights at 256. With no draws the tiler is
++ * "disabled"; T720 has no hierarchical tiling, so hierarchy mask USER (0xfff),
++ * polygon list size 512 + 4, heap start = end = polygon list, and the body's
++ * first word is the T720 magic 0xa0000000 (pan_cmdstream.c). Fragment job
++ * bounds are in 16-pixel tiles; RGBA8 clear colour is R | G << 8 | B << 16 |
++ * A << 24 replicated four times (pan_clear.c).
++ */
++#define DRAW_W          64
++#define DRAW_H          64
++#define DRAW_FBD        0x100
++#define DRAW_PLIST      0x1000
++#define DRAW_RT         0x4000
++#define DRAW_COLOUR     0xffc08040u     /* R 0x40 G 0x80 B 0xc0 A 0xff */
++
++static void
++mali_draw_test(void)
++{
++	SweetMaliBO *bo = bo_new(0x8000, NULL);
++	if (bo == NULL) {
++		IOLog("SWEET MALI: draw test: no BO\n");
++		return;
++	}
++	uint8_t *mem = (uint8_t *)OSDynamicCast(IOBufferMemoryDescriptor, bo->md)->getBytesNoCopy();
++	uint64_t va = bo->gpuVA, fbd = va + DRAW_FBD, plist = va + DRAW_PLIST, rt = va + DRAW_RT;
++	uint32_t *rtw = (uint32_t *)(void *)(mem + DRAW_RT);
++	for (int i = 0; i < DRAW_W * DRAW_H; i++) {
++		rtw[i] = 0xaaaaaaaau;
++	}
++
++	/* fragment job: header + payload */
++	uint32_t *j = (uint32_t *)(void *)mem;
++	j[4] = 1u | (9u << 1) | (1u << 16);             /* 64-bit, FRAGMENT, index 1 */
++	j[8] = 0;                                       /* tile min x, y */
++	j[9] = ((DRAW_W - 1) >> 4) | (((DRAW_H - 1) >> 4) << 16);
++	j[10] = (uint32_t)fbd;
++	j[11] = (uint32_t)(fbd >> 32);
++
++	/* framebuffer descriptor */
++	uint32_t *f = (uint32_t *)(void *)(mem + DRAW_FBD);
++	f[1] = 31;                                      /* WLS instances: none (log2 0x80000000) */
++	uint32_t *p = f + 8;                            /* parameters */
++	p[0] = 1u                                       /* internal format R8G8B8A8 */
++	    | (0x688u << 6)                             /* swizzle RGBA */
++	    | (19u << 18)                               /* writeback R8G8B8A8 */
++	    | (2u << 26)                                /* block format linear */
++	    | (1u << 28) | (1u << 29) | (1u << 31);     /* dither, clean pixel write, colour write */
++	p[1] = (2u << 11) | (5u << 18);                 /* tie-break -180 in 0 out, ZS D24S8 (default) */
++	p[2] = 0;
++	p[3] = (DRAW_W - 1) | ((DRAW_H - 1) << 16);
++	p[12] = (uint32_t)rt;                           /* colour writeback */
++	p[13] = (uint32_t)(rt >> 32);
++	p[14] = DRAW_W * 4;
++	for (int i = 24; i < 28; i++) {
++		p[i] = DRAW_COLOUR;
++	}
++	uint32_t *t = f + 48;                           /* tiler context */
++	t[0] = 512 + 4;
++	t[1] = 0xfff;
++	t[2] = (uint32_t)plist;
++	t[3] = (uint32_t)(plist >> 32);
++	t[4] = (uint32_t)(plist + 512);
++	t[5] = (uint32_t)((plist + 512) >> 32);
++	t[6] = t[8] = (uint32_t)plist;
++	t[7] = t[9] = (uint32_t)(plist >> 32);
++	*(uint32_t *)(void *)(mem + DRAW_PLIST + 512) = 0xa0000000u;
++
++	dc_civac(mem, 0x8000);
++	uint32_t status = 0;
++	uint64_t us = 0;
++	IOLockLock(g_lock);
++	IOReturn r = gpu_run(va, 1, &status, &us);      /* fragment: slot 0 */
++	IOLockUnlock(g_lock);
++	dc_civac(mem, 0x8000);
++	int good = 0, untouched = 0;
++	for (int i = 0; i < DRAW_W * DRAW_H; i++) {
++		good += rtw[i] == DRAW_COLOUR;
++		untouched += rtw[i] == 0xaaaaaaaau;
++	}
++	IOLog("SWEET MALI: draw test: fragment job 0x%x in %llu us, header 0x%x | pixels %d/%d = 0x%08x, %d untouched, first 0x%08x last 0x%08x -> %s\n",
++	    r, us, j[0], good, DRAW_W * DRAW_H, DRAW_COLOUR, untouched, rtw[0], rtw[DRAW_W * DRAW_H - 1],
++	    (r == kIOReturnSuccess && good == DRAW_W * DRAW_H) ? "THE GPU DREW" : "FAILED");
++	bo->release();
++}
++
 +/* ---- user client ---------------------------------------------------------- */
 +
 +static const uint32_t mali_param_reg[] = {
@@ -760,6 +849,7 @@ index 0000000..9a2f2af
 +	}
 +	g_ready = true;
 +	mali_selftest();
++	mali_draw_test();
 +	SweetMali *m = OSTypeAlloc(SweetMali);
 +	if (m != NULL && m->init() && m->attach(provider)) {
 +		m->registerService();

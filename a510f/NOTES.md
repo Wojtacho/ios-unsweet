@@ -960,3 +960,8 @@ GPU milestone 2b confirmed (boot of 82e687f, IMG_4759): SweetMali publishes, the
 self-test WRITE_VALUE job through its own MMU tables ran in 55 us
 (cycles 0x54f088 -> ok). GPU_ID 0x07201000, 3 shader cores, AS0 table 0x47400000.
 Boot unchanged (Apple logo ~0:47). Next: 2c, a fragment job that draws.
+
+GPU milestone 2c (this build): SweetMali runs a FRAGMENT job after the self-test
+that clears a 64x64 RGBA8 target to 0xffc08040 (single framebuffer descriptor,
+tiler disabled, T720 polygon-list magic 0xa0000000) and checks all 4096 pixels.
+Boot line: "SWEET MALI: draw test: ... -> THE GPU DREW" or "FAILED".
