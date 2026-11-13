@@ -12,7 +12,7 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..ac100be
+index 0000000..14f35fc
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
 @@ -0,0 +1,1171 @@
@@ -767,7 +767,7 @@ index 0000000..ac100be
 +}
 +
 +static void
-+a510f_gpu_probe(void)
++a510f_gpu_probe(bool bat_ok)
 +{
 +	if (!a510f_gpu) {
 +		printf("A510F GPU: skipped (a510fgpu=0)\n");
@@ -925,7 +925,7 @@ index 0000000..ac100be
 +	if (bat_ok) {
 +		a510f_cpu_raise();
 +	}
-+	a510f_gpu_probe();
++	a510f_gpu_probe(bat_ok);
 +
 +	if (t.mode < 2) {
 +		printf("A510F TOUCH: probe only (a510ftouch=1), done\n");
