@@ -1065,7 +1065,7 @@ index 0000000..3085a78
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..a70c859 100644
+index 6f8dba3..901da94 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
 @@ -33,6 +33,7 @@
@@ -1076,7 +1076,7 @@ index 6f8dba3..a70c859 100644
  #include <machine/machine_routines.h>
  #include <pexpert/pexpert.h>
  #include <libkern/libkern.h>
-@@ -316,6 +317,295 @@ mmc_rdata(uint32_t op, uint32_t arg, uint32_t blksz, uint32_t nblk, uint8_t *dst
+@@ -316,6 +317,301 @@ mmc_rdata(uint32_t op, uint32_t arg, uint32_t blksz, uint32_t nblk, uint8_t *dst
  	return got == total ? 0 : EIO;
  }
  
@@ -1171,7 +1171,13 @@ index 6f8dba3..a70c859 100644
 +			return E2BIG;
 +		}
 +		vm_offset_t va = (vm_offset_t)dst + off;
-+		uint32_t len = MIN((uint32_t)(PAGE_SIZE - (va & PAGE_MASK)), total - off);
++		/*
++		 * 4 KiB pieces (Samsung's DW_MMC_MAX_TRANSFER_SIZE), not PAGE_SIZE:
++		 * with more than 1 GB of RAM the kernel uses 16 KB VM pages, and a
++		 * 16 KB length does not fit des2's 13-bit size (0x4000 & 0x1fff = 0:
++		 * IDMAC stalled in DMA_WR, idsts 0xe000). 124 KiB = at most 32.
++		 */
++		uint32_t len = MIN((uint32_t)(4096u - (va & 4095u)), total - off);
 +		uint64_t pa = ml_vtophys(va);
 +		if (pa == 0) {
 +			return EFAULT;
@@ -1372,7 +1378,7 @@ index 6f8dba3..a70c859 100644
  /* Read nblk 512-byte sectors at lba (card address) into dst. */
  static int
  mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
-@@ -326,8 +616,44 @@ mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
+@@ -326,8 +622,44 @@ mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
  	if (nblk > MAX_XFER_BLOCKS || lba + nblk > UINT32_MAX) {
  		return EINVAL;
  	}
@@ -1419,7 +1425,7 @@ index 6f8dba3..a70c859 100644
  }
  
  /* Copy up to want bytes from src into the FIFO's free entries. */
-@@ -965,6 +1291,9 @@ sweet_mmc_init(void)
+@@ -965,6 +1297,9 @@ sweet_mmc_init(void)
  	if (!error) {
  		error = mmc_gpt(want);
  	}
@@ -1429,7 +1435,7 @@ index 6f8dba3..a70c859 100644
  	lck_mtx_unlock(&sweet_mmc_lock);
  	if (error) {
  		return error;
-@@ -986,9 +1315,185 @@ sweet_mmc_init(void)
+@@ -986,9 +1321,185 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");

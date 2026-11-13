@@ -894,6 +894,15 @@ returns a sane ID and a 3.3 V-selected L33CTRL.
     (page_shift 14), and when set it bypasses the formula: 1750000 =
     28.7 GB, exactly the same panic (proved by disassembling
     vm_compressor_set_size from the kernel's own symbol table). Removed.
+  - **> 1 GB of RAM switches xnu to 16 KB VM pages** (arm_init: "arm64
+    device with > 1GB of RAM: kernel uses 16KB pages", PAGE_SHIFT_CONST =
+    PAGE_MAX_SHIFT; <= 1 GB: hardware 4 KB). PAGE_RATIO 4 on 4K hardware:
+    write_pte_fast writes 4 leaf PTEs (0120: commpage text slot aligned),
+    and the eMMC IDMAC descriptors split at PAGE_SIZE got 16 KB lengths that
+    the 13-bit des2 size field turns into 0 (DMA self-test: rintsts 0x424
+    HTO, idsts 0xe000 = FSM DMA_WR stuck): split at 4 KiB like Samsung.
+    1708 MB boot (ram6) reached the lock screen on PIO; 87 extension check-in
+    timeouts; AegirPoster (Astronomy wallpaper, needs Metal) crashed 93x.
 - First boot logs (pulled in TWRP, twrp-write/pulled/b8p): no crash, no
   panic; SpringBoard up at +1 min; datamigrator ran 7 passes (exit 0) and
   recorded LastSystemVersion 20H392; Setup marked done by the root tweaks.

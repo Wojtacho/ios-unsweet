@@ -202,8 +202,6 @@ void shim_main(uint64_t dtb)
 	}
 	con_fb = (volatile uint32_t *)FB_BASE;	/* the copy already shows the lines above */
 	con_hex2("FBMOVE", "ok add0=", rd32(DECON_ADD0_W0), "upd=", rd32(DECON_UPDATE));
-	con_str("WAIT", "8 s for a photo");
-	delay_ms(8000);
 	con_skip();
 
 	stage = "loader";
