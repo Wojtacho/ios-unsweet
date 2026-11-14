@@ -1334,7 +1334,7 @@ index 0000000..7b39184
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..8a89ed4 100644
+index 6f8dba3..2561ec3 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
 @@ -33,6 +33,7 @@
@@ -1705,7 +1705,7 @@ index 6f8dba3..8a89ed4 100644
  	lck_mtx_unlock(&sweet_mmc_lock);
  	if (error) {
  		return error;
-@@ -986,9 +1322,669 @@ sweet_mmc_init(void)
+@@ -986,9 +1322,675 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
@@ -1898,7 +1898,8 @@ index 6f8dba3..8a89ed4 100644
 + *   sectors 128..    screenshot ring, AUTO_SLOT_SECT sectors a slot
 + * Screenshots are the buffer the panel shows, every 4th pixel (270x480
 + * RGB565): every sweetshot_s seconds (default 10) when the picture changed,
-+ * 0.7 s after the last touch or key, and on the script's "shot".
++ * 0.7 s after the last touch or key, and on the script's "shot" (only
++ * those while a script runs, so they stay in the ring).
 + * The script is ASCII: a first line "SWEETAUTO <id>", then a command a line:
 + *   wait MS | waitlog MS TEXT | tap X Y | hold X Y MS | swipe X1 Y1 X2 Y2 MS
 + *   key power|volup|voldown|home press|down|up|long | shot [TAG] | log TEXT
@@ -1936,6 +1937,7 @@ index 6f8dba3..8a89ed4 100644
 +	volatile int req;               /* 1: script wants a shot */
 +	char req_tag[32];
 +	volatile bool stop;             /* rebooting: no more writes */
++	volatile bool scripted;         /* a script runs: its own shots only */
 +} au;
 +
 +void
@@ -2093,6 +2095,8 @@ index 6f8dba3..8a89ed4 100644
 +		if (au.req) {
 +			auto_shot(au.req_tag, true);
 +			au.req = 0;
++		} else if (au.scripted) {
++			input_done = in;
 +		} else if (in != input_done && now - in > settle) {
 +			input_done = in;
 +			auto_shot("input", false);
@@ -2282,6 +2286,7 @@ index 6f8dba3..8a89ed4 100644
 +{
 +	char *text = (char *)arg;
 +	const char *p = text;
++	au.scripted = true;
 +	while (*p && *p != '\n') {
 +		p++;
 +	}
@@ -2302,6 +2307,7 @@ index 6f8dba3..8a89ed4 100644
 +		}
 +		auto_run_line(line);
 +	}
++	au.scripted = false;
 +	printf("SWEET AUTO: script done\n");
 +}
 +
