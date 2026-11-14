@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 0f8e61a..51fcf66 100644
+index 0f8e61a..ea2aee7 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -82,6 +82,23 @@ enum {
@@ -217,16 +217,16 @@ index 0f8e61a..51fcf66 100644
 +	 */
 +	bool flush = fb->fDirty && !fb->fPresentBusy && fb->fPresentTimer != NULL &&
 +	    now - fb->fLastPresent >= fb->fMinGap;
++	if (flush) {
++		fb->fLastPresent = now;
++		fb->fPresentBusy = true;
++	}
++	IOLockUnlock(fb->fLock);
  	if (flush) {
 -		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
 -		if (rec != NULL) {
 -			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
 -			fb->fDirty = false;
-+		fb->fLastPresent = now;
-+		fb->fPresentBusy = true;
-+	}
-+	IOLockUnlock(fb->fLock);
-+	if (flush) {
 +		fb->fPresentTimer->setTimeoutUS(1);
 +	}
 +	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
@@ -277,7 +277,16 @@ index 0f8e61a..51fcf66 100644
  }
  
  void
-@@ -412,19 +612,95 @@ static uint64_t sweet_fb_swap_count;
+@@ -347,6 +547,8 @@ get32(const uint8_t *p, uint32_t off)
+ }
+ 
+ static uint32_t sweet_fb_swaps_logged;
++static uint64_t sweet_fb_sig[64];       /* layer geometries seen (A510F) */
++static uint32_t sweet_fb_sig_n;
+ 
+ /*
+  * A510F: layer pixel formats. Every 4-byte format used to be copied as if it
+@@ -412,19 +614,95 @@ static uint64_t sweet_fb_swap_count;
  void
  AppleCLCD::swap(const uint8_t *rec)
  {
@@ -374,7 +383,27 @@ index 0f8e61a..51fcf66 100644
  
  
  	if (!fConsolePaused) {
-@@ -460,7 +736,16 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -449,7 +727,18 @@ AppleCLCD::present(const uint8_t *rec)
+ 			continue;
+ 		}
+ 		SweetSurface *s = sweet_surface_copy(id);
+-		if (sweet_fb_swaps_logged < 16) {
++		uint64_t sig = ((uint64_t)layer << 60) ^ ((uint64_t)(s ? s->width : 0) << 44) ^
++		    ((uint64_t)(s ? s->height : 0) << 30) ^ ((uint64_t)get32(a, 8) << 17) ^ get32(a, 12) ^
++		    ((uint64_t)(uint32_t)dx << 50) ^ ((uint64_t)(uint32_t)dy << 36) ^ ((uint64_t)(uint32_t)w << 22) ^
++		    ((uint64_t)(uint32_t)h << 8) ^ ((uint64_t)(uint32_t)sx << 40) ^ ((uint64_t)(uint32_t)sy << 26);
++		bool newsig = true;
++		for (uint32_t k = 0; k < sweet_fb_sig_n && newsig; k++) {
++			newsig = sweet_fb_sig[k] != sig;
++		}
++		if (newsig && sweet_fb_sig_n < 64) {
++			sweet_fb_sig[sweet_fb_sig_n++] = sig;
++		}
++		if (sweet_fb_swaps_logged < 16 || (newsig && sweet_fb_sig_n < 64)) {
+ 			sweet_fb_swaps_logged++;
+ 			IOLog("SWEET FB: swap %u layer %u surface %u %ux%u fmt 0x%x bpr %u a %d,%d %ux%u b %d,%d %dx%d\n",
+ 			    get32(rec, 0x50), layer, id, s ? s->width : 0, s ? s->height : 0,
+@@ -460,7 +749,16 @@ AppleCLCD::present(const uint8_t *rec)
  			OSSafeReleaseNULL(s);
  			continue;
  		}
@@ -392,7 +421,7 @@ index 0f8e61a..51fcf66 100644
  		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
  		sweet_fb_note_format(s->pixelFormat, bpe, s->width, s->height);
  		if (w <= 0 || h <= 0) {
-@@ -473,8 +758,17 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -473,8 +771,17 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -410,7 +439,7 @@ index 0f8e61a..51fcf66 100644
  			s->release();
  			continue;
  		}
-@@ -511,13 +805,41 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -511,13 +818,41 @@ AppleCLCD::present(const uint8_t *rec)
  		}
  		if (src != 0 && bpe == 4) {
  			for (int32_t y = 0; y < h; y++) {
@@ -453,7 +482,7 @@ index 0f8e61a..51fcf66 100644
  }
  
  /*
-@@ -547,7 +869,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -547,7 +882,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	if (!fFitCleared) {
  		/* Black pillarbox (the console text was there). */
  		for (uint32_t y = 0; y < fHeight; y++) {
@@ -462,7 +491,7 @@ index 0f8e61a..51fcf66 100644
  		}
  		fFitCleared = true;
  	}
-@@ -576,13 +898,32 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -576,13 +911,32 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  			continue;
  		}
  		const uint32_t *row = (const uint32_t *)(base + (uint64_t)(sy + ly) * s->bytesPerRow) + sx;
@@ -497,7 +526,7 @@ index 0f8e61a..51fcf66 100644
  	}
  }
  
-@@ -737,7 +1078,15 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -737,7 +1091,15 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			if (off != fFB->fPowerOff) {
  				fFB->fPowerOff = off;
  				fFB->fFadeStep = 0;
