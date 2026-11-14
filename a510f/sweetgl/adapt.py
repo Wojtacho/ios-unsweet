@@ -295,6 +295,45 @@ draw_prep(GLenum mode, GLsizei count)
 	}
 	glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
 	ring_note(prog, mode, count);'''),
+    # QuartzCore addresses: sailfish's are for the iPhone 8 (iPhone10,1)
+    # shared cache. In the iPhone 8 Plus cache of the same build (20H392)
+    # QuartzCore's code and data sit 0x4000 higher (all 12 hook prologues,
+    # the switch cases and tex_fragment_shaders verified against the phone's
+    # cache). Detect the shift from emit_filter's prologue and add it to the
+    # slide, so the texture-function fixes (App Library plates, vibrancy)
+    # install instead of being skipped as "unexpected QuartzCore".
+    ('''extern const void *_dyld_get_shared_cache_range(size_t *length);''',
+     '''extern const void *_dyld_get_shared_cache_range(size_t *length);
+
+/* A510F: QuartzCore's offset from sailfish's iPhone 8 cache (adapt.py) */
+static uint64_t
+sgl_qc_delta(const void *cache)
+{
+	static const uint32_t want[4] = {0xd103c3ff, 0x6d072beb, 0x6d0823e9, 0xa9096ffc};      /* emit_filter */
+	static const uint64_t deltas[] = {0, 0x4000};
+	static int64_t found = -1;
+	if (found >= 0) {
+		return (uint64_t)found;
+	}
+	uint64_t slide = (uint64_t)(uintptr_t)cache - 0x180000000ull;
+	for (size_t i = 0; i < sizeof(deltas) / sizeof(deltas[0]); i++) {
+		const uint32_t *t = (const uint32_t *)(uintptr_t)(0x188424e54ull + slide + deltas[i]);
+		if (memcmp(t, want, sizeof(want)) == 0) {
+			found = (int64_t)deltas[i];
+			sweet_drm_log("sweetgl: QuartzCore at sailfish's addresses + %#llx", (unsigned long long)found);
+			return (uint64_t)found;
+		}
+	}
+	sweet_drm_log("sweetgl: QuartzCore not at a known offset: sailfish's own checks decide");
+	found = 0;              /* their prologue/table checks then refuse to patch */
+	return 0;
+}'''),
+    ('''	sgl_cache_slide = (uint64_t)(uintptr_t)cache - 0x180000000ull;''',
+     '''	sgl_cache_slide = (uint64_t)(uintptr_t)cache - 0x180000000ull + sgl_qc_delta(cache);'''),
+    ('''	uint64_t slide = (uint64_t)(uintptr_t)cache - 0x180000000ull;
+	const char **table = (const char **)(uintptr_t)(0x1d5b44a10ull + slide);''',
+     '''	uint64_t slide = (uint64_t)(uintptr_t)cache - 0x180000000ull + sgl_qc_delta(cache);
+	const char **table = (const char **)(uintptr_t)(0x1d5b44a10ull + slide);'''),
     ("""			.type = WINSYS_HANDLE_TYPE_KMS,
 			.handle = handle,""",
      """			/* panfrost imports by prime fd only (sweet_drm_pan.c) */

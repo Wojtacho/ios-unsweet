@@ -1137,3 +1137,17 @@ whether the fragment shader reads the framebuffer); a failed submit marks
 it, the next draw logs it plus the fragment sources of fb-reading
 programs ("sweetgl: failed job: draws ...", "sweetgl: prog N fragment
 shader ..."), at most 6 dumps.
+
+App Library background / category plates / vibrancy: sailfish's eagl.c
+fixes CA's GL renderer by writing QuartzCore's tex_fragment_shaders table
+(0x1d5b44a10, index 0x2d render_vibrant_color_matrix etc.) and switch
+cases (0x18855a1e4), and hooks 12 functions, at hard-coded iPhone 8
+(iPhone10,1) cache addresses, each checked first. Pulled the phone's
+dyld_shared_cache_arm64.03 and .27.dylddata (ref/dsc): none matched; all
+12 prologues, the cases byte and the table (found via the
+"colorMatrix4x4Bias(s0)" pointer, 36-bit target in the low bits) are at
+sailfish + 0x4000 in the iPhone 8 Plus cache. So the fixes never
+installed here, and their "unexpected QuartzCore" log was dropped (logged
+before SweetMali was opened). sweetgl: sgl_qc_delta() detects 0 / 0x4000
+from emit_filter's prologue and adds it to both slides; sweet_drm_log opens
+SweetMali itself when needed. The draw-ring boot had no GPU job failures.

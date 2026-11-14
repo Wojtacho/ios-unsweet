@@ -126,6 +126,8 @@ win_account(uint32_t req, uint64_t job_us, uint64_t call_ns)
 	win_job_us = win_call_ns = win_max_us = 0;
 }
 
+static void connect_dev(void);
+
 void
 sweet_drm_log(const char *fmt, ...)
 {
@@ -141,6 +143,15 @@ sweet_drm_log(const char *fmt, ...)
 		n = sizeof(line) - 1;
 	}
 	io_connect_t c = conn;
+	if (!c) {
+		/* early messages (library constructor): open SweetMali now */
+		pthread_mutex_lock(&lock);
+		if (!conn) {
+			connect_dev();
+		}
+		pthread_mutex_unlock(&lock);
+		c = conn;
+	}
 	if (c) {
 		(void)IOConnectCallStructMethod(c, SEL_LOG, line, (size_t)n + 1, NULL, NULL);
 	}
