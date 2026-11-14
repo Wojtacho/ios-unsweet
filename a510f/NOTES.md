@@ -1066,3 +1066,11 @@ source read is uncached; with present-on-swap CA blocked on it -> CA 3
 flushes/s (GPU finish ~50 us). The old 10 Hz copy cost the same, but in the
 background. 0125 now reads each layer through memory->map(kIOMapDefaultCache)
 (cached; dc civac first), released after the copy.
+Build 44 (8f25dff, cached source mapping): still ~340 ms per present (first
+present 339608 us), user: even laggier. So uncached reads were not the main
+cost. Also: the copy ran inside vsyncFired (CA's 60 Hz pacing) and, in 43/44,
+inside CA's SwapEnd: both stall CA for the whole copy. 0125 now: swaps only
+record the frame; the vsync timer hands it to a separate present workloop
+(presentFired) when idle and due, so vsync keeps ticking; per-step timing
+"SWEET FB: per present: map, cache inval, scale, flip wait" after 20 and
+every 100 presents.

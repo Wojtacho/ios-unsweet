@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 0f8e61a..732fae4 100644
+index 0f8e61a..7443be4 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -82,6 +82,17 @@ enum {
@@ -20,7 +20,7 @@ index 0f8e61a..732fae4 100644
  
  class IOMobileFramebuffer : public IOService {
  	OSDeclareDefaultStructors(IOMobileFramebuffer);
-@@ -125,6 +136,30 @@ public:
+@@ -125,6 +136,35 @@ public:
  	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
  	bool          fPowerOff;      /* RequestPowerChange(0) */
  	uint32_t      fFadeStep;      /* fade-out steps done while off */
@@ -44,6 +44,11 @@ index 0f8e61a..732fae4 100644
 +	uint64_t      fMinGap;        /* abs time between presents (sweetfb_hz) */
 +	uint64_t      fLastPresent;
 +	uint64_t      fPresents, fPresentAbs, fPresentMaxAbs, fFlipWaits;
++	uint64_t      fTMap, fTInval, fTScale, fTWait, fTSteps;  /* abs time per step */
++	IOWorkLoop         *fPresentLoop;
++	IOTimerEventSource *fPresentTimer;
++	bool                fPresentBusy;
++	static void presentFired(OSObject *owner, IOTimerEventSource *sender);
 +
 +	uintptr_t frontVA() const { return fFlip ? fBufVA[fShown] : fPixels; }
 +	void flipTo(uint32_t idx);
@@ -51,7 +56,7 @@ index 0f8e61a..732fae4 100644
  
  	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
  	void addClient(IOMobileFramebufferUserClient *client);
-@@ -244,6 +279,32 @@ AppleCLCD::start(IOService *provider)
+@@ -244,6 +284,39 @@ AppleCLCD::start(IOService *provider)
  	uint32_t hz = 10;
  	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
  	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
@@ -81,10 +86,17 @@ index 0f8e61a..732fae4 100644
 +		    fFlip ? "on" : "OFF", fDecon ? *(volatile uint32_t *)(fDecon + A510F_DECON_ADD0) : 0,
 +		    (unsigned long long)A510F_FB_B, hz);
 +	}
++	fPresentLoop = IOWorkLoop::workLoop();
++	fPresentTimer = IOTimerEventSource::timerEventSource(this, &AppleCLCD::presentFired);
++	if (fPresentLoop == NULL || fPresentTimer == NULL ||
++	    fPresentLoop->addEventSource(fPresentTimer) != kIOReturnSuccess) {
++		IOLog("SWEET FB: no present workloop\n");
++		OSSafeReleaseNULL(fPresentTimer);
++	}
  	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
  
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
-@@ -293,7 +354,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -293,7 +366,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		IOLockUnlock(fb->fLock);
  		if (step <= 6) {
  			for (uint32_t y = 0; y < fb->fHeight; y++) {
@@ -93,20 +105,59 @@ index 0f8e61a..732fae4 100644
  				for (uint32_t x = 0; x < fb->fWidth; x++) {
  					row[x] = step < 6 ? (row[x] >> 1) & 0x7f7f7f7f : 0;
  				}
-@@ -302,9 +363,11 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -302,21 +375,43 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
  		return;
  	}
 -	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
-+	/* frames a swap left pending (too soon after the last present) */
-+	bool flush = fb->fDirty && now - fb->fLastPresent >= fb->fMinGap;
- 	uint8_t *rec = NULL;
+-	uint8_t *rec = NULL;
++	/*
++	 * A510F: the panel copy runs on its own workloop (presentFired). Run
++	 * here it stopped these vsync notifications, which pace CoreAnimation,
++	 * for the whole copy.
++	 */
++	bool flush = fb->fDirty && !fb->fPresentBusy && fb->fPresentTimer != NULL &&
++	    now - fb->fLastPresent >= fb->fMinGap;
  	if (flush) {
+-		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+-		if (rec != NULL) {
+-			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
+-			fb->fDirty = false;
+-		}
 +		fb->fLastPresent = now;
- 		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
- 		if (rec != NULL) {
- 			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
-@@ -412,19 +475,81 @@ static uint64_t sweet_fb_swap_count;
++		fb->fPresentBusy = true;
++	}
++	IOLockUnlock(fb->fLock);
++	if (flush) {
++		fb->fPresentTimer->setTimeoutUS(1);
++	}
++	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
++}
++
++void
++AppleCLCD::presentFired(OSObject *owner, IOTimerEventSource *sender)
++{
++	(void)sender;
++	AppleCLCD *fb = (AppleCLCD *)owner;
++	uint8_t *rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
++	IOLockLock(fb->fLock);
++	if (rec != NULL) {
++		memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
++		fb->fDirty = false;
+ 	}
+ 	IOLockUnlock(fb->fLock);
+ 	if (rec != NULL) {
+ 		fb->present(rec);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+ 	}
+-	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
++	IOLockLock(fb->fLock);
++	fb->fPresentBusy = false;
++	IOLockUnlock(fb->fLock);
+ }
+ 
+ void
+@@ -412,8 +507,19 @@ static uint64_t sweet_fb_swap_count;
  void
  AppleCLCD::swap(const uint8_t *rec)
  {
@@ -118,18 +169,15 @@ index 0f8e61a..732fae4 100644
 +	uint64_t now = mach_absolute_time();
  	IOLockLock(fLock);
  	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
--	fDirty = true;
-+	bool due = !fPowerOff && now - fLastPresent >= fMinGap;
-+	fDirty = !due;
-+	if (due) {
-+		fLastPresent = now;
-+	}
++	(void)now;
++	/*
++	 * Build 44: presenting here made CoreAnimation wait ~340 ms per frame
++	 * (worse than the old background copy): the vsync timer presents it.
++	 */
+ 	fDirty = true;
  	IOLockUnlock(fLock);
-+	if (due) {
-+		present(rec);
-+	}
  	if ((++sweet_fb_swap_count % 1000) == 0) {
- 		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
+@@ -421,10 +527,61 @@ AppleCLCD::swap(const uint8_t *rec)
  	}
  }
  
@@ -180,16 +228,18 @@ index 0f8e61a..732fae4 100644
 +	uint64_t t0 = mach_absolute_time();
 +
 +	IOLockLock(fPresentLock);
++	uint64_t tw = mach_absolute_time();
 +	if (fFlip && !waitFlipped()) {
 +		/* DECON did not take the last address: draw over the shown buffer */
 +		fDraw = fBufVA[fShown];
 +	} else {
 +		fDraw = fFlip ? fBufVA[fShown ^ 1] : fPixels;
 +	}
++	fTWait += mach_absolute_time() - tw;
  
  
  	if (!fConsolePaused) {
-@@ -460,7 +585,14 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -460,7 +617,16 @@ AppleCLCD::present(const uint8_t *rec)
  			OSSafeReleaseNULL(s);
  			continue;
  		}
@@ -200,26 +250,32 @@ index 0f8e61a..732fae4 100644
 +		 * through a cached mapping instead; the dc civac below drops stale
 +		 * lines first.
 +		 */
++		uint64_t t1 = mach_absolute_time();
 +		IOMemoryMap *rmap = s->memory != NULL ? s->memory->map(kIOMapDefaultCache) : NULL;
++		fTMap += mach_absolute_time() - t1;
 +		uintptr_t src = rmap != NULL ? (uintptr_t)rmap->getVirtualAddress() : s->kernelAddress();
  		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
  		sweet_fb_note_format(s->pixelFormat, bpe, s->width, s->height);
  		if (w <= 0 || h <= 0) {
-@@ -473,8 +605,13 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -473,8 +639,17 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
 +		/* GPU-rendered (Mali, not coherent): drop stale cached lines first */
++		uint64_t t2 = mach_absolute_time();
 +		if (src != 0 && s->memory != NULL && s->offset < s->memory->getLength()) {
 +			sweet_fb_dc_civac(src + s->offset, s->memory->getLength() - s->offset);
 +		}
++		uint64_t t3 = mach_absolute_time();
++		fTInval += t3 - t2;
  		if (fFit) {
  			presentFit(s, src, bpe, sx, sy, dx, dy, w, h);
++			fTScale += mach_absolute_time() - t3;
 +			OSSafeReleaseNULL(rmap);
  			s->release();
  			continue;
  		}
-@@ -511,13 +648,32 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -511,13 +686,41 @@ AppleCLCD::present(const uint8_t *rec)
  		}
  		if (src != 0 && bpe == 4) {
  			for (int32_t y = 0; y < h; y++) {
@@ -241,6 +297,15 @@ index 0f8e61a..732fae4 100644
 +	if (dt > fPresentMaxAbs) {
 +		fPresentMaxAbs = dt;
 +	}
++	if (++fTSteps == 20 || fTSteps % 100 == 0) {
++		uint64_t m = 0, i = 0, c = 0, wt = 0;
++		absolutetime_to_nanoseconds(fTMap / fTSteps, &m);
++		absolutetime_to_nanoseconds(fTInval / fTSteps, &i);
++		absolutetime_to_nanoseconds(fTScale / fTSteps, &c);
++		absolutetime_to_nanoseconds(fTWait / fTSteps, &wt);
++		IOLog("SWEET FB: per present: map %llu us, cache inval %llu us, scale %llu us, flip wait %llu us\n",
++		    m / 1000, i / 1000, c / 1000, wt / 1000);
++	}
 +	if (fPresents == 1 || fPresents % 300 == 0) {
 +		uint64_t avg = 0, max = 0;
 +		absolutetime_to_nanoseconds(fPresentAbs / fPresents, &avg);
@@ -253,7 +318,7 @@ index 0f8e61a..732fae4 100644
  }
  
  /*
-@@ -547,7 +703,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -547,7 +750,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	if (!fFitCleared) {
  		/* Black pillarbox (the console text was there). */
  		for (uint32_t y = 0; y < fHeight; y++) {
@@ -262,7 +327,7 @@ index 0f8e61a..732fae4 100644
  		}
  		fFitCleared = true;
  	}
-@@ -576,7 +732,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -576,7 +779,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  			continue;
  		}
  		const uint32_t *row = (const uint32_t *)(base + (uint64_t)(sy + ly) * s->bytesPerRow) + sx;
