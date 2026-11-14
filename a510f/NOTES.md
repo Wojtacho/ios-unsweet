@@ -1203,3 +1203,20 @@ per-process limits tuned for a 3 GB iPhone 8 Plus or for backboardd+Mesa).
 Kills show as "CRASH name sig 9" (memorystatus logs via os_log only).
 Speech AU extensions (KonaSynthesizer, MacinTalkAUSP, SiriTTSSynthesizerAU)
 are .appex, not launchd jobs: separate fix.
+
+Jetsam boot (kernel 52, e2bf3a1+fb77781): "A510F JETSAM: on, per-process
+memory limits off". Normal use: eMMC reads ~1.3 GB in 4 min (was 500 MB per
+15 s). Wallpaper editor: jetsam killed CollectionsPoster 18x, AegirPoster
+10x, relaunched each time -> thrashing again from 352 s (12.4 GB by 596 s).
+User photos: doubled lock-screen clock and date (different sizes), App
+Library header black, half-finished transitions, "Press home to open" on
+the home screen, garbage at the left edge of the widget page: consistent
+with poster extensions being killed mid-render (iOS shows the poster
+snapshot, with its clock, plus the live clock). Swaps are always one
+full-screen layer (surfaces 2/4).
+More RAM: live DT /proc/device-tree/reserved-memory: video_ext 0xaec00000
++20 MB reusable, mfc_fw 0xb8000000 +2 MB, mfc_nfw 0xb8200000 +1.1 MB, video
+0xb8400000 +88 MB reusable, common 0xbdc00000 +6 MB, fimc_is_fd 0xbe200000
++1 MB, secdma dynamic; System RAM 0x40000000-0xbe7fffff. 0xb0000000-
+0xb8000000 is not reserved. mkadt: PHYS_END 0xaec00000 -> 0xb8000000
+(1708 -> 1856 MB).

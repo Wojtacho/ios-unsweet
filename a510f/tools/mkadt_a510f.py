@@ -22,7 +22,12 @@ import mkadt   # noqa: E402
 # 1708 MB; it was 0x70000000.. (1004 MB) while S-Boot's framebuffer at
 # 0x67000000 was still in use. The DTB at 0x48000000 is only read before.
 PHYS_BASE = 0x44000000
-PHYS_END = 0xaec00000
+# 0xaec00000..0xb8000000 too (2026-11-14, live DT from TWRP): video_ext
+# (0xaec00000, 20 MB) is "reusable" (Linux uses it as normal memory when no
+# secure video plays) and 0xb0000000..0xb8000000 is not reserved at all. The
+# next reservation is mfc_fw at 0xb8000000 (then mfc_nfw, video 88 MB
+# reusable at 0xb8400000, common 0xbdc00000, fimc_is_fd 0xbe200000).
+PHYS_END = 0xb8000000
 
 mkadt.PHYS_BASE = PHYS_BASE
 mkadt.MEM_SIZE = PHYS_END - PHYS_BASE
