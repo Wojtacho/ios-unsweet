@@ -18,7 +18,7 @@ def ann(title, body):
     print('::error title=%s::%s' % (title, body))
 for i in range(0, min(len(errs), 60), 12):
     ann('%s errors %d' % (name, i // 12 + 1), '\n'.join(errs[i:i + 12]))
-ann('%s tail' % name, '\n'.join(lines[-45:]))
+ann('%s tail' % name, '\n'.join(l[:300] for l in lines[-25:]))
 PY
 fi
 exit $rc
