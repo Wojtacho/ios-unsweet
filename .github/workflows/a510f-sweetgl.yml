@@ -50,18 +50,22 @@ jobs:
           mkdir sailfish && cd sailfish
           git init -q && git remote add origin https://github.com/joranv1/ios-sailfish.git
           git fetch -q --depth 1 origin "$SAILFISH_SHA" && git checkout -q FETCH_HEAD
+          cd ..
+          # host tools and the iOS build both see the patched tree (the
+          # host links the same DRM emulation, so its hooks resolve)
+          python3 -I a510f/sweetgl/mesa-fixup.py mesa
 
       - name: Cached host tools
         id: hostcache
         uses: actions/cache/restore@v4
         with:
           path: hostinst
-          key: mesa-host-${{ env.MESA_TAG }}-llvm-${{ env.LLVM_VERSION }}-v1
+          key: mesa-host-${{ env.MESA_TAG }}-llvm-${{ env.LLVM_VERSION }}-v2
 
       - name: Mesa host tools (mesa_clc, vtn_bindgen2, panfrost_compile)
         if: steps.hostcache.outputs.cache-hit != 'true'
         run: |
-          # before mesa-fixup.py: the host build is plain Mesa. Its tools link
+          # The host tools link
           # Mesa's kmod code, which calls libdrm: our emulation stands in
           # (never called at build time; real definitions keep meson's
           # function checks honest, unlike -undefined dynamic_lookup)
@@ -95,13 +99,12 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: hostinst
-          key: mesa-host-${{ env.MESA_TAG }}-llvm-${{ env.LLVM_VERSION }}-v1
+          key: mesa-host-${{ env.MESA_TAG }}-llvm-${{ env.LLVM_VERSION }}-v2
 
       - name: Mesa for iOS + sweetgl.dylib
         run: |
           export PATH="$PWD/hostinst/bin:$PATH"
           which mesa_clc vtn_bindgen2 panfrost_compile
-          python3 -I a510f/sweetgl/mesa-fixup.py mesa
           sh a510f/sweetgl/ci-run.sh ios-build sh a510f/sweetgl/build.sh mesa sailfish/tools/sweetgl out
 
       - name: Check the library

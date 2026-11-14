@@ -66,6 +66,17 @@ edit('src/panfrost/lib/kmod/pan_kmod.c', [
 #endif"""),
 ])
 
+# perf-counter thread (never started here): no sched_setscheduler on Darwin
+edit('src/panfrost/lib/kmod/panfrost_kmod.c', [
+    ('''   int ret = sched_setscheduler(0, SCHED_FIFO, &rt_params);''',
+     '''#ifdef __APPLE__
+   (void)rt_params;
+   int ret = -1;
+#else
+   int ret = sched_setscheduler(0, SCHED_FIFO, &rt_params);
+#endif'''),
+])
+
 # tiler heap: SweetMali bos are wired memory; 128 MiB of a 1.7 GB phone is
 # too much for the small scenes CoreAnimation draws
 edit('src/gallium/drivers/panfrost/pan_device.c', [
