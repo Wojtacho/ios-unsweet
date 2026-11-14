@@ -83,8 +83,11 @@ jobs:
             -Dgallium-rusticl=false -Dhtml-docs=disabled -Ddisplay-info=disabled -Dteflon=false \
             -Dc_args="-I$PWD/a510f/sweetgl/include" -Dcpp_args="-I$PWD/a510f/sweetgl/include" \
             -Dc_link_args="$HOSTLINK" -Dcpp_link_args="$HOSTLINK"
-          sh a510f/sweetgl/ci-run.sh host-build ninja -C mesa-host
-          sh a510f/sweetgl/ci-run.sh host-install ninja -C mesa-host install
+          # only the three tools (panfrost's own debug tools are Linux-only)
+          T="src/compiler/clc/mesa_clc src/compiler/spirv/vtn_bindgen2 src/panfrost/clc/panfrost_compile"
+          sh a510f/sweetgl/ci-run.sh host-build ninja -C mesa-host $T
+          mkdir -p hostinst/bin
+          for t in $T; do cp "mesa-host/$t" hostinst/bin/; done
           ls -la hostinst/bin
 
       - name: Save host tools
