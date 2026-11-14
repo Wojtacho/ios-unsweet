@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..aac61de
+index 0000000..7b39184
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,1313 @@
+@@ -0,0 +1,1317 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -52,6 +52,7 @@ index 0000000..aac61de
 +extern void delay(int usec);
 +extern void sweet_hid_touch(int finger, int down, int x, int y);
 +extern void sweet_hid_key(int key, int down);
++extern void sweet_input_note(void);        /* sweet_mmc.c autopilot: screenshot after input */
 +void a510f_touch_start(void);
 +
 +/* ---- addresses ------------------------------------------------------------ */
@@ -619,9 +620,11 @@ index 0000000..aac61de
 +				y = 1919;
 +			}
 +			sweet_hid_touch(f, 1, x, y + t.yadj);
++			sweet_input_note();
 +			t.down[f] = true;
 +		} else if (t.down[f]) {
 +			sweet_hid_touch(f, 0, x, y + t.yadj);
++			sweet_input_note();
 +			t.down[f] = false;
 +		}
 +	}
@@ -670,6 +673,7 @@ index 0000000..aac61de
 +			key_down[i] = now;
 +			printf("A510F KEYS: %s %s\n", a510f_keys[i].name, now ? "down" : "up");
 +			sweet_hid_key(a510f_keys[i].key, now);
++			sweet_input_note();
 +		}
 +		key_pending[i] = now;
 +	}
@@ -1330,7 +1334,7 @@ index 0000000..aac61de
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..901da94 100644
+index 6f8dba3..8a89ed4 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
 @@ -33,6 +33,7 @@
@@ -1341,7 +1345,7 @@ index 6f8dba3..901da94 100644
  #include <machine/machine_routines.h>
  #include <pexpert/pexpert.h>
  #include <libkern/libkern.h>
-@@ -316,6 +317,301 @@ mmc_rdata(uint32_t op, uint32_t arg, uint32_t blksz, uint32_t nblk, uint8_t *dst
+@@ -316,6 +317,302 @@ mmc_rdata(uint32_t op, uint32_t arg, uint32_t blksz, uint32_t nblk, uint8_t *dst
  	return got == total ? 0 : EIO;
  }
  
@@ -1381,6 +1385,7 @@ index 6f8dba3..901da94 100644
 +extern vm_offset_t ml_vtophys(vm_offset_t va);
 +static uint8_t *mmc_alloc(size_t size);
 +static void mmc_log_start(void);
++static void sweet_auto_start(void);
 +
 +static struct {
 +	bool on;                                /* passed the self-test */
@@ -1643,7 +1648,7 @@ index 6f8dba3..901da94 100644
  /* Read nblk 512-byte sectors at lba (card address) into dst. */
  static int
  mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
-@@ -326,8 +622,44 @@ mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
+@@ -326,8 +623,44 @@ mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
  	if (nblk > MAX_XFER_BLOCKS || lba + nblk > UINT32_MAX) {
  		return EINVAL;
  	}
@@ -1690,7 +1695,7 @@ index 6f8dba3..901da94 100644
  }
  
  /* Copy up to want bytes from src into the FIFO's free entries. */
-@@ -965,6 +1297,9 @@ sweet_mmc_init(void)
+@@ -965,6 +1298,9 @@ sweet_mmc_init(void)
  	if (!error) {
  		error = mmc_gpt(want);
  	}
@@ -1700,11 +1705,12 @@ index 6f8dba3..901da94 100644
  	lck_mtx_unlock(&sweet_mmc_lock);
  	if (error) {
  		return error;
-@@ -986,9 +1321,185 @@ sweet_mmc_init(void)
+@@ -986,9 +1322,669 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
 +	mmc_log_start();
++	sweet_auto_start();
 +	/* A510F touchscreen (boot-arg a510ftouch, bsd/dev/a510f_touch.c). */
 +	extern void a510f_touch_start(void);
 +	a510f_touch_start();
@@ -1881,6 +1887,489 @@ index 6f8dba3..901da94 100644
 +		return;
 +	}
 +	thread_deallocate(th);
++}
++
++/*
++ * A510F autopilot (boot-arg sweetauto, default 1): screenshots and scripted
++ * input, so the phone can be tested from the PC with nobody at it. It uses
++ * the OTA partition (8 MiB, Samsung's FOTA scratch area):
++ *   sectors 0..63    script, written from the PC (twrp-write/auto.py)
++ *   sector  64       state, written here
++ *   sectors 128..    screenshot ring, AUTO_SLOT_SECT sectors a slot
++ * Screenshots are the buffer the panel shows, every 4th pixel (270x480
++ * RGB565): every sweetshot_s seconds (default 10) when the picture changed,
++ * 0.7 s after the last touch or key, and on the script's "shot".
++ * The script is ASCII: a first line "SWEETAUTO <id>", then a command a line:
++ *   wait MS | waitlog MS TEXT | tap X Y | hold X Y MS | swipe X1 Y1 X2 Y2 MS
++ *   key power|volup|voldown|home press|down|up|long | shot [TAG] | log TEXT
++ *   recovery (reboot into TWRP) | end
++ * X/Y are panel pixels (1080x1920). A script runs once per id: the id is
++ * stored in the state before the first command, so a crash does not loop.
++ */
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++extern void sweet_hid_key(int key, int down);
++extern int sweet_fb_shot(uint16_t *out, uint32_t maxpix, uint32_t div, uint32_t *w, uint32_t *h, uint32_t *flags);
++void sweet_input_note(void);
++
++#define AUTO_SCRIPT_SECT        64u
++#define AUTO_STATE_LBA          64u
++#define AUTO_RING_LBA           128u
++#define AUTO_SLOT_SECT          512u                    /* 256 KiB */
++#define AUTO_SLOT_BYTES         (AUTO_SLOT_SECT * MMC_SECTOR)
++#define AUTO_PIX_MAX            ((AUTO_SLOT_BYTES - MMC_SECTOR) / 2)
++#define A510F_PMU_PA            0x10460000u             /* EXYNOS7580_PA_PMU */
++#define PMU_SWRESET             0x0400u
++#define PMU_INFORM2             0x0808u
++#define PMU_INFORM3             0x080Cu
++
++static struct {
++	uint64_t lba, nsect;            /* OTA */
++	uint32_t slots;
++	uint64_t seq;                   /* screenshots written, all boots */
++	uint32_t boot;                  /* boots seen by the autopilot */
++	uint32_t script_done;           /* id of the last script started */
++	uint8_t *slot;                  /* one slot: header sector + pixels */
++	uint8_t *state;
++	uint64_t last_hash;
++	volatile uint64_t input_at;     /* abs time of the last touch/key */
++	volatile int req;               /* 1: script wants a shot */
++	char req_tag[32];
++	volatile bool stop;             /* rebooting: no more writes */
++} au;
++
++void
++sweet_input_note(void)
++{
++	au.input_at = mach_absolute_time();
++}
++
++static uint64_t
++auto_ms(void)
++{
++	uint64_t ns;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / 1000000ull;
++}
++
++/* Find a GPT partition by name (the caller holds sweet_mmc_lock). */
++static int
++mmc_part_find(const char *want, uint64_t *first_out, uint64_t *nsect_out)
++{
++	uint8_t *b = mmc_alloc(MAX_XFER_BLOCKS * MMC_SECTOR);
++	int error = b ? mmc_read(1, 1, b) : ENOMEM;
++	if (!error && memcmp(b, "EFI PART", 8) != 0) {
++		error = ENXIO;
++	}
++	uint64_t entry_lba = 0;
++	uint32_t nent = 0, esz = 0;
++	if (!error) {
++		memcpy(&entry_lba, b + 72, 8);
++		memcpy(&nent, b + 80, 4);
++		memcpy(&esz, b + 84, 4);
++		if (esz != 128 || nent == 0 || nent > 128) {
++			error = ENXIO;
++		}
++	}
++	if (!error) {
++		error = mmc_read(entry_lba, (nent * esz + MMC_SECTOR - 1) / MMC_SECTOR, b);
++	}
++	if (!error) {
++		error = ENOENT;
++		for (uint32_t i = 0; i < nent; i++) {
++			const uint8_t *e = b + i * esz;
++			uint64_t first, last;
++			char name[37];
++			memcpy(&first, e + 32, 8);
++			memcpy(&last, e + 40, 8);
++			mmc_entry_name(e, name);
++			if (strcmp(name, want) == 0 && first != 0 && last >= first) {
++				*first_out = first;
++				*nsect_out = last - first + 1;
++				error = 0;
++				break;
++			}
++		}
++	}
++	if (b) {
++		kfree_data(b, MAX_XFER_BLOCKS * MMC_SECTOR);
++	}
++	return error;
++}
++
++/* Write inside OTA only; sectors relative to its start. */
++static int
++auto_write(uint64_t rel, uint32_t nsect, const uint8_t *src)
++{
++	int error = 0;
++	if (au.stop || rel + nsect > au.nsect) {
++		return EINVAL;
++	}
++	while (nsect > 0 && !error) {
++		uint32_t n = MIN(nsect, MAX_XFER_BLOCKS);
++		lck_mtx_lock(&sweet_mmc_lock);
++		error = mmc_write(au.lba + rel, n, src);
++		if (!error) {
++			error = mmc_flush();
++		}
++		lck_mtx_unlock(&sweet_mmc_lock);
++		rel += n;
++		src += (size_t)n * MMC_SECTOR;
++		nsect -= n;
++	}
++	return error;
++}
++
++static void
++auto_put_state(void)
++{
++	bzero(au.state, MMC_SECTOR);
++	memcpy(au.state, "SWEETAST", 8);
++	uint32_t version = 1, slot_sect = AUTO_SLOT_SECT, ring = AUTO_RING_LBA;
++	memcpy(au.state + 8, &version, 4);
++	memcpy(au.state + 12, &au.boot, 4);
++	memcpy(au.state + 16, &au.seq, 8);
++	memcpy(au.state + 24, &au.script_done, 4);
++	memcpy(au.state + 28, &au.slots, 4);
++	memcpy(au.state + 32, &slot_sect, 4);
++	memcpy(au.state + 36, &ring, 4);
++	(void)auto_write(AUTO_STATE_LBA, 1, au.state);
++}
++
++/* Take one screenshot; force: write it even if nothing changed. */
++static void
++auto_shot(const char *why, bool force)
++{
++	uint32_t w = 0, h = 0, flags = 0;
++	uint16_t *pix = (uint16_t *)(au.slot + MMC_SECTOR);
++	int error = sweet_fb_shot(pix, AUTO_PIX_MAX, 4, &w, &h, &flags);
++	if (error == 22) {
++		error = sweet_fb_shot(pix, AUTO_PIX_MAX, 5, &w, &h, &flags);
++	}
++	if (error) {
++		return;
++	}
++	uint64_t hash = 1469598103934665603ull;
++	for (uint32_t i = 0; i < w * h; i += 7) {
++		hash = (hash ^ pix[i]) * 1099511628211ull;
++	}
++	if (!force && hash == au.last_hash) {
++		return;
++	}
++	au.last_hash = hash;
++	uint64_t seq = ++au.seq, ms = auto_ms();
++	uint8_t *hd = au.slot;
++	bzero(hd, MMC_SECTOR);
++	memcpy(hd, "SWEETSHT", 8);
++	memcpy(hd + 8, &seq, 8);
++	memcpy(hd + 16, &ms, 8);
++	memcpy(hd + 24, &w, 4);
++	memcpy(hd + 28, &h, 4);
++	memcpy(hd + 32, &flags, 4);
++	memcpy(hd + 36, &au.boot, 4);
++	strlcpy((char *)hd + 64, why, 64);
++	uint32_t sect = (MMC_SECTOR + w * h * 2 + MMC_SECTOR - 1) / MMC_SECTOR;
++	uint64_t rel = AUTO_RING_LBA + (uint64_t)((seq - 1) % au.slots) * AUTO_SLOT_SECT;
++	error = auto_write(rel, sect, au.slot);
++	printf("SWEET AUTO: shot %llu (%s) %ux%u flags 0x%x -> %d\n", seq, why, w, h, flags, error);
++	if (!error) {
++		auto_put_state();
++	}
++}
++
++static void
++auto_shot_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	uint32_t every = 10;
++	PE_parse_boot_argn("sweetshot_s", &every, sizeof(every));
++	uint64_t last_periodic = 0, input_done = 0, settle;
++	nanoseconds_to_absolutetime(700ull * NSEC_PER_MSEC, &settle);
++	for (;;) {
++		IOSleep(100);
++		if (au.stop) {
++			return;
++		}
++		uint64_t now = mach_absolute_time(), in = au.input_at;
++		if (au.req) {
++			auto_shot(au.req_tag, true);
++			au.req = 0;
++		} else if (in != input_done && now - in > settle) {
++			input_done = in;
++			auto_shot("input", false);
++		} else if (every != 0 && auto_ms() - last_periodic >= every * 1000ull) {
++			last_periodic = auto_ms();
++			auto_shot("periodic", false);
++		}
++	}
++}
++
++/* --- the script */
++
++static const char *
++auto_skip(const char *p)
++{
++	while (*p == ' ' || *p == '\t') {
++		p++;
++	}
++	return p;
++}
++
++static bool
++auto_int(const char **pp, long *out)
++{
++	const char *p = auto_skip(*pp);
++	bool neg = false;
++	long v = 0;
++	if (*p == '-') {
++		neg = true;
++		p++;
++	}
++	if (*p < '0' || *p > '9') {
++		return false;
++	}
++	while (*p >= '0' && *p <= '9') {
++		v = v * 10 + (*p++ - '0');
++	}
++	*out = neg ? -v : v;
++	*pp = p;
++	return true;
++}
++
++static bool
++auto_word(const char **pp, const char *w)
++{
++	const char *p = auto_skip(*pp);
++	size_t n = strlen(w);
++	if (strncmp(p, w, n) != 0 || (p[n] != 0 && p[n] != ' ' && p[n] != '\t')) {
++		return false;
++	}
++	*pp = p + n;
++	return true;
++}
++
++static void
++auto_touch(int down, long x, long y)
++{
++	sweet_hid_touch(0, down, (int)x, (int)y);
++	sweet_input_note();
++}
++
++static void
++auto_key(int key, int down)
++{
++	sweet_hid_key(key, down);
++	sweet_input_note();
++}
++
++/* Wait up to ms for text in the console log (from now on). */
++static bool
++auto_waitlog(long ms, const char *text)
++{
++	static char buf[1024];
++	size_t tl = strlen(text), keep = 0;
++	uint64_t pos = sweet_log_position(), end = auto_ms() + (uint64_t)ms;
++	if (tl == 0 || tl > 200) {
++		return false;
++	}
++	while (auto_ms() < end) {
++		uint32_t n = sweet_log_copy(&pos, buf + keep, (uint32_t)(sizeof(buf) - 1 - keep));
++		if (n == 0) {
++			IOSleep(100);
++			continue;
++		}
++		size_t len = keep + n;
++		buf[len] = 0;
++		for (size_t i = 0; i + tl <= len; i++) {
++			if (memcmp(buf + i, text, tl) == 0) {
++				return true;
++			}
++		}
++		keep = MIN(len, tl - 1);
++		memmove(buf, buf + len - keep, keep);
++	}
++	return false;
++}
++
++static void
++auto_recovery(void)
++{
++	printf("SWEET AUTO: rebooting into recovery\n");
++	IOSleep(3000);                  /* the log thread flushes every 2 s */
++	au.stop = true;
++	vm_offset_t pmu = ml_io_map(A510F_PMU_PA, 0x1000);
++	lck_mtx_lock(&sweet_mmc_lock);  /* no eMMC transfer in flight; never released */
++	(void)mmc_flush();
++	/* as Samsung's sec_reboot("recovery"): no LPM boot, S-Boot mode recovery */
++	*(volatile uint32_t *)(pmu + PMU_INFORM2) = 0x12345678u;
++	*(volatile uint32_t *)(pmu + PMU_INFORM3) = 0x12345670u | 4u;
++	__asm__ volatile ("dsb sy" : : : "memory");
++	*(volatile uint32_t *)(pmu + PMU_SWRESET) = 1u;
++	for (;;) {
++		__asm__ volatile ("wfi");
++	}
++}
++
++static void
++auto_run_line(const char *p)
++{
++	long a = 0, b = 0, c = 0, d = 0, e = 0;
++	p = auto_skip(p);
++	if (*p == 0 || *p == '#') {
++		return;
++	}
++	printf("SWEET AUTO: > %s\n", p);
++	if (auto_word(&p, "wait") && auto_int(&p, &a)) {
++		IOSleep((unsigned)MAX(a, 0));
++	} else if (auto_word(&p, "waitlog") && auto_int(&p, &a)) {
++		bool ok = auto_waitlog(a, auto_skip(p));
++		printf("SWEET AUTO: waitlog %s\n", ok ? "found" : "timed out");
++	} else if (auto_word(&p, "tap") && auto_int(&p, &a) && auto_int(&p, &b)) {
++		auto_touch(1, a, b);
++		IOSleep(80);
++		auto_touch(0, a, b);
++	} else if (auto_word(&p, "hold") && auto_int(&p, &a) && auto_int(&p, &b) && auto_int(&p, &c)) {
++		auto_touch(1, a, b);
++		IOSleep((unsigned)MAX(c, 0));
++		auto_touch(0, a, b);
++	} else if (auto_word(&p, "swipe") && auto_int(&p, &a) && auto_int(&p, &b) && auto_int(&p, &c) &&
++	    auto_int(&p, &d) && auto_int(&p, &e)) {
++		long steps = MAX(e / 16, 2);
++		for (long i = 0; i <= steps; i++) {
++			auto_touch(1, a + (c - a) * i / steps, b + (d - b) * i / steps);
++			IOSleep(16);
++		}
++		auto_touch(0, c, d);
++	} else if (auto_word(&p, "key")) {
++		static const char *names[] = { "power", "volup", "voldown", "home" };
++		int key = -1;
++		for (int i = 0; i < 4 && key < 0; i++) {
++			if (auto_word(&p, names[i])) {
++				key = i;
++			}
++		}
++		if (key < 0) {
++			printf("SWEET AUTO: unknown key\n");
++		} else if (auto_word(&p, "down")) {
++			auto_key(key, 1);
++		} else if (auto_word(&p, "up")) {
++			auto_key(key, 0);
++		} else if (auto_word(&p, "long")) {
++			auto_key(key, 1);
++			IOSleep(3000);
++			auto_key(key, 0);
++		} else {
++			auto_key(key, 1);
++			IOSleep(120);
++			auto_key(key, 0);
++		}
++	} else if (auto_word(&p, "shot")) {
++		strlcpy(au.req_tag, *auto_skip(p) ? auto_skip(p) : "script", sizeof(au.req_tag));
++		au.req = 1;
++		for (int i = 0; i < 100 && au.req; i++) {
++			IOSleep(50);
++		}
++	} else if (auto_word(&p, "log")) {
++		printf("SWEET AUTO: note: %s\n", auto_skip(p));
++	} else if (auto_word(&p, "recovery")) {
++		auto_recovery();
++	} else {
++		printf("SWEET AUTO: bad line\n");
++	}
++}
++
++static void
++auto_script_thread(void *arg, __unused wait_result_t wr)
++{
++	char *text = (char *)arg;
++	const char *p = text;
++	while (*p && *p != '\n') {
++		p++;
++	}
++	while (*p == '\n' && !au.stop) {
++		char line[160];
++		const char *q = ++p;
++		while (*p && *p != '\n') {
++			p++;
++		}
++		size_t n = MIN((size_t)(p - q), sizeof(line) - 1);
++		memcpy(line, q, n);
++		line[n] = 0;
++		if (n > 0 && line[n - 1] == '\r') {
++			line[n - 1] = 0;
++		}
++		if (strcmp(auto_skip(line), "end") == 0) {
++			break;
++		}
++		auto_run_line(line);
++	}
++	printf("SWEET AUTO: script done\n");
++}
++
++static void
++sweet_auto_start(void)
++{
++	uint32_t on = 1;
++	PE_parse_boot_argn("sweetauto", &on, sizeof(on));
++	if (!on || !sm.writable) {
++		printf("SWEET AUTO: off\n");
++		return;
++	}
++	lck_mtx_lock(&sweet_mmc_lock);
++	int error = mmc_part_find("OTA", &au.lba, &au.nsect);
++	bool overlaps = !error && !(au.lba + au.nsect <= sm.first_lba || au.lba >= sm.first_lba + sm.nsect);
++	if (!error && (overlaps || au.nsect < AUTO_RING_LBA + 4 * AUTO_SLOT_SECT || au.nsect > (64u << 11))) {
++		error = EINVAL;
++	}
++	char *script = NULL;
++	au.slot = mmc_alloc(AUTO_SLOT_BYTES);
++	au.state = mmc_alloc(MMC_SECTOR);
++	if (!error && (au.slot == NULL || au.state == NULL)) {
++		error = ENOMEM;
++	}
++	if (!error) {
++		error = mmc_read(au.lba + AUTO_STATE_LBA, 1, au.state);
++	}
++	if (!error && memcmp(au.state, "SWEETAST", 8) == 0) {
++		memcpy(&au.boot, au.state + 12, 4);
++		memcpy(&au.seq, au.state + 16, 8);
++		memcpy(&au.script_done, au.state + 24, 4);
++	}
++	if (!error) {
++		script = (char *)mmc_alloc(AUTO_SCRIPT_SECT * MMC_SECTOR + 1);
++		if (script == NULL || mmc_read(au.lba, AUTO_SCRIPT_SECT, (uint8_t *)script) != 0) {
++			script = NULL;
++		}
++	}
++	lck_mtx_unlock(&sweet_mmc_lock);
++	if (error) {
++		printf("SWEET AUTO: no OTA partition (%d), off\n", error);
++		return;
++	}
++	au.slots = (uint32_t)((au.nsect - AUTO_RING_LBA) / AUTO_SLOT_SECT);
++	au.boot++;
++	long id = -1;
++	const char *p = script;
++	if (script && strncmp(script, "SWEETAUTO ", 10) == 0) {
++		script[AUTO_SCRIPT_SECT * MMC_SECTOR] = 0;
++		p = script + 10;
++		if (!auto_int(&p, &id) || id <= 0) {
++			id = -1;
++		}
++	}
++	bool run = id > 0 && (uint32_t)id != au.script_done;
++	if (run) {
++		au.script_done = (uint32_t)id;
++	}
++	auto_put_state();
++	printf("SWEET AUTO: OTA at LBA %llu, %u shot slots, boot %u, %llu shots so far, script %ld %s\n",
++	    au.lba, au.slots, au.boot, au.seq, id, run ? "runs now" : (id > 0 ? "already run" : "none"));
++	thread_t th;
++	if (kernel_thread_start(auto_shot_thread, NULL, &th) == KERN_SUCCESS) {
++		thread_deallocate(th);
++	}
++	if (run && kernel_thread_start(auto_script_thread, script, &th) == KERN_SUCCESS) {
++		thread_deallocate(th);
++	}
 +}
 +
  /* Root device for rd=mmcroot0 (IOFindBSDRoot). */
