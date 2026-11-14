@@ -1033,3 +1033,12 @@ images). "MESA: error: export failed" x2764: pan_fence.c exports every
 flush's fence as a sync file, our drmSyncobjExportSyncFile said ENOSYS.
 Fixes: adapt.py turns the barrier into glFlush (end of batch), the
 emulation exports a dup of /dev/null (all fences are signalled).
+
+Boot with sweetgl 3d0843f4 (barrier -> glFlush, fences): Mesa reports no
+errors any more (only the INVALID_ENUM glGetString(0x8a1e) query), no
+crash. Video IMG_4766: Settings, home screen icons, widgets, App Library
+all drawn right by the GPU. Left: tearing / double frames and top-down
+sweep during motion (the kernel's 10 Hz CPU copy + scale to the panel),
+CA flushes 1-10/s; lock screen without clock/date (only "Press home to
+open"), dark band behind the status bar. Next: display path (present at
+60 Hz, direct scanout/GPU scale), then the lock-screen clock.
