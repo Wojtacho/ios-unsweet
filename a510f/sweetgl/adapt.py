@@ -187,6 +187,50 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 	r->mode = mode;
 	r->count = count;
 	r->seq = ++ring_seq;
+	/*
+	 * A510F: an incomplete framebuffer makes Mesa drop the draw, or CA's
+	 * offscreen passes land elsewhere (garbage at the screen's top left,
+	 * black backdrops): check at the first draw into each binding.
+	 */
+	static GLint last_fbo = -1;
+	static int fb_logged;
+	if ((r->fbo != last_fbo || (ring_seq & 63) == 0) && fb_logged < 40) {
+		last_fbo = r->fbo;
+		GLenum st = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
+		if (st != GL_FRAMEBUFFER_COMPLETE) {
+			GLint type = 0, name = 0, comp = 0, rs = 0, gs = 0, bs = 0, as = 0;
+			if (r->fbo != 0) {
+				glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+				    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
+				if (type != GL_NONE) {
+					glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+					    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+					glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+					    GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE, &comp);
+					glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+					    GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE, &rs);
+					glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+					    GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE, &gs);
+					glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+					    GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE, &bs);
+					glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+					    GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE, &as);
+				}
+			}
+			while (glGetError() != GL_NO_ERROR) {
+			}
+			fb_logged++;
+			sweet_drm_log("sweetgl: draw %u into INCOMPLETE fbo %d (status %#x): color0 type %#x name %d "
+			    "comp %#x bits %d/%d/%d/%d, viewport %dx%d prog %d",
+			    r->seq, r->fbo, st, type, name, comp, rs, gs, bs, as, r->vw, r->vh, prog);
+		}
+	}
+	/* draws straight into the default framebuffer (CA always renders into FBOs) */
+	static int fb0_logged;
+	if (r->fbo == 0 && fb0_logged < 10) {
+		fb0_logged++;
+		sweet_drm_log("sweetgl: draw %u into fbo 0, viewport %dx%d prog %d", r->seq, r->vw, r->vh, prog);
+	}
 }
 
 static int

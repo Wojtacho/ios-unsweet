@@ -2,7 +2,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index 68612db..281011b 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -445,6 +445,78 @@ exec_add_user_string(struct image_params *imgp, user_addr_t str, int seg, boolea
+@@ -445,6 +445,121 @@ exec_add_user_string(struct image_params *imgp, user_addr_t str, int seg, boolea
  	return error;
  }
  
@@ -76,16 +76,63 @@ index 68612db..281011b 100644
 +	}
 +	return 0;
 +}
++
++/*
++ * A510F: boot-arg sweetnoexec=NAME[,NAME...]: exec of these file names fails
++ * (EPERM). For daemons and extensions that only crash-loop here (no
++ * Bluetooth, no speech synthesis): launchd/xpcproxy just get an error.
++ */
++static int
++a510f_exec_deny(struct image_params *imgp)
++{
++	static char list[256];
++	static int state;       /* 0 not parsed, 1 none, 2 set */
++	static unsigned logged;
++	if (state == 0) {
++		state = PE_parse_boot_argn("sweetnoexec", list, sizeof(list)) && list[0] ? 2 : 1;
++	}
++	if (state != 2) {
++		return 0;
++	}
++	const char *path = imgp->ip_strings + strlen("executable_path="), *base = path;
++	for (const char *c = path; *c; c++) {
++		if (*c == '/') {
++			base = c + 1;
++		}
++	}
++	size_t blen = strlen(base);
++	for (const char *e = list; *e;) {
++		size_t n = 0;
++		while (e[n] && e[n] != ',') {
++			n++;
++		}
++		if (n == blen && strncmp(base, e, n) == 0) {
++			if (logged++ < 20) {
++				printf("A510F NOEXEC: %s refused\n", base);
++			}
++			return EPERM;
++		}
++		e += n;
++		if (*e == ',') {
++			e++;
++		}
++	}
++	return 0;
++}
 +#endif
 +
  /*
   * dyld is now passed the executable path as a getenv-like variable
   * in the same fashion as the stack_guard and malloc_entropy keys.
-@@ -5741,6 +5813,13 @@ exec_extract_strings(struct image_params *imgp)
+@@ -5741,6 +5856,17 @@ exec_extract_strings(struct image_params *imgp)
  		imgp->ip_envc++;
  	}
  
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
++	error = a510f_exec_deny(imgp);
++	if (error) {
++		goto bad;
++	}
 +	error = a510f_exec_env(imgp, new_ptr_size);
 +	if (error) {
 +		goto bad;
