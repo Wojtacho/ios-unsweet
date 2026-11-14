@@ -1,0 +1,62 @@
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index cb67b4d..c314810 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -367,6 +367,49 @@ static struct mac_policy_conf sweet_amfi_mac_conf = {
+ 
+ static mac_policy_handle_t sweet_amfi_mac_handle;
+ 
++/*
++ * A510F: dyld asks AMFI which DYLD_* environment variables a process may use
++ * (dyld's amfi_check_dyld_policy_self: __mac_syscall("AMFI", 90, args), args
++ * = {uint64_t input flags; uint64_t *output}). Without a policy named "AMFI"
++ * the call fails, dyld takes 0 and ignores DYLD_INSERT_LIBRARIES, which the
++ * sweetenv boot-arg uses to load sweetgl into backboardd. Answer it: @paths
++ * 0x1, path variables 0x2, fallback paths 0x8, print variables 0x10, failed
++ * insertion 0x20 (a missing inserted library does not stop the process),
++ * interposing 0x40; not 0x4 (custom shared cache).
++ */
++#include <sys/errno.h>
++
++#define A510F_AMFI_DYLD_POLICY_CALL     90
++#define A510F_AMFI_DYLD_ALLOW           0x7bULL
++
++static int
++a510f_amfi_policy_syscall(struct proc *p, int call, user_addr_t arg)
++{
++	(void)p;
++	if (call != A510F_AMFI_DYLD_POLICY_CALL) {
++		return ENOSYS;
++	}
++	uint64_t args[2];
++	int error = copyin(arg, args, sizeof(args));
++	if (error) {
++		return error;
++	}
++	uint64_t out = A510F_AMFI_DYLD_ALLOW;
++	return copyout(&out, (user_addr_t)args[1], sizeof(out));
++}
++
++static const struct mac_policy_ops a510f_amfi_dyld_ops = {
++	.mpo_policy_syscall = a510f_amfi_policy_syscall,
++};
++
++static struct mac_policy_conf a510f_amfi_dyld_conf = {
++	.mpc_name = "AMFI",
++	.mpc_fullname = "A510F dyld policy",
++	.mpc_ops = &a510f_amfi_dyld_ops,
++};
++
++static mac_policy_handle_t a510f_amfi_dyld_handle;
++
+ /* Called from bsd_init once MAC policies can register, before any exec. */
+ void sweet_amfi_policy_register(void);
+ 
+@@ -379,5 +422,7 @@ sweet_amfi_policy_register(void)
+ 	error = mac_policy_register(&sweet_sandbox_mac_conf, &sweet_sandbox_mac_handle, NULL);
+ 	printf("SWEET Sandbox: permissive policy %s (%d)\n",
+ 	    error ? "NOT registered" : "registered", error);
++	error = mac_policy_register(&a510f_amfi_dyld_conf, &a510f_amfi_dyld_handle, NULL);
++	printf("A510F AMFI: dyld policy %s (%d)\n", error ? "NOT registered" : "registered", error);
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

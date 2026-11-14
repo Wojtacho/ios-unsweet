@@ -993,3 +993,13 @@ user-approved. Header checked before (IM4P), read-back sha256 equal.
 boot-args: sweetenv=backboardd:DYLD_INSERT_LIBRARIES=<that path>,SWEETGL_TEST=1.
 Restoring the ramdisk needs the next root rebuild. 0122 LOG selector fixed
 (raw NUL/newline bytes in the source from the patch script, build of e4abe42).
+
+First sweetgl boot (build 39, bd83121): phone fine, but no SWEETGL line at
+all. Kernel log: "A510F ENV: backboardd += DYLD_INSERT_LIBRARIES=..." and
+"+= SWEETGL_TEST=1", so the env was there; dyld ignored it. Phone's
+/usr/lib/dyld: SyscallDelegate::amfiFlags -> amfi_check_dyld_policy_self =
+__mac_syscall("AMFI", 0x5a, {u64 input, u64 *output}); on error the flags
+are 0 = no DYLD_* variables. Our AMFI policy is named "SWEET AMFI" and has no
+policy_syscall. 0124 registers a second policy "AMFI" answering call 90 with
+0x7b (at paths, path vars, fallback, print, failed insertion allowed,
+interposing). Log line: "A510F AMFI: dyld policy registered (0)".
