@@ -62,7 +62,7 @@ jobs:
         if: steps.hostcache.outputs.cache-hit != 'true'
         run: |
           # before mesa-fixup.py: the host build is plain Mesa
-          meson setup mesa-host mesa --prefix="$PWD/hostinst" \
+          sh a510f/sweetgl/ci-run.sh host-setup meson setup mesa-host mesa --prefix="$PWD/hostinst" \
             --buildtype=release -Db_ndebug=true \
             -Dplatforms= -Degl=disabled -Dglx=disabled -Dgbm=disabled \
             -Dgallium-drivers= -Dvulkan-drivers= \
@@ -76,8 +76,8 @@ jobs:
             -Dgallium-rusticl=false -Dhtml-docs=disabled -Ddisplay-info=disabled -Dteflon=false \
             -Dc_args="-I$PWD/a510f/sweetgl/include" -Dcpp_args="-I$PWD/a510f/sweetgl/include" \
             -Dc_link_args=-Wl,-undefined,dynamic_lookup -Dcpp_link_args=-Wl,-undefined,dynamic_lookup
-          ninja -C mesa-host
-          ninja -C mesa-host install
+          sh a510f/sweetgl/ci-run.sh host-build ninja -C mesa-host
+          sh a510f/sweetgl/ci-run.sh host-install ninja -C mesa-host install
           ls -la hostinst/bin
 
       - name: Save host tools
@@ -92,7 +92,7 @@ jobs:
           export PATH="$PWD/hostinst/bin:$PATH"
           which mesa_clc vtn_bindgen2 panfrost_compile
           python3 -I a510f/sweetgl/mesa-fixup.py mesa
-          sh a510f/sweetgl/build.sh mesa sailfish/tools/sweetgl out
+          sh a510f/sweetgl/ci-run.sh ios-build sh a510f/sweetgl/build.sh mesa sailfish/tools/sweetgl out
 
       - name: Check the library
         run: |
