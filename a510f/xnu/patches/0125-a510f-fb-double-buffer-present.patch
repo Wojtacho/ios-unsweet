@@ -1,8 +1,8 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 0f8e61a..fb5fd99 100644
+index 0f8e61a..7447d5f 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -82,6 +82,18 @@ enum {
+@@ -82,6 +82,17 @@ enum {
  #define SWEET_FB_LOGICAL_W              1242
  #define SWEET_FB_LOGICAL_H              2208
  #define SWEET_FB_FORMAT_BGRA            0x42475241
@@ -17,11 +17,10 @@ index 0f8e61a..fb5fd99 100644
 +#define A510F_SHADOWCON_WIN0_PROTECT    (1u << 8)
 +#define A510F_UPDATE_STANDALONE         (1u << 0)
 +extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
-+extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
  
  class IOMobileFramebuffer : public IOService {
  	OSDeclareDefaultStructors(IOMobileFramebuffer);
-@@ -125,6 +137,28 @@ public:
+@@ -125,6 +136,30 @@ public:
  	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
  	bool          fPowerOff;      /* RequestPowerChange(0) */
  	uint32_t      fFadeStep;      /* fade-out steps done while off */
@@ -39,6 +38,8 @@ index 0f8e61a..fb5fd99 100644
 +	uint32_t      fShown;         /* buffer DECON scans out */
 +	uintptr_t     fDraw;          /* buffer being drawn by present() */
 +	vm_offset_t   fDecon;
++	IOMemoryDescriptor *fBackMD;  /* buffer 1 (not ml_io_map: 8 MiB exhausts the io_map range) */
++	IOMemoryMap   *fBackMap;
 +	IOLock       *fPresentLock;   /* one present at a time (swap thread, vsync) */
 +	uint64_t      fMinGap;        /* abs time between presents (sweetfb_hz) */
 +	uint64_t      fLastPresent;
@@ -50,7 +51,7 @@ index 0f8e61a..fb5fd99 100644
  
  	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
  	void addClient(IOMobileFramebufferUserClient *client);
-@@ -244,6 +278,30 @@ AppleCLCD::start(IOService *provider)
+@@ -244,6 +279,32 @@ AppleCLCD::start(IOService *provider)
  	uint32_t hz = 10;
  	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
  	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
@@ -68,7 +69,9 @@ index 0f8e61a..fb5fd99 100644
 +	if (flip && fPhys == A510F_FB_A && (uint64_t)fRowBytes * fHeight <= A510F_FB_SIZE) {
 +		fDecon = ml_io_map(A510F_DECON_PA, 0x1000);
 +		fBufPA[1] = A510F_FB_B;
-+		fBufVA[1] = ml_io_map_wcomb(A510F_FB_B, A510F_FB_SIZE);
++		fBackMD = IOMemoryDescriptor::withPhysicalAddress(A510F_FB_B, A510F_FB_SIZE, kIODirectionInOut);
++		fBackMap = fBackMD != NULL ? fBackMD->map(kIOMapWriteCombineCache) : NULL;
++		fBufVA[1] = fBackMap != NULL ? (uintptr_t)fBackMap->getVirtualAddress() : 0;
 +		if (fDecon != 0 && fBufVA[1] != 0 &&
 +		    *(volatile uint32_t *)(fDecon + A510F_DECON_ADD0) == (uint32_t)fPhys) {
 +			memcpy((void *)fBufVA[1], (const void *)fPixels, (size_t)fRowBytes * fHeight);
@@ -81,7 +84,7 @@ index 0f8e61a..fb5fd99 100644
  	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
  
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
-@@ -293,7 +351,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -293,7 +354,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		IOLockUnlock(fb->fLock);
  		if (step <= 6) {
  			for (uint32_t y = 0; y < fb->fHeight; y++) {
@@ -90,7 +93,7 @@ index 0f8e61a..fb5fd99 100644
  				for (uint32_t x = 0; x < fb->fWidth; x++) {
  					row[x] = step < 6 ? (row[x] >> 1) & 0x7f7f7f7f : 0;
  				}
-@@ -302,9 +360,11 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -302,9 +363,11 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
  		return;
  	}
@@ -103,7 +106,7 @@ index 0f8e61a..fb5fd99 100644
  		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
  		if (rec != NULL) {
  			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
-@@ -412,19 +472,81 @@ static uint64_t sweet_fb_swap_count;
+@@ -412,19 +475,81 @@ static uint64_t sweet_fb_swap_count;
  void
  AppleCLCD::swap(const uint8_t *rec)
  {
@@ -186,7 +189,7 @@ index 0f8e61a..fb5fd99 100644
  
  
  	if (!fConsolePaused) {
-@@ -473,6 +595,10 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -473,6 +598,10 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -197,7 +200,7 @@ index 0f8e61a..fb5fd99 100644
  		if (fFit) {
  			presentFit(s, src, bpe, sx, sy, dx, dy, w, h);
  			s->release();
-@@ -511,13 +637,31 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -511,13 +640,31 @@ AppleCLCD::present(const uint8_t *rec)
  		}
  		if (src != 0 && bpe == 4) {
  			for (int32_t y = 0; y < h; y++) {
@@ -230,7 +233,7 @@ index 0f8e61a..fb5fd99 100644
  }
  
  /*
-@@ -547,7 +691,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -547,7 +694,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	if (!fFitCleared) {
  		/* Black pillarbox (the console text was there). */
  		for (uint32_t y = 0; y < fHeight; y++) {
@@ -239,7 +242,7 @@ index 0f8e61a..fb5fd99 100644
  		}
  		fFitCleared = true;
  	}
-@@ -576,7 +720,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -576,7 +723,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  			continue;
  		}
  		const uint32_t *row = (const uint32_t *)(base + (uint64_t)(sy + ly) * s->bytesPerRow) + sx;

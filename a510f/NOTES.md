@@ -1054,3 +1054,8 @@ into the surface being read; the vsync timer only shows frames left
 pending. Source surfaces get dc civac before the CPU reads them (Mali
 writes are not coherent). Log: "SWEET FB: double buffer on ...",
 "N presents, avg X us max Y us, flip waits Z" every 300.
+Build 42 (6258711) panicked at boot: "kmem_alloc(..., 8388608, 0x100021):
+failed with 3 @vm_kern.c:178" from ml_io_map_wcomb(0x41000000, 8 MiB): the
+io_map range is too small for 8 MiB (sailfish enlarged it in 0165). 0125
+now maps buffer 1 like the boot framebuffer surface: IOMemoryDescriptor::
+withPhysicalAddress + map(kIOMapWriteCombineCache).
