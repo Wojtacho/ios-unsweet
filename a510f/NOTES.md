@@ -1117,3 +1117,15 @@ Round 1 of the fix:
     29, M[21:12] P[9:4] S[2:0]; 668 = P13 M334 S0 = 0x8014e0d0; S-Boot's
     0xa010a0d1 = 266 MHz), waits for lock, muxes back (pclk /4)
     ("SWEET MALI: G3D clock 668 MHz ... -> on").
+
+Boot of sweetgl d778718a + kernel 48 (bd67372): user "way smoother".
+"A510F G3D: buck4 vsel 0x70 (1100000 uV) ... ok", "SWEET MALI: G3D clock
+668 MHz: pll 0xa010a0d1 -> 0xa014e0d0 (parked 1 locked 1), mux stat 0x1,
+div 0x30 -> on", "framebuffer fetch native (Mesa)", no shader compile
+failures; max jobs 14-31 ms. New: >= 20 fragment jobs failed, js0 status
+0x50 = INSTR_INVALID_PC (none in the three boots before). Likely cause:
+gpu_run started jobs without a dsb after Mesa's write-combined writes of
+descriptors and of shader variants compiled at draw time (native fbfetch
+compiles per draw; 668 MHz starts faster). 0122: dsb sy before JS_HEAD_NEXT.
+App Library: no blurred backdrop, no category plates; the same in the
+emulated build (IMG_4766), so a separate, older issue: to trace next.

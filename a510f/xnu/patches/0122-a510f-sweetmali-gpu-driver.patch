@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..9a2f2af
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
-@@ -0,0 +1,933 @@
+@@ -0,0 +1,941 @@
 +/*
 + * SweetMali: kernel driver for the A510F's Mali-T720 MP2 (Exynos 7580),
 + * shaped after Linux panfrost (drivers/gpu/drm/panfrost) so that Mesa's
@@ -412,6 +412,14 @@ index 0000000..9a2f2af
 +	uint64_t t0 = mach_absolute_time();
 +	wr(g_gpu, JOB_INT_CLEAR, done | err);
 +	wr(g_gpu, MMU_INT_CLEAR, 1);
++	/*
++	 * Mesa wrote the job descriptors and (for shader variants compiled at
++	 * draw time) the shader code through write-combined mappings just
++	 * before this call: drain them to memory before the GPU reads them.
++	 * Without it the GPU could fetch a shader that had not landed yet
++	 * (INSTR_INVALID_PC, js status 0x50, fragment jobs, native fbfetch).
++	 */
++	__asm__ volatile ("dsb sy" : : : "memory");
 +	wr(g_gpu, JS(js, JS_HEAD_NEXT), (uint32_t)jc);
 +	wr(g_gpu, JS(js, JS_HEAD_NEXT) + 4, (uint32_t)(jc >> 32));
 +	wr(g_gpu, JS(js, JS_AFFINITY_NEXT), g_shader);
