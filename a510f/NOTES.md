@@ -1074,3 +1074,9 @@ record the frame; the vsync timer hands it to a separate present workloop
 (presentFired) when idle and due, so vsync keeps ticking; per-step timing
 "SWEET FB: per present: map, cache inval, scale, flip wait" after 20 and
 every 100 presents.
+Build 45 (4fe9d2e): "per present: map 21 us, cache inval 2372 us, scale
+353898 us, flip wait 4490 us". The scale loop is the whole cost: ~170 ns
+per pixel = an uncached access each. map(kIOMapDefaultCache) took the
+descriptor's own (write-combined) mode; now kIOMapCopybackCache. Also each
+panel row is built in a cached IOMallocData row and stored with one memcpy
+(in case the panel stores are the slow side).

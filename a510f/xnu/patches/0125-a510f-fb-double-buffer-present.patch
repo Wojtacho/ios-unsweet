@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 0f8e61a..7443be4 100644
+index 0f8e61a..0b4900a 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -82,6 +82,17 @@ enum {
@@ -20,7 +20,7 @@ index 0f8e61a..7443be4 100644
  
  class IOMobileFramebuffer : public IOService {
  	OSDeclareDefaultStructors(IOMobileFramebuffer);
-@@ -125,6 +136,35 @@ public:
+@@ -125,6 +136,36 @@ public:
  	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
  	bool          fPowerOff;      /* RequestPowerChange(0) */
  	uint32_t      fFadeStep;      /* fade-out steps done while off */
@@ -46,6 +46,7 @@ index 0f8e61a..7443be4 100644
 +	uint64_t      fPresents, fPresentAbs, fPresentMaxAbs, fFlipWaits;
 +	uint64_t      fTMap, fTInval, fTScale, fTWait, fTSteps;  /* abs time per step */
 +	IOWorkLoop         *fPresentLoop;
++	uint32_t           *fRowBuf;        /* one panel row, cached (presentFit) */
 +	IOTimerEventSource *fPresentTimer;
 +	bool                fPresentBusy;
 +	static void presentFired(OSObject *owner, IOTimerEventSource *sender);
@@ -56,7 +57,7 @@ index 0f8e61a..7443be4 100644
  
  	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
  	void addClient(IOMobileFramebufferUserClient *client);
-@@ -244,6 +284,39 @@ AppleCLCD::start(IOService *provider)
+@@ -244,6 +285,40 @@ AppleCLCD::start(IOService *provider)
  	uint32_t hz = 10;
  	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
  	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
@@ -86,6 +87,7 @@ index 0f8e61a..7443be4 100644
 +		    fFlip ? "on" : "OFF", fDecon ? *(volatile uint32_t *)(fDecon + A510F_DECON_ADD0) : 0,
 +		    (unsigned long long)A510F_FB_B, hz);
 +	}
++	fRowBuf = (uint32_t *)IOMallocData((vm_size_t)fWidth * 4);
 +	fPresentLoop = IOWorkLoop::workLoop();
 +	fPresentTimer = IOTimerEventSource::timerEventSource(this, &AppleCLCD::presentFired);
 +	if (fPresentLoop == NULL || fPresentTimer == NULL ||
@@ -96,7 +98,7 @@ index 0f8e61a..7443be4 100644
  	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
  
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
-@@ -293,7 +366,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -293,7 +368,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		IOLockUnlock(fb->fLock);
  		if (step <= 6) {
  			for (uint32_t y = 0; y < fb->fHeight; y++) {
@@ -105,7 +107,7 @@ index 0f8e61a..7443be4 100644
  				for (uint32_t x = 0; x < fb->fWidth; x++) {
  					row[x] = step < 6 ? (row[x] >> 1) & 0x7f7f7f7f : 0;
  				}
-@@ -302,21 +375,43 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -302,21 +377,43 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
  		return;
  	}
@@ -157,7 +159,7 @@ index 0f8e61a..7443be4 100644
  }
  
  void
-@@ -412,8 +507,19 @@ static uint64_t sweet_fb_swap_count;
+@@ -412,8 +509,19 @@ static uint64_t sweet_fb_swap_count;
  void
  AppleCLCD::swap(const uint8_t *rec)
  {
@@ -177,7 +179,7 @@ index 0f8e61a..7443be4 100644
  	fDirty = true;
  	IOLockUnlock(fLock);
  	if ((++sweet_fb_swap_count % 1000) == 0) {
-@@ -421,10 +527,61 @@ AppleCLCD::swap(const uint8_t *rec)
+@@ -421,10 +529,61 @@ AppleCLCD::swap(const uint8_t *rec)
  	}
  }
  
@@ -239,7 +241,7 @@ index 0f8e61a..7443be4 100644
  
  
  	if (!fConsolePaused) {
-@@ -460,7 +617,16 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -460,7 +619,16 @@ AppleCLCD::present(const uint8_t *rec)
  			OSSafeReleaseNULL(s);
  			continue;
  		}
@@ -251,13 +253,13 @@ index 0f8e61a..7443be4 100644
 +		 * lines first.
 +		 */
 +		uint64_t t1 = mach_absolute_time();
-+		IOMemoryMap *rmap = s->memory != NULL ? s->memory->map(kIOMapDefaultCache) : NULL;
++		IOMemoryMap *rmap = s->memory != NULL ? s->memory->map(kIOMapCopybackCache) : NULL;
 +		fTMap += mach_absolute_time() - t1;
 +		uintptr_t src = rmap != NULL ? (uintptr_t)rmap->getVirtualAddress() : s->kernelAddress();
  		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
  		sweet_fb_note_format(s->pixelFormat, bpe, s->width, s->height);
  		if (w <= 0 || h <= 0) {
-@@ -473,8 +639,17 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -473,8 +641,17 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -275,7 +277,7 @@ index 0f8e61a..7443be4 100644
  			s->release();
  			continue;
  		}
-@@ -511,13 +686,41 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -511,13 +688,41 @@ AppleCLCD::present(const uint8_t *rec)
  		}
  		if (src != 0 && bpe == 4) {
  			for (int32_t y = 0; y < h; y++) {
@@ -318,7 +320,7 @@ index 0f8e61a..7443be4 100644
  }
  
  /*
-@@ -547,7 +750,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -547,7 +752,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	if (!fFitCleared) {
  		/* Black pillarbox (the console text was there). */
  		for (uint32_t y = 0; y < fHeight; y++) {
@@ -327,12 +329,37 @@ index 0f8e61a..7443be4 100644
  		}
  		fFitCleared = true;
  	}
-@@ -576,7 +779,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -576,13 +781,31 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  			continue;
  		}
  		const uint32_t *row = (const uint32_t *)(base + (uint64_t)(sy + ly) * s->bytesPerRow) + sx;
 -		uint32_t *out = (uint32_t *)(fPixels + (uint64_t)py * fRowBytes);
 +		uint32_t *out = (uint32_t *)(fDraw + (uint64_t)py * fRowBytes);
++		if (fRowBuf == NULL) {
++			for (int32_t px = px0; px < px1; px++) {
++				int32_t lx = fFitCol[px] - dx;
++				if (lx >= 0 && lx < w) {
++					out[px] = convert ? sweet_fb_pixel(fmt, row[lx]) : row[lx];
++				}
++			}
++			continue;
++		}
++		/* cached row, then one block store into the (write-combined) panel memory */
++		int32_t first = -1, last = -1;
  		for (int32_t px = px0; px < px1; px++) {
  			int32_t lx = fFitCol[px] - dx;
  			if (lx >= 0 && lx < w) {
+-				out[px] = convert ? sweet_fb_pixel(fmt, row[lx]) : row[lx];
++				fRowBuf[px] = convert ? sweet_fb_pixel(fmt, row[lx]) : row[lx];
++				if (first < 0) {
++					first = px;
++				}
++				last = px;
+ 			}
+ 		}
++		if (first >= 0) {
++			memcpy(out + first, fRowBuf + first, (size_t)(last - first + 1) * 4);
++		}
+ 	}
+ }
+ 
