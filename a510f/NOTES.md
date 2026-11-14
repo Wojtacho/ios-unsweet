@@ -1190,3 +1190,16 @@ AegirPoster / CollectionsPoster killed (sig 9) repeatedly in the editor.
 User: wake still shows the home screen before the lock screen (so CA
 itself sends that frame first); wallpaper set but glitches (widgets,
 doubled time), then grey lock screen / black home screen.
+
+Jetsam: our MASTER.arm64.sweet is MASTER.arm64.MacOSX-based, whose VM_BASE
+has memorystatus but not jetsam (macOS relies on swap; iOS on jetsam). So
+CONFIG_JETSAM was off: memorystatus_control(SET_JETSAM_HIGH_WATER_MARK)
+falls through to EINVAL (launchd's "Could not opt into 50 MB Jetsam high
+watermark: 22"), nothing kills on low memory, and with no swap files the
+VM can only drop file pages: thrashing (11.8 GB read). 0127: "jetsam" in
+VM_BASE (as MASTER.arm64), and memorystatus_highwater_enabled from
+boot-arg sweet_memlimits (default 0: band-based low-memory kills only, no
+per-process limits tuned for a 3 GB iPhone 8 Plus or for backboardd+Mesa).
+Kills show as "CRASH name sig 9" (memorystatus logs via os_log only).
+Speech AU extensions (KonaSynthesizer, MacinTalkAUSP, SiriTTSSynthesizerAU)
+are .appex, not launchd jobs: separate fix.
