@@ -61,7 +61,14 @@ jobs:
       - name: Mesa host tools (mesa_clc, vtn_bindgen2, panfrost_compile)
         if: steps.hostcache.outputs.cache-hit != 'true'
         run: |
-          # before mesa-fixup.py: the host build is plain Mesa
+          # before mesa-fixup.py: the host build is plain Mesa. Its tools link
+          # Mesa's kmod code, which calls libdrm: our emulation stands in
+          # (never called at build time; real definitions keep meson's
+          # function checks honest, unlike -undefined dynamic_lookup)
+          mkdir -p hostdrm
+          clang -O1 -c -I a510f/sweetgl/include -I mesa/include a510f/sweetgl/sweet_drm_pan.c -o hostdrm/sweet_drm_pan.o
+          ar rcs hostdrm/libsweetdrm.a hostdrm/sweet_drm_pan.o
+          HOSTLINK="-L$PWD/hostdrm -lsweetdrm -framework IOKit -framework CoreFoundation"
           sh a510f/sweetgl/ci-run.sh host-setup meson setup mesa-host mesa --prefix="$PWD/hostinst" \
             --buildtype=release -Db_ndebug=true \
             -Dplatforms= -Degl=disabled -Dglx=disabled -Dgbm=disabled \
@@ -75,7 +82,7 @@ jobs:
             -Dshader-cache=disabled -Dperfetto=false -Dgallium-va=disabled \
             -Dgallium-rusticl=false -Dhtml-docs=disabled -Ddisplay-info=disabled -Dteflon=false \
             -Dc_args="-I$PWD/a510f/sweetgl/include" -Dcpp_args="-I$PWD/a510f/sweetgl/include" \
-            -Dc_link_args=-Wl,-undefined,dynamic_lookup -Dcpp_link_args=-Wl,-undefined,dynamic_lookup
+            -Dc_link_args="$HOSTLINK" -Dcpp_link_args="$HOSTLINK"
           sh a510f/sweetgl/ci-run.sh host-build ninja -C mesa-host
           sh a510f/sweetgl/ci-run.sh host-install ninja -C mesa-host install
           ls -la hostinst/bin
