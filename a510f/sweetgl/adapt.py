@@ -98,6 +98,63 @@ sgl_texture_barrier(void)
 	/* SWEETGL_TRACE: the first draws of each fbfetch program''',
      '''	sgl_texture_barrier();
 	/* SWEETGL_TRACE: the first draws of each fbfetch program'''),
+    # Panfrost has coherent framebuffer fetch on Midgard (pan_screen.c
+    # caps->fbfetch, fbfetch_coherent): CA's blend-mode shaders keep
+    # gl_LastFragData and read the tile buffer. sailfish's emulation sampled
+    # the framebuffer as a texture behind a barrier, which on Midgard ended
+    # the render pass: ~10 full-screen passes per frame (timing boot).
+    ('''	if (strstr(src, "GL_EXT_shader_framebuffer_fetch") != NULL || strstr(src, "gl_LastFragData") != NULL) {
+		src = fbfetch_rewrite(src);''',
+     '''	if (!sgl_native_fbfetch() &&
+	    (strstr(src, "GL_EXT_shader_framebuffer_fetch") != NULL || strstr(src, "gl_LastFragData") != NULL)) {
+		src = fbfetch_rewrite(src);'''),
+    ('''#define FBFETCH_UNIT 15''',
+     '''#define FBFETCH_UNIT 15
+
+/* A510F: the driver's own GL_EXT_shader_framebuffer_fetch (adapt.py), checked once */
+static int
+sgl_native_fbfetch(void)
+{
+	static int native = -1;
+	if (native < 0) {
+		const char *e = (const char *)glGetString(GL_EXTENSIONS);
+		native = e != NULL && strstr(e, "GL_EXT_shader_framebuffer_fetch") != NULL;
+		sweet_drm_log("sweetgl: framebuffer fetch %s", native ? "native (Mesa)" : "emulated");
+	}
+	return native;
+}'''),
+    # safety net: a shader the native path cannot compile gets the emulation
+    ('''	SGL_CUR(rctx);
+	glCompileShader(H(shader));
+	GLint ok = 0;
+	glGetShaderiv(H(shader), GL_COMPILE_STATUS, &ok);
+	if (!ok) {''',
+     '''	SGL_CUR(rctx);
+	glCompileShader(H(shader));
+	GLint ok = 0;
+	glGetShaderiv(H(shader), GL_COMPILE_STATUS, &ok);
+	if (!ok && sgl_native_fbfetch()) {
+		GLint len = 0;
+		glGetShaderiv(H(shader), GL_SHADER_SOURCE_LENGTH, &len);
+		char *fsrc = len > 0 ? malloc((size_t)len + 1) : NULL;
+		if (fsrc != NULL) {
+			glGetShaderSource(H(shader), len + 1, NULL, fsrc);
+			if (strstr(fsrc, "gl_LastFragData") != NULL) {
+				fsrc = fbfetch_rewrite(fsrc);
+				if (n_fbfetch_shaders < FBFETCH_MAX) {
+					fbfetch_shaders[n_fbfetch_shaders++] = H(shader);
+				}
+				const GLchar *one = fsrc;
+				glShaderSource(H(shader), 1, &one, NULL);
+				glCompileShader(H(shader));
+				glGetShaderiv(H(shader), GL_COMPILE_STATUS, &ok);
+				sweet_drm_log("sweetgl: shader %u: native framebuffer fetch failed, emulated: %s",
+				    H(shader), ok ? "ok" : "failed too");
+			}
+			free(fsrc);
+		}
+	}
+	if (!ok) {'''),
     ("""			.type = WINSYS_HANDLE_TYPE_KMS,
 			.handle = handle,""",
      """			/* panfrost imports by prime fd only (sweet_drm_pan.c) */
