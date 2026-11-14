@@ -47,3 +47,24 @@ index e305f0d..01210ce 100644
  #  VM_RELEASE =     [ VM_BASE ]
  #  VM_DEV =         [ VM_BASE dynamic_codesigning pgzalloc ]
  #  VM_DEBUG =       [ VM_BASE dynamic_codesigning pgzalloc ]
+diff --git a/osfmk/vm/vm_compressor_backing_store.c b/osfmk/vm/vm_compressor_backing_store.c
+index a645750..e65e566 100644
+--- a/osfmk/vm/vm_compressor_backing_store.c
++++ b/osfmk/vm/vm_compressor_backing_store.c
+@@ -420,6 +420,16 @@ vm_swap_decrypt(c_segment_t c_seg)
+ uint64_t compressed_swap_chunk_size, vm_swapfile_hiwater_segs, swapfile_reclaim_threshold_segs, swapfile_reclam_minimum_segs;
+ extern bool memorystatus_swap_all_apps;
+ 
++#if CONFIG_JETSAM && !defined(VM_MAX_SWAP_FILE_SWAP_ENABLED_NUM)
++/*
++ * A510F: jetsam on a macOS-target build (MASTER.arm64.sweet); these come
++ * from the !XNU_TARGET_OS_OSX block above. App swap is never enabled here.
++ */
++#define VM_MAX_SWAP_FILE_SWAP_ENABLED_NUM VM_MAX_SWAP_FILE_NUM
++#define VM_MIN_SWAP_FILE_SWAP_ENABLED_NUM VM_MAX_SWAP_FILE_NUM
++#define VM_SWAP_MIN_VOLUME_CAPACITY (128ULL * (1ULL << 30))
++#endif
++
+ void
+ vm_compressor_swap_init_swap_file_limit(void)
+ {
