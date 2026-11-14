@@ -1129,3 +1129,11 @@ descriptors and of shader variants compiled at draw time (native fbfetch
 compiles per draw; 668 MHz starts faster). 0122: dsb sy before JS_HEAD_NEXT.
 App Library: no blurred backdrop, no category plates; the same in the
 emulated build (IMG_4766), so a separate, older issue: to trace next.
+Kernel 49 (f2ec4be, dsb): still 20 (= log cap) js0 INSTR_INVALID_PC
+failures, so not a missing barrier (the dsb stays). Failures came with
+native fbfetch + 668 MHz; App Library materials missing before and after.
+sweetgl: draw ring (last 64 draws: program, fbo, viewport, mode, count,
+whether the fragment shader reads the framebuffer); a failed submit marks
+it, the next draw logs it plus the fragment sources of fb-reading
+programs ("sweetgl: failed job: draws ...", "sweetgl: prog N fragment
+shader ..."), at most 6 dumps.

@@ -296,6 +296,12 @@ submit(struct drm_panfrost_submit *s)
 	uint32_t nr = ++submits, nf = failed_submits += kr != KERN_SUCCESS;
 	win_account(s->requirements, out[1], c1 - c0);
 	pthread_mutex_unlock(&lock);
+	if (kr != KERN_SUCCESS) {
+		extern void sweetgl_draw_ring_dump(void) __attribute__((weak));
+		if (sweetgl_draw_ring_dump) {
+			sweetgl_draw_ring_dump();
+		}
+	}
 	if (kr != KERN_SUCCESS && nf <= 20) {
 		sweet_drm_log("sweetgl: submit %u (jc 0x%llx req 0x%x, %u bos) failed: 0x%x status 0x%llx",
 		    nr, (unsigned long long)s->jc, s->requirements, s->bo_handle_count, kr,

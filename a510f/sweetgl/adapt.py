@@ -155,6 +155,146 @@ sgl_native_fbfetch(void)
 		}
 	}
 	if (!ok) {'''),
+    # draw recorder: the last 64 draws, logged (with the fragment shaders'
+    # sources) when a GPU job fails (sweet_drm_pan.c submit -> sweetgl_draw_ring_dump)
+    ('''/* before a draw: each unit holds what the program samples there, rect scale set */
+static bool
+draw_prep(GLenum mode, GLsizei count)
+{
+	GLint prog = 0, unit = -1, w = 0, h = 0, scale = -1;
+	bool fresh = false;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &prog);''',
+     '''/* A510F: ring of recent draws (adapt.py) */
+#define RING_N 64
+static struct ring_draw {
+	GLint prog, fbo, vw, vh;
+	GLenum mode;
+	GLsizei count;
+	uint32_t seq;
+} ring[RING_N];
+static uint32_t ring_seq;
+
+static void
+ring_note(GLint prog, GLenum mode, GLsizei count)
+{
+	struct ring_draw *r = &ring[ring_seq % RING_N];
+	GLint vp[4] = {0};
+	r->prog = prog;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &r->fbo);
+	glGetIntegerv(GL_VIEWPORT, vp);
+	r->vw = vp[2];
+	r->vh = vp[3];
+	r->mode = mode;
+	r->count = count;
+	r->seq = ++ring_seq;
+}
+
+static int
+shader_reads_fb(GLuint sh)
+{
+	GLint len = 0;
+	glGetShaderiv(sh, GL_SHADER_SOURCE_LENGTH, &len);
+	char *src = len > 0 ? malloc((size_t)len + 1) : NULL;
+	int r = 0;
+	if (src != NULL) {
+		glGetShaderSource(sh, len + 1, NULL, src);
+		r = strstr(src, "gl_LastFragData") != NULL ? 1 : strstr(src, "sgl_fb") != NULL ? 2 : 0;
+		free(src);
+	}
+	return r;
+}
+
+/*
+ * Called by sweet_drm_pan.c when a GPU job failed, i.e. inside Mesa's flush:
+ * only note it; ring_dump() runs at the start of the next draw.
+ */
+static volatile uint32_t ring_dump_at;
+void sweetgl_draw_ring_dump(void);
+void
+sweetgl_draw_ring_dump(void)
+{
+	if (ring_dump_at == 0) {
+		ring_dump_at = ring_seq;
+	}
+}
+
+static void
+ring_dump(void)
+{
+	static int dumps;
+	static GLint shown[16];
+	static int n_shown;
+	uint32_t upto = ring_dump_at;
+	ring_dump_at = 0;
+	if (dumps >= 6) {
+		return;
+	}
+	dumps++;
+	uint32_t first = upto > RING_N ? upto - RING_N : 0;
+	sweet_drm_log("sweetgl: failed job: draws %u..%u (prog fbo vpw x vph mode count fbread):", first + 1, upto);
+	for (uint32_t i = first; i < upto; i++) {
+		struct ring_draw *r = &ring[i % RING_N];
+		GLuint sh[4] = {0};
+		GLsizei n = 0;
+		int fbr = 0;
+		if (r->prog > 0) {
+			glGetAttachedShaders((GLuint)r->prog, 4, &n, sh);
+			for (GLsizei k = 0; k < n; k++) {
+				GLint type = 0;
+				glGetShaderiv(sh[k], GL_SHADER_TYPE, &type);
+				if (type == GL_FRAGMENT_SHADER) {
+					fbr = shader_reads_fb(sh[k]);
+				}
+			}
+		}
+		sweet_drm_log("sweetgl:   %u: prog %d fbo %d %dx%d mode %u count %d fbread %d",
+		    r->seq, r->prog, r->fbo, r->vw, r->vh, r->mode, r->count, fbr);
+	}
+	/* fragment shader sources of the programs that read the framebuffer, once each */
+	for (uint32_t i = first; i < upto; i++) {
+		struct ring_draw *r = &ring[i % RING_N];
+		bool seen = false;
+		for (int k = 0; k < n_shown; k++) {
+			seen |= shown[k] == r->prog;
+		}
+		if (seen || r->prog <= 0 || n_shown >= 16) {
+			continue;
+		}
+		GLuint sh[4] = {0};
+		GLsizei n = 0;
+		glGetAttachedShaders((GLuint)r->prog, 4, &n, sh);
+		for (GLsizei k = 0; k < n; k++) {
+			GLint type = 0, len = 0;
+			glGetShaderiv(sh[k], GL_SHADER_TYPE, &type);
+			if (type != GL_FRAGMENT_SHADER || shader_reads_fb(sh[k]) == 0) {
+				continue;
+			}
+			shown[n_shown++] = r->prog;
+			glGetShaderiv(sh[k], GL_SHADER_SOURCE_LENGTH, &len);
+			char *src = len > 0 ? malloc((size_t)len + 1) : NULL;
+			if (src != NULL) {
+				glGetShaderSource(sh[k], len + 1, NULL, src);
+				sweet_drm_log("sweetgl: prog %d fragment shader %u (%d bytes):", r->prog, sh[k], len);
+				for (GLint o = 0; o < len; o += 200) {
+					sweet_drm_log("sweetgl:   | %.200s", src + o);
+				}
+				free(src);
+			}
+		}
+	}
+}
+
+/* before a draw: each unit holds what the program samples there, rect scale set */
+static bool
+draw_prep(GLenum mode, GLsizei count)
+{
+	GLint prog = 0, unit = -1, w = 0, h = 0, scale = -1;
+	bool fresh = false;
+	if (ring_dump_at != 0) {
+		ring_dump();
+	}
+	glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+	ring_note(prog, mode, count);'''),
     ("""			.type = WINSYS_HANDLE_TYPE_KMS,
 			.handle = handle,""",
      """			/* panfrost imports by prime fd only (sweet_drm_pan.c) */
