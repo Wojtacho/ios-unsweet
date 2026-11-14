@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..fadd086
+index 0000000..aac61de
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,1274 @@
+@@ -0,0 +1,1313 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -476,6 +476,44 @@ index 0000000..fadd086
 +{
 +	uint8_t b[2] = { reg, val };
 +	return bat_xfer(false, b, 2, true, false);
++}
++
++/*
++ * A510F: GPU supply for the faster G3D clock (boot-arg sweetmaliclk, MHz,
++ * default 668; 400 or less keeps the 400 MHz bus clock). Samsung's table
++ * (gpu_exynos7580.c): 534 MHz at 1.0 V, 668-800 MHz at 1.1 V; BUCK4 of the
++ * S2MPU03 is the G3D rail (B4CTRL2 0x21, 400 mV + n x 6.25 mV). The voltage
++ * is raised here and read back; SweetMali switches the clock only after
++ * a510f_g3d_vsel shows it (SweetMali.cpp gpu_pll).
++ */
++extern volatile uint32_t a510f_g3d_vsel;
++extern uint32_t a510f_g3d_mhz;
++volatile uint32_t a510f_g3d_vsel;       /* BUCK4 vsel read back after the raise, 0 = not done */
++uint32_t a510f_g3d_mhz = 668;
++
++static void
++a510f_g3d_voltage(void)
++{
++	PE_parse_boot_argn("sweetmaliclk", &a510f_g3d_mhz, sizeof(a510f_g3d_mhz));
++	if (a510f_g3d_mhz <= 400) {
++		printf("A510F G3D: clock stays at 400 MHz (sweetmaliclk=%u)\n", a510f_g3d_mhz);
++		return;
++	}
++	uint8_t want = a510f_g3d_mhz > 534 ? 0x70 : 0x60;      /* 1.1 V / 1.0 V */
++	uint8_t v = 0xee;
++	int er = pmic_read(0x21, &v);
++	int ew = 0;
++	if (er == 0 && v < want) {
++		ew = pmic_write(0x21, want);
++		IOSleep(2);
++		v = 0xee;
++		er = pmic_read(0x21, &v);
++	}
++	if (er == 0 && ew == 0 && v >= want) {
++		a510f_g3d_vsel = v;
++	}
++	printf("A510F G3D: buck4 vsel 0x%02x (%u uV), want 0x%02x for %u MHz: write %d read %d -> %s\n",
++	    v, 400000u + v * 6250u, want, a510f_g3d_mhz, ew, er, a510f_g3d_vsel ? "ok" : "NOT raised, clock stays 400");
 +}
 +
 +/* ---- setup -------------------------------------------------------------- */
@@ -1027,6 +1065,7 @@ index 0000000..fadd086
 +
 +	if (bat_ok) {
 +		a510f_cpu_raise();
++		a510f_g3d_voltage();
 +	}
 +	a510f_gpu_probe(bat_ok);
 +

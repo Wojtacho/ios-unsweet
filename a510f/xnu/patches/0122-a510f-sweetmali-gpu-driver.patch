@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..9a2f2af
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
-@@ -0,0 +1,875 @@
+@@ -0,0 +1,933 @@
 +/*
 + * SweetMali: kernel driver for the A510F's Mali-T720 MP2 (Exynos 7580),
 + * shaped after Linux panfrost (drivers/gpu/drm/panfrost) so that Mesa's
@@ -113,6 +113,9 @@ index 0000000..9a2f2af
 +#define MALI_TIMEOUT_MS         2000
 +
 +static vm_offset_t g_gpu, g_pmu, g_g3d, g_top;
++static bool g_pll_on, g_pll_failed;
++extern "C" volatile uint32_t a510f_g3d_vsel;    /* a510f_touch.c */
++extern "C" uint32_t a510f_g3d_mhz;
 +static IOLock *g_lock;
 +static uint64_t *g_l0;
 +static uint64_t g_l0_pa, g_va_next = MALI_VA_BASE;
@@ -340,7 +343,61 @@ index 0000000..9a2f2af
 +	poll(g_g3d, 0x700, 0xffffffffu, 0, 10);
 +	wr(g_g3d, 0x800, rd(g_g3d, 0x800) | 0xb3u);
 +	wr(g_g3d, 0x900, rd(g_g3d, 0x900) | 0x11u);
++	g_pll_on = false;                                       /* back on the bus clock */
 +	return muxed;
++}
++
++/*
++ * A510F: the G3D PLL at Samsung's speeds (gpu_exynos7580.c gpu_set_clock,
++ * clk-exynos7580.c table_g3d, pll 2551x: CON0 0x100 = enable 31, locked 29,
++ * M [21:12], P [9:4], S [2:0], 26 MHz in; S-Boot left it at 266 MHz,
++ * 0xa010a0d1). As Samsung: park the GPU on aclk_g3d_400, set the PLL, wait
++ * for lock, switch back. Only once the touch thread has raised BUCK4 and
++ * read it back (a510f_g3d_vsel, a510f_touch.c), and only between jobs.
++ * Lock held, GPU idle.
++ */
++static void
++gpu_pll(void)
++{
++	if (g_pll_on || g_pll_failed || a510f_g3d_vsel == 0) {
++		return;
++	}
++	uint32_t mhz = a510f_g3d_mhz, m;
++	switch (mhz) {
++	case 800: m = 400; break;
++	case 734: m = 367; break;
++	case 668: m = 334; break;
++	case 534: m = 267; break;
++	default:
++		IOLog("SWEET MALI: G3D clock %u MHz not in Samsung's table, staying at 400\n", mhz);
++		g_pll_failed = true;
++		return;
++	}
++	uint32_t before = rd(g_g3d, 0x100);
++	wr(g_g3d, 0x208, rd(g_g3d, 0x208) | 1u);                /* park: mout_g3d = aclk_g3d_400 */
++	bool parked = poll(g_g3d, 0x408, 0x7, 0x2, 10);
++	wr(g_g3d, 0x600, (rd(g_g3d, 0x600) & ~0x77u) | (3u << 4));      /* aclk /1, pclk /4 */
++	poll(g_g3d, 0x700, 0xffffffffu, 0, 10);
++	uint32_t con = (1u << 31) | (m << 12) | (13u << 4);
++	bool locked = false, muxed = false;
++	if (parked) {
++		wr(g_g3d, 0x100, con);
++		locked = poll(g_g3d, 0x100, 1u << 29, 1u << 29, 5);
++	}
++	if (locked) {
++		wr(g_g3d, 0x200, rd(g_g3d, 0x200) | 1u);        /* mout_g3d_pll = PLL output */
++		wr(g_g3d, 0x208, rd(g_g3d, 0x208) & ~1u);       /* mout_g3d = g3d_pll */
++		muxed = poll(g_g3d, 0x408, 0x7, 0x1, 10);
++		if (!muxed) {
++			wr(g_g3d, 0x208, rd(g_g3d, 0x208) | 1u);        /* back to the bus clock */
++			poll(g_g3d, 0x408, 0x7, 0x2, 10);
++		}
++	}
++	g_pll_on = muxed;
++	g_pll_failed = !muxed;
++	IOLog("SWEET MALI: G3D clock %u MHz: pll 0x%08x -> 0x%08x (parked %d locked %d), mux stat 0x%x, div 0x%x, buck4 0x%x -> %s\n",
++	    mhz, before, rd(g_g3d, 0x100), parked, locked, rd(g_g3d, 0x408), rd(g_g3d, 0x600), a510f_g3d_vsel,
++	    muxed ? "on" : "FAILED, staying at 400");
 +}
 +
 +/* ---- jobs ------------------------------------------------------------- */
@@ -349,6 +406,7 @@ index 0000000..9a2f2af
 +static IOReturn
 +gpu_run(uint64_t jc, uint32_t req, uint32_t *status_out, uint64_t *us_out)
 +{
++	gpu_pll();                                      /* no job in flight: submits are synchronous */
 +	unsigned js = (req & 1) ? 0 : 1;                /* PANFROST_JD_REQ_FS -> slot 0 */
 +	uint32_t done = 1u << js, err = 1u << (16 + js);
 +	uint64_t t0 = mach_absolute_time();

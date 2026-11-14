@@ -1098,3 +1098,22 @@ delivers 3-6 flushes/s while interacting: the bottleneck is now producing
 frames (synchronous GPU submits, barrier->glFlush batches, Mesa CPU time,
 GPU at 400 MHz), not the copy. Next: measure GPU vs CPU time per second in
 sweetgl before choosing GPU clock / CPU clock / async submits.
+
+Timing boot (sweetgl 6856dca, kernel 47): per 2 s while interacting:
+GPU 0.4-1.5 s, in submit ~GPU + 2-5 %, CPU user 0.2-0.6 s, sys 0.3-1.7 s,
+100-750 jobs (half fragment) at 3-10 CA flushes/s, i.e. ~10 fragment
+passes per frame, max job 18-38 ms. GPU-bound, multiplied by passes.
+Panfrost has coherent framebuffer fetch on Midgard (pan_screen.c
+caps->fbfetch, fbfetch_coherent): sailfish's emulation (barrier = glFlush
+= end of render pass per fbfetch draw) is the pass multiplier.
+Round 1 of the fix:
+  - sweetgl 7033eaf: native gl_LastFragData (Mesa's own
+    EXT_shader_framebuffer_fetch), emulation only if a shader fails to
+    compile natively ("native framebuffer fetch failed, emulated").
+  - kernel: G3D at 668 MHz (sweetmaliclk, default 668; <=400 off). Touch
+    thread raises BUCK4 vsel to 0x70 (1.1 V, Samsung's table) and reads it
+    back ("A510F G3D: buck4 ..."); SweetMali's gpu_run then parks on
+    aclk_g3d_400, programs the G3D PLL (2551x: CON0 0x100, enable 31, lock
+    29, M[21:12] P[9:4] S[2:0]; 668 = P13 M334 S0 = 0x8014e0d0; S-Boot's
+    0xa010a0d1 = 266 MHz), waits for lock, muxes back (pclk /4)
+    ("SWEET MALI: G3D clock 668 MHz ... -> on").
