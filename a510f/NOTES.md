@@ -1091,3 +1091,10 @@ surfaces "display" at creation (backboardd, bpe 4, >= 1080x1920): never
 mapped write-combined (kernel map, SweetMali import in 0122), dc civac after
 the creation bzero. 0125 presents in SwapEnd again (complete frames), and
 sweetfb_hz=60 so every swap is copied.
+Build 47 (34882fd): display surfaces marked "(display, cached)" (ids 2, 4,
+334), copy now "map 16-20 us, cache inval 2.2-2.6 ms, scale 31-37 ms, flip
+wait 0.1-0.5 ms" (was 354-400 ms). User: seems better, not 30 fps. CA
+delivers 3-6 flushes/s while interacting: the bottleneck is now producing
+frames (synchronous GPU submits, barrier->glFlush batches, Mesa CPU time,
+GPU at 400 MHz), not the copy. Next: measure GPU vs CPU time per second in
+sweetgl before choosing GPU clock / CPU clock / async submits.
