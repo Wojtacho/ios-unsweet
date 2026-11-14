@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..9a2f2af
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
-@@ -0,0 +1,877 @@
+@@ -0,0 +1,875 @@
 +/*
 + * SweetMali: kernel driver for the A510F's Mali-T720 MP2 (Exynos 7580),
 + * shaped after Linux panfrost (drivers/gpu/drm/panfrost) so that Mesa's
@@ -780,14 +780,12 @@ index 0000000..9a2f2af
 +		char line[240], name[32];
 +		size_t n = args->structureInputSize < sizeof(line) - 1 ? args->structureInputSize : sizeof(line) - 1;
 +		memcpy(line, args->structureInput, n);
-+		line[n] = ' ';
-+		while (n > 0 && (line[n - 1] == '
-+' || line[n - 1] == ' ')) {
-+			line[--n] = ' ';
++		line[n] = '\0';
++		while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\0')) {
++			line[--n] = '\0';
 +		}
 +		proc_selfname(name, sizeof(name));
-+		IOLog("SWEETGL %s: %s
-+", name, line);
++		IOLog("SWEETGL %s: %s\n", name, line);
 +		return kIOReturnSuccess;
 +	}
 +	default:

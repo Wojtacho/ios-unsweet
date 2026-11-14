@@ -983,3 +983,13 @@ GPU step 3 started (2026-11-14): sweetgl for the Mali.
     sweetenv=NAME:VAR=VAL boot-arg (A510F ENV), for
     backboardd:DYLD_INSERT_LIBRARIES=/usr/lib/sweetgl.dylib. Do NOT set it
     before the dylib is on the phone: dyld aborts on a missing insert lib.
+
+sweetgl on the phone (2026-11-14): no space for a new file without a root
+rewrite, so the 64 MiB padded sweetgl.dylib (a510f-sweetgl artifact, sha256
+ed2b1c54...) was written in place over the first 64 MiB of
+/usr/standalone/update/ramdisk/arm64SURamDisk.dmg (update ramdisk, unused;
+108 MiB, one extent at volume block 2188582 = mmcblk0 4K block 2252070),
+user-approved. Header checked before (IM4P), read-back sha256 equal.
+boot-args: sweetenv=backboardd:DYLD_INSERT_LIBRARIES=<that path>,SWEETGL_TEST=1.
+Restoring the ramdisk needs the next root rebuild. 0122 LOG selector fixed
+(raw NUL/newline bytes in the source from the patch script, build of e4abe42).
