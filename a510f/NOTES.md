@@ -1012,3 +1012,15 @@ selftest_thread+0x34 / sweetgl_selftest+0x9c). Mesa 26.2 st_manager.c calls
 fscreen->get_param(ST_MANAGER_BROKEN_INVALIDATE) unconditionally; sailfish's
 frontend leaves it NULL. adapt.py now sets get_param (0) and
 set_background_context (no-op).
+
+Boot with get_param fix (sweetgl 555ffd05): no crash, lock screen, UI drawn by
+Mesa on the Mali. "GL_VERSION OpenGL ES 3.1 Mesa 26.2.4 / Mali-T720 MC2
+(Panfrost) / GLSL ES 3.10", selftest "MESA GLES ON THE MALI WORKS" (context
+734 ms, draw+readback 103 ms, second frame 0.87 ms), EAGLContext API 3 on
+Mesa, >10000 submits, 0 failed, CA flushes 5-12/s. User: works, but some
+rounded corners wrong, late updates, artifacts, slideshow, visible top-down
+update. Log: texImageIOSurface copy path (pitch % 64 != 0, A5xx rule from
+sailfish) "copy error 0x502" for A008/BGRA/RGBA, and EGLImageTargetTexture2D
+0x502 for 256x1 half-float and 90x58 pitch 384. copy_surface reads
+glGetError only after its upload, so 0x502 may be stale. Next boot:
+MESA_DEBUG=1 in backboardd (repack) for Mesa's own error messages.
