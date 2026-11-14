@@ -1080,3 +1080,14 @@ per pixel = an uncached access each. map(kIOMapDefaultCache) took the
 descriptor's own (write-combined) mode; now kIOMapCopybackCache. Also each
 panel row is built in a cached IOMallocData row and stored with one memcpy
 (in case the panel stores are the slow side).
+Build 46 (158c96d): faster updates but incomplete frames (background copy
+read surfaces CA was redrawing), and "scale 399499 us" even with a copyback
+mapping. Cause of all the slow copies: SweetMali's IOSurface import maps
+the surface into backboardd write-combined; on arm that sets the pages'
+cache attribute, so every mapping of them (kernel getBytesNoCopy, any new
+copyback map) becomes uncached. CA swaps between two surfaces (ids 2 and 4,
+1242x2208 BGRA bpr 5120, created by backboardd). Fix: 0126 marks such
+surfaces "display" at creation (backboardd, bpe 4, >= 1080x1920): never
+mapped write-combined (kernel map, SweetMali import in 0122), dc civac after
+the creation bzero. 0125 presents in SwapEnd again (complete frames), and
+sweetfb_hz=60 so every swap is copied.

@@ -1,0 +1,68 @@
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index 19e7e00..9c352ab 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -149,7 +149,7 @@ SweetSurface::kernelAddress()
+ 	}
+ 	IOLockLock(sweet_surface_lock);
+ 	if (kernelMap == NULL && memory != NULL) {
+-		kernelMap = memory->map(wrapped ? kIOMapDefaultCache : kIOMapWriteCombineCache);
++		kernelMap = memory->map((wrapped || display) ? kIOMapDefaultCache : kIOMapWriteCombineCache);
+ 	}
+ 	IOLockUnlock(sweet_surface_lock);
+ 	return kernelMap != NULL ? (uintptr_t)kernelMap->getVirtualAddress() : 0;
+@@ -807,6 +807,19 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 			bzero(mem->getBytesNoCopy(), s->allocSize);
+ 			s->memory = mem;
+ 			s->mapCache = kIOMapDefaultCache;
++			/* A510F: CoreAnimation's full-screen surfaces stay cacheable (SweetSurface.h) */
++			char creator[32];
++			proc_selfname(creator, sizeof(creator));
++			if (strcmp(creator, "backboardd") == 0 && s->bytesPerElement == 4 && s->planeCount <= 1 &&
++			    (uint64_t)s->width * s->height >= 1080ull * 1920ull) {
++				s->display = true;
++				/* the zeros must reach RAM before the GPU draws: no dirty lines left behind */
++				uintptr_t p = (uintptr_t)mem->getBytesNoCopy();
++				for (uintptr_t a = p & ~(uintptr_t)63; a < p + s->allocSize; a += 64) {
++					__asm__ volatile ("dc civac, %0" : : "r"(a) : "memory");
++				}
++				__asm__ volatile ("dsb sy" : : : "memory");
++			}
+ 			if (!sweet_surface_publish(s)) {
+ 				ret = kIOReturnNoResources;
+ 			}
+@@ -817,9 +830,10 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 	if (ret != kIOReturnSuccess || sweet_surface_creates_logged < 64 ||
+ 	    sweet_surface_new_kind(name, s->pixelFormat, s->bytesPerElement)) {
+ 		sweet_surface_creates_logged++;
+-		IOLog("SWEET SURF: %s create id %u %ux%u fmt 0x%x bpe %u bpr %u planes %u size %u keys %u -> 0x%x\n",
++		IOLog("SWEET SURF: %s create id %u %ux%u fmt 0x%x bpe %u bpr %u planes %u size %u keys %u -> 0x%x%s\n",
+ 		    name, s->id, s->width, s->height, s->pixelFormat, s->bytesPerElement,
+-		    s->bytesPerRow, s->planeCount, s->allocSize, props->getCount(), ret);
++		    s->bytesPerRow, s->planeCount, s->allocSize, props->getCount(), ret,
++		    s->display ? " (display, cached)" : "");
+ 	}
+ 	props->release();
+ 	if (ret != kIOReturnSuccess) {
+diff --git a/iokit/Kernel/arm/SweetSurface.h b/iokit/Kernel/arm/SweetSurface.h
+index e5d2df5..f4d0746 100644
+--- a/iokit/Kernel/arm/SweetSurface.h
++++ b/iokit/Kernel/arm/SweetSurface.h
+@@ -43,8 +43,16 @@ public:
+ 	uint32_t                  purgeable;    /* IOSurfaceSetPurgeable state */
+ 	uint32_t                  wrapDelta;    /* wrapped client memory: where it starts in its first page */
+ 	bool                      wrapped;      /* memory is a prepared range of a task (IOSurfaceWrapClient*) */
++	/*
++	 * A510F: a full-screen surface made by backboardd (CoreAnimation's
++	 * display surfaces): written only by the GPU, read by the panel copy.
++	 * Never mapped write-combined: on arm a write-combined mapping of the
++	 * pages turns every other mapping of them uncached too, the kernel's
++	 * included (panel copy ~350 ms per frame).
++	 */
++	bool                      display;
+ 
+-	bool init() APPLE_KEXT_OVERRIDE { values = NULL; purgeable = 0; wrapDelta = 0; wrapped = false; return OSObject::init(); }
++	bool init() APPLE_KEXT_OVERRIDE { values = NULL; purgeable = 0; wrapDelta = 0; wrapped = false; display = false; return OSObject::init(); }
+ 	void free() APPLE_KEXT_OVERRIDE;
+ 
+ 	/* Kernel address of the pixels (mapped on first use), or 0. */

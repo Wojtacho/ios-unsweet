@@ -728,7 +728,7 @@ index 0000000..9a2f2af
 +			return kIOReturnNotFound;
 +		}
 +		SweetMaliBO *bo = bo_make(s->memory, s->memory->getLength(), fTask,
-+		    s->wrapped ? kIOMapDefaultCache : kIOMapWriteCombineCache);
++		    (s->wrapped || s->display) ? kIOMapDefaultCache : kIOMapWriteCombineCache);
 +		if (bo != NULL) {
 +			bo->surface = s;
 +		} else {

@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 0f8e61a..0b4900a 100644
+index 0f8e61a..e8d36ca 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -82,6 +82,17 @@ enum {
@@ -120,17 +120,17 @@ index 0f8e61a..0b4900a 100644
 +	 */
 +	bool flush = fb->fDirty && !fb->fPresentBusy && fb->fPresentTimer != NULL &&
 +	    now - fb->fLastPresent >= fb->fMinGap;
++	if (flush) {
++		fb->fLastPresent = now;
++		fb->fPresentBusy = true;
++	}
++	IOLockUnlock(fb->fLock);
  	if (flush) {
 -		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
 -		if (rec != NULL) {
 -			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
 -			fb->fDirty = false;
 -		}
-+		fb->fLastPresent = now;
-+		fb->fPresentBusy = true;
-+	}
-+	IOLockUnlock(fb->fLock);
-+	if (flush) {
 +		fb->fPresentTimer->setTimeoutUS(1);
 +	}
 +	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
@@ -159,7 +159,7 @@ index 0f8e61a..0b4900a 100644
  }
  
  void
-@@ -412,8 +509,19 @@ static uint64_t sweet_fb_swap_count;
+@@ -412,19 +509,90 @@ static uint64_t sweet_fb_swap_count;
  void
  AppleCLCD::swap(const uint8_t *rec)
  {
@@ -171,15 +171,25 @@ index 0f8e61a..0b4900a 100644
 +	uint64_t now = mach_absolute_time();
  	IOLockLock(fLock);
  	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
-+	(void)now;
+-	fDirty = true;
 +	/*
-+	 * Build 44: presenting here made CoreAnimation wait ~340 ms per frame
-+	 * (worse than the old background copy): the vsync timer presents it.
++	 * Present here, in the swapping thread: CoreAnimation reuses a surface
++	 * once it is swapped, so a copy in the background read half-redrawn
++	 * frames (build 46). With display surfaces cached (SweetSurface
++	 * display) the copy is short. Frames left by the rate limit go through
++	 * the present workloop.
 +	 */
- 	fDirty = true;
++	bool due = !fPowerOff && now - fLastPresent >= fMinGap;
++	fDirty = !due;
++	if (due) {
++		fLastPresent = now;
++	}
  	IOLockUnlock(fLock);
++	if (due) {
++		present(rec);
++	}
  	if ((++sweet_fb_swap_count % 1000) == 0) {
-@@ -421,10 +529,61 @@ AppleCLCD::swap(const uint8_t *rec)
+ 		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
  	}
  }
  
@@ -241,7 +251,7 @@ index 0f8e61a..0b4900a 100644
  
  
  	if (!fConsolePaused) {
-@@ -460,7 +619,16 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -460,7 +628,16 @@ AppleCLCD::present(const uint8_t *rec)
  			OSSafeReleaseNULL(s);
  			continue;
  		}
@@ -259,7 +269,7 @@ index 0f8e61a..0b4900a 100644
  		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
  		sweet_fb_note_format(s->pixelFormat, bpe, s->width, s->height);
  		if (w <= 0 || h <= 0) {
-@@ -473,8 +641,17 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -473,8 +650,17 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -277,7 +287,7 @@ index 0f8e61a..0b4900a 100644
  			s->release();
  			continue;
  		}
-@@ -511,13 +688,41 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -511,13 +697,41 @@ AppleCLCD::present(const uint8_t *rec)
  		}
  		if (src != 0 && bpe == 4) {
  			for (int32_t y = 0; y < h; y++) {
@@ -320,7 +330,7 @@ index 0f8e61a..0b4900a 100644
  }
  
  /*
-@@ -547,7 +752,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -547,7 +761,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	if (!fFitCleared) {
  		/* Black pillarbox (the console text was there). */
  		for (uint32_t y = 0; y < fHeight; y++) {
@@ -329,7 +339,7 @@ index 0f8e61a..0b4900a 100644
  		}
  		fFitCleared = true;
  	}
-@@ -576,13 +781,31 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -576,13 +790,31 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  			continue;
  		}
  		const uint32_t *row = (const uint32_t *)(base + (uint64_t)(sy + ly) * s->bytesPerRow) + sx;
