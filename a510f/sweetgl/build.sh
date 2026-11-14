@@ -60,7 +60,7 @@ if [ ! -f "$B/build.ninja" ]; then
 fi
 # no Mesa frontend is enabled, so the default targets skip libmesa, glapi
 # and the state tracker: build every static library instead
-ninja -C "$B" $(ninja -C "$B" -t targets all | sed -n 's/^\(src\/[^:]*\.a\): .*//p' | sort -u)
+ninja -C "$B" $(ninja -C "$B" -t targets all | grep -o '^src/[^:]*[.]a' | sort -u)
 
 # every static library of the build; the linker takes what it needs
 LIBS=$(find "$B/src" -name '*.a' | sort)
