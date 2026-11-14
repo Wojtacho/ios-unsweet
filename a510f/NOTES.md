@@ -1178,3 +1178,15 @@ by 150-370 s): page thrashing. All IOSurfaces are wired
 RAM; GPU bos wired too and not counted. Kernel 51: "SWEET MEM: free, wired
 | surfaces n = MB | GPU buffers n = MB" every 10 s to find leak vs need;
 wake waits for CA's new frame (0.5 s fallback); fade one step per 6 vsyncs.
+
+Kernel 51 (43ebaf8) memory boot: SWEET MEM free 1669 MB before the UI,
+40 MB with the home screen, 18-60 MB in the wallpaper editor; wired ~410 MB,
+surfaces 13-38 = 45-164 MB, GPU buffers 76-168 = 55-89 MB, freed normally
+(no leak). RAM is used by ordinary process memory (SpringBoard, poster
+extensions, backboardd, daemons). No memorystatus/jetsam messages; launchd
+"Could not opt into 50 MB Jetsam high watermark: 22". Crash loops every
+~10 s: KonaSynthesizer, MacinTalkAUSP, SiriTTSSynthesizer (sig 6);
+AegirPoster / CollectionsPoster killed (sig 9) repeatedly in the editor.
+User: wake still shows the home screen before the lock screen (so CA
+itself sends that frame first); wallpaper set but glitches (widgets,
+doubled time), then grey lock screen / black home screen.
