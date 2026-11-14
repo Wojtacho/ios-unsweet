@@ -12,9 +12,9 @@ if [ $rc -ne 0 ]; then
 import re, sys
 log, name = sys.argv[1], sys.argv[2]
 lines = open(log, errors='replace').read().splitlines()
-errs = [l for l in lines if re.search(r'error|ERROR|Error|undefined|FAILED|not found|No such', l)]
+errs = [l[:400] for l in lines if re.search(r'error:|ERROR:|^Error|Undefined symbols|undefined symbol|^FAILED|^ld: |^  "_|not found|No such file|Traceback|Assertion', l)]
 def ann(title, body):
-    body = body[-3500:].replace('%', '%25').replace('\r', '').replace('\n', '%0A')
+    body = body[-3000:].replace('%', '%25').replace('\r', '').replace('\n', '%0A')
     print('::error title=%s::%s' % (title, body))
 for i in range(0, min(len(errs), 60), 12):
     ann('%s errors %d' % (name, i // 12 + 1), '\n'.join(errs[i:i + 12]))
