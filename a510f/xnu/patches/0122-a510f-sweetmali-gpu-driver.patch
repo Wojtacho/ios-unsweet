@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..9a2f2af
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
-@@ -0,0 +1,1008 @@
+@@ -0,0 +1,1027 @@
 +/*
 + * SweetMali: kernel driver for the A510F's Mali-T720 MP2 (Exynos 7580),
 + * shaped after Linux panfrost (drivers/gpu/drm/panfrost) so that Mesa's
@@ -119,6 +119,15 @@ index 0000000..9a2f2af
 +static IOLock *g_lock;
 +static uint64_t *g_l0;
 +static uint64_t g_l0_pa;
++static SInt64 g_bo_bytes;
++static SInt32 g_bo_count;
++extern "C" void sweet_mali_bo_stats(uint64_t *bytes, uint32_t *count);
++extern "C" void
++sweet_mali_bo_stats(uint64_t *bytes, uint32_t *count)
++{
++	*bytes = (uint64_t)g_bo_bytes;
++	*count = (uint32_t)g_bo_count;
++}
 +
 +/*
 + * GPU VA allocator (A510F): 64 KB granules, first fit from the bottom, freed
@@ -541,7 +550,8 @@ index 0000000..9a2f2af
 +	IOMemoryMap        *userMap;
 +	SweetSurface       *surface;
 +	uint64_t            gpuVA, size;
-+	bool init() APPLE_KEXT_OVERRIDE { md = NULL; userMap = NULL; surface = NULL; gpuVA = 0; size = 0; return OSObject::init(); }
++	bool                owned;          /* allocated by bo_new (counted in g_bo_bytes) */
++	bool init() APPLE_KEXT_OVERRIDE { md = NULL; userMap = NULL; surface = NULL; gpuVA = 0; size = 0; owned = false; return OSObject::init(); }
 +	void free() APPLE_KEXT_OVERRIDE;
 +};
 +
@@ -555,6 +565,10 @@ index 0000000..9a2f2af
 +		gpu_unmap(gpuVA, size);
 +		va_free(gpuVA, size);
 +		IOLockUnlock(g_lock);
++	}
++	if (owned) {
++		OSAddAtomic64(-(SInt64)size, &g_bo_bytes);
++		OSDecrementAtomic(&g_bo_count);
 +	}
 +	OSSafeReleaseNULL(userMap);
 +	OSSafeReleaseNULL(md);
@@ -618,6 +632,11 @@ index 0000000..9a2f2af
 +	dc_civac(md->getBytesNoCopy(), size);
 +	SweetMaliBO *bo = bo_make(md, size, task, kIOMapWriteCombineCache);
 +	md->release();
++	if (bo != NULL) {
++		bo->owned = true;
++		OSAddAtomic64((SInt64)bo->size, &g_bo_bytes);
++		OSIncrementAtomic(&g_bo_count);
++	}
 +	return bo;
 +}
 +

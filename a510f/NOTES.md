@@ -1167,3 +1167,14 @@ Screen-off fade (user: laggy, drawn top to bottom): the vsync timer halved
 the shown, write-combined buffer in place. 0125: with the double buffer the
 present workloop redraws the last frame at 1/2, 1/4, 1/8 (fDim) into the
 hidden buffer and flips, then black.
+
+Kernel 50 (5cbb8b8): no backboardd crash, no CREATE_BO failure (VA reuse
+works). User: power-off "instant" (fade steps back to back), wake shows the
+home screen before the lock screen (old frame redrawn on display on),
+wallpaper editor renders previews but then extreme lag. Log: backboardd sys
+CPU up to 6.9 s per 8 s, eMMC reads 11.8 GB by 444 s (other boots ~2.5 GB
+by 150-370 s): page thrashing. All IOSurfaces are wired
+(IOBufferMemoryDescriptor), cap SWEET_SURFACE_WIRED_MAX 1.5 GB on 1.7 GB
+RAM; GPU bos wired too and not counted. Kernel 51: "SWEET MEM: free, wired
+| surfaces n = MB | GPU buffers n = MB" every 10 s to find leak vs need;
+wake waits for CA's new frame (0.5 s fallback); fade one step per 6 vsyncs.
