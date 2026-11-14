@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..9a2f2af
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
-@@ -0,0 +1,941 @@
+@@ -0,0 +1,1008 @@
 +/*
 + * SweetMali: kernel driver for the A510F's Mali-T720 MP2 (Exynos 7580),
 + * shaped after Linux panfrost (drivers/gpu/drm/panfrost) so that Mesa's
@@ -109,7 +109,7 @@ index 0000000..9a2f2af
 +#define MALI_PTE_TABLE          3ull
 +#define MALI_VA_BASE            0x10000000ull   /* GPU VAs handed out from here (MMU_FEATURES: 33-bit VA) */
 +#define MALI_VA_LIMIT           0x1f0000000ull
-+#define MALI_MAX_TABLES         512
++#define MALI_MAX_TABLES         2048    /* each L3 table maps 2 MB */
 +#define MALI_TIMEOUT_MS         2000
 +
 +static vm_offset_t g_gpu, g_pmu, g_g3d, g_top;
@@ -118,7 +118,64 @@ index 0000000..9a2f2af
 +extern "C" uint32_t a510f_g3d_mhz;
 +static IOLock *g_lock;
 +static uint64_t *g_l0;
-+static uint64_t g_l0_pa, g_va_next = MALI_VA_BASE;
++static uint64_t g_l0_pa;
++
++/*
++ * GPU VA allocator (A510F): 64 KB granules, first fit from the bottom, freed
++ * ranges reused. A bump pointer never gave VA back: Mesa's bo churn (and
++ * IOSurface imports) used up the page-table pool (512 tables = 1 GB of VA)
++ * and every CREATE_BO failed with no memory, crashing backboardd and
++ * leaving the restarted one without a GPU screen. Lock held.
++ */
++#define VA_GRAN         0x10000ull
++#define VA_SLOTS        ((MALI_VA_LIMIT - MALI_VA_BASE) / VA_GRAN)
++static uint64_t g_va_bits[(VA_SLOTS + 63) / 64];
++static uint64_t g_va_used;      /* granules in use */
++
++static inline bool
++va_bit(uint64_t i)
++{
++	return (g_va_bits[i / 64] >> (i % 64)) & 1;
++}
++
++static void
++va_set(uint64_t first, uint64_t n, bool on)
++{
++	for (uint64_t i = first; i < first + n; i++) {
++		if (on) {
++			g_va_bits[i / 64] |= 1ull << (i % 64);
++		} else {
++			g_va_bits[i / 64] &= ~(1ull << (i % 64));
++		}
++	}
++	g_va_used = on ? g_va_used + n : g_va_used - n;
++}
++
++static uint64_t
++va_alloc(uint64_t size)
++{
++	uint64_t n = (size + VA_GRAN - 1) / VA_GRAN, run = 0;
++	for (uint64_t i = 0; i < VA_SLOTS; i++) {
++		if (g_va_bits[i / 64] == ~0ull && i % 64 == 0) {
++			i += 63;
++			run = 0;
++			continue;
++		}
++		run = va_bit(i) ? 0 : run + 1;
++		if (run == n) {
++			uint64_t first = i + 1 - n;
++			va_set(first, n, true);
++			return MALI_VA_BASE + first * VA_GRAN;
++		}
++	}
++	return 0;
++}
++
++static void
++va_free(uint64_t va, uint64_t size)
++{
++	va_set((va - MALI_VA_BASE) / VA_GRAN, (size + VA_GRAN - 1) / VA_GRAN, false);
++}
 +static uint32_t g_shader, g_tiler, g_l2;
 +static bool g_ready;
 +static struct { uint64_t pa; uint64_t *va; } g_tables[MALI_MAX_TABLES];
@@ -496,6 +553,7 @@ index 0000000..9a2f2af
 +	if (gpuVA != 0) {
 +		IOLockLock(g_lock);
 +		gpu_unmap(gpuVA, size);
++		va_free(gpuVA, size);
 +		IOLockUnlock(g_lock);
 +	}
 +	OSSafeReleaseNULL(userMap);
@@ -517,11 +575,20 @@ index 0000000..9a2f2af
 +	md->retain();
 +	bo->size = (size + 4095) & ~4095ull;
 +	IOLockLock(g_lock);
-+	uint64_t va = (g_va_next + 0xffff) & ~0xffffull;        /* 64 KB aligned */
-+	bool ok = va + bo->size <= MALI_VA_LIMIT && gpu_map(va, md, bo->size);
++	uint64_t va = va_alloc(bo->size);
++	bool ok = va != 0 && gpu_map(va, md, bo->size);
 +	if (ok) {
 +		bo->gpuVA = va;
-+		g_va_next = va + bo->size;
++	} else if (va != 0) {
++		gpu_unmap(va, bo->size);        /* the pages mapped before it failed */
++		va_free(va, bo->size);
++	}
++	if (!ok) {
++		static unsigned logged;
++		if (logged++ < 10) {
++			IOLog("SWEET MALI: no GPU mapping for %llu bytes: %s, VA in use %llu MB, %u page tables\n",
++			    bo->size, va == 0 ? "VA full" : "page tables full", g_va_used * VA_GRAN >> 20, g_ntables);
++		}
 +	}
 +	IOLockUnlock(g_lock);
 +	if (ok && task != NULL) {

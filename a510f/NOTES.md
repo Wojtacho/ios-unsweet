@@ -1151,3 +1151,19 @@ installed here, and their "unexpected QuartzCore" log was dropped (logged
 before SweetMali was opened). sweetgl: sgl_qc_delta() detects 0 / 0x4000
 from emit_filter's prologue and adds it to both slides; sweet_drm_log opens
 SweetMali itself when needed. The draw-ring boot had no GPU job failures.
+
+QuartzCore-shift boot (sweetgl 02d42d88): "QuartzCore at sailfish's
+addresses + 0x4000", texture functions 0x2d sgl_vcm, 0x14 sgl_cm4, 0x26
+sgl_nop, 0x27 sgl_vblur installed. User: lock-screen clock back and white,
+App Library background back; home-screen folders still without their
+backdrop. "shader 22: native framebuffer fetch failed, emulated: ok".
+Wallpaper changes: CREATE_BO failed (kIOReturnNoMemory) repeatedly, then
+backboardd SIGSEGV; the restarted one: CREATE_BO 32 MiB failed, "panfrost
+screen creation failed", "no Mesa context, Apple's EAGL instead" (CPU,
+no materials). Cause: SweetMali's GPU VA was a bump pointer (never
+reused), so the 512-table pool (1 GB of VA) ran out. 0122: 64 KB-granule
+first-fit VA allocator with reuse, 2048 tables, a log line on failure.
+Screen-off fade (user: laggy, drawn top to bottom): the vsync timer halved
+the shown, write-combined buffer in place. 0125: with the double buffer the
+present workloop redraws the last frame at 1/2, 1/4, 1/8 (fDim) into the
+hidden buffer and flips, then black.
