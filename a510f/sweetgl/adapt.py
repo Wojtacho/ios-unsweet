@@ -50,6 +50,34 @@ edit('sweetgl.c', [
      'setenv("MESA_GLES_VERSION_OVERRIDE", "3.1", 0);'),
 ])
 
+# Mesa 26.2's st_api_create_context calls fscreen->get_param without a NULL
+# check (st_manager.c: invalidate_on_gl_viewport); sailfish's frontend leaves
+# it unset -> jump to 0 in the first context creation (backboardd crash
+# loop, boot of build 40). glthread would call set_background_context.
+edit('sweetgl.c', [
+    ("""struct sweetgl_ctx {""",
+     """static int
+sweetgl_fscreen_get_param(struct pipe_frontend_screen *fs, enum st_manager_param param)
+{
+	(void)fs;
+	(void)param;
+	return 0;       /* ST_MANAGER_BROKEN_INVALIDATE: no */
+}
+
+static void
+sweetgl_fscreen_set_background_context(struct st_context *st, struct util_queue_monitoring *q)
+{
+	(void)st;
+	(void)q;
+}
+
+struct sweetgl_ctx {"""),
+    ("""				sweetgl_image_hooks(fscreen);""",
+     """				fscreen->get_param = sweetgl_fscreen_get_param;
+				fscreen->set_background_context = sweetgl_fscreen_set_background_context;
+				sweetgl_image_hooks(fscreen);"""),
+])
+
 edit('eagl.c', [
     ("""			.type = WINSYS_HANDLE_TYPE_KMS,
 			.handle = handle,""",

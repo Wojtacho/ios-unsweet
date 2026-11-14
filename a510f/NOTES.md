@@ -1003,3 +1003,12 @@ are 0 = no DYLD_* variables. Our AMFI policy is named "SWEET AMFI" and has no
 policy_syscall. 0124 registers a second policy "AMFI" answering call 90 with
 0x7b (at paths, path vars, fallback, print, failed insertion allowed,
 interposing). Log line: "A510F AMFI: dyld policy registered (0)".
+
+Boot of build 40 (0124): dyld now loads sweetgl ("SWEETGL backboardd:
+sweetgl: screen Mali-T720 MC2 (Panfrost) (Mesa)"), but backboardd crashes
+~1 s later, 40+ restarts (very long boot, lag): CRASH pc 0x0, lr =
+st_api_create_context+0x290 (sweetgl base 0x1074f0000, from
+selftest_thread+0x34 / sweetgl_selftest+0x9c). Mesa 26.2 st_manager.c calls
+fscreen->get_param(ST_MANAGER_BROKEN_INVALIDATE) unconditionally; sailfish's
+frontend leaves it NULL. adapt.py now sets get_param (0) and
+set_background_context (no-op).
