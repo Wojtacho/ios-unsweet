@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 0f8e61a..7447d5f 100644
+index 0f8e61a..732fae4 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -82,6 +82,17 @@ enum {
@@ -189,7 +189,23 @@ index 0f8e61a..7447d5f 100644
  
  
  	if (!fConsolePaused) {
-@@ -473,6 +598,10 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -460,7 +585,14 @@ AppleCLCD::present(const uint8_t *rec)
+ 			OSSafeReleaseNULL(s);
+ 			continue;
+ 		}
+-		uintptr_t src = s->kernelAddress();
++		/*
++		 * A510F: kernelAddress() is a write-combined mapping, so every CPU
++		 * read of it goes to RAM uncached (324 ms per 1242x2208 frame). Read
++		 * through a cached mapping instead; the dc civac below drops stale
++		 * lines first.
++		 */
++		IOMemoryMap *rmap = s->memory != NULL ? s->memory->map(kIOMapDefaultCache) : NULL;
++		uintptr_t src = rmap != NULL ? (uintptr_t)rmap->getVirtualAddress() : s->kernelAddress();
+ 		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
+ 		sweet_fb_note_format(s->pixelFormat, bpe, s->width, s->height);
+ 		if (w <= 0 || h <= 0) {
+@@ -473,8 +605,13 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -199,8 +215,11 @@ index 0f8e61a..7447d5f 100644
 +		}
  		if (fFit) {
  			presentFit(s, src, bpe, sx, sy, dx, dy, w, h);
++			OSSafeReleaseNULL(rmap);
  			s->release();
-@@ -511,13 +640,31 @@ AppleCLCD::present(const uint8_t *rec)
+ 			continue;
+ 		}
+@@ -511,13 +648,32 @@ AppleCLCD::present(const uint8_t *rec)
  		}
  		if (src != 0 && bpe == 4) {
  			for (int32_t y = 0; y < h; y++) {
@@ -210,6 +229,7 @@ index 0f8e61a..7447d5f 100644
  				    (size_t)w * 4);
  			}
  		}
++		OSSafeReleaseNULL(rmap);
  		s->release();
  	}
 +	if (fFlip && fDraw != fBufVA[fShown]) {
@@ -233,7 +253,7 @@ index 0f8e61a..7447d5f 100644
  }
  
  /*
-@@ -547,7 +694,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -547,7 +703,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	if (!fFitCleared) {
  		/* Black pillarbox (the console text was there). */
  		for (uint32_t y = 0; y < fHeight; y++) {
@@ -242,7 +262,7 @@ index 0f8e61a..7447d5f 100644
  		}
  		fFitCleared = true;
  	}
-@@ -576,7 +723,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -576,7 +732,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  			continue;
  		}
  		const uint32_t *row = (const uint32_t *)(base + (uint64_t)(sy + ly) * s->bytesPerRow) + sx;

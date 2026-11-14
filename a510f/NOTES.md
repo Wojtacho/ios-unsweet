@@ -1059,3 +1059,10 @@ failed with 3 @vm_kern.c:178" from ml_io_map_wcomb(0x41000000, 8 MiB): the
 io_map range is too small for 8 MiB (sailfish enlarged it in 0165). 0125
 now maps buffer 1 like the boot framebuffer surface: IOMemoryDescriptor::
 withPhysicalAddress + map(kIOMapWriteCombineCache).
+Build 43 (a0068f9): double buffer works (no sweep, no mixed frames) but
+"SWEET FB: 300 presents, avg 323865 us max 374078 us, flip waits 18": the
+copy reads SweetSurface::kernelAddress(), a write-combined mapping, so every
+source read is uncached; with present-on-swap CA blocked on it -> CA 3
+flushes/s (GPU finish ~50 us). The old 10 Hz copy cost the same, but in the
+background. 0125 now reads each layer through memory->map(kIOMapDefaultCache)
+(cached; dc civac first), released after the copy.
