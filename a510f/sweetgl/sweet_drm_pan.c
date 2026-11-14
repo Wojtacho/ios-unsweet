@@ -32,6 +32,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
+#include <mach/mach_time.h>
 #include <IOKit/IOKitLib.h>
 
 #include "xf86drm.h"
@@ -62,6 +64,67 @@ static uint32_t nbos;
 static struct prime primes[64];
 static uint32_t next_syncobj = 1;
 static uint32_t submits, failed_submits;
+
+/*
+ * Where frame time goes (logged every 2 s of activity): GPU job time as the
+ * kernel measured it, wall time spent in the submit call (the job plus
+ * kernel overhead; the CPU waits for it, submits are synchronous), the
+ * process's CPU time (user, system: includes the panel copy in SwapEnd) and
+ * the jobs by kind. Lock held.
+ */
+static uint64_t win_t0, win_job_us, win_call_ns, win_max_us;
+static uint32_t win_n, win_frag;
+static struct rusage win_ru;
+
+static uint64_t
+now_ns(void)
+{
+	static mach_timebase_info_data_t tb;
+	if (tb.denom == 0) {
+		mach_timebase_info(&tb);
+	}
+	return mach_absolute_time() * tb.numer / tb.denom;
+}
+
+static uint64_t
+tv_us(struct timeval t)
+{
+	return (uint64_t)t.tv_sec * 1000000u + (uint64_t)t.tv_usec;
+}
+
+static void
+win_account(uint32_t req, uint64_t job_us, uint64_t call_ns)
+{
+	uint64_t t = now_ns();
+	if (win_t0 == 0) {
+		win_t0 = t;
+		getrusage(RUSAGE_SELF, &win_ru);
+	}
+	win_n++;
+	win_frag += (req & PANFROST_JD_REQ_FS) != 0;
+	win_job_us += job_us;
+	win_call_ns += call_ns;
+	if (job_us > win_max_us) {
+		win_max_us = job_us;
+	}
+	uint64_t span = t - win_t0;
+	if (span < 2000000000ull) {
+		return;
+	}
+	struct rusage ru;
+	getrusage(RUSAGE_SELF, &ru);
+	uint64_t usr = tv_us(ru.ru_utime) - tv_us(win_ru.ru_utime);
+	uint64_t sys = tv_us(ru.ru_stime) - tv_us(win_ru.ru_stime);
+	uint64_t span_ms = span / 1000000u;
+	sweet_drm_log("sweetgl: time %llu ms: %u jobs (%u fragment), GPU %llu ms (max job %llu ms), "
+	    "in submit %llu ms, CPU user %llu ms sys %llu ms",
+	    (unsigned long long)span_ms, win_n, win_frag, (unsigned long long)(win_job_us / 1000),
+	    (unsigned long long)(win_max_us / 1000), (unsigned long long)(win_call_ns / 1000000u),
+	    (unsigned long long)(usr / 1000), (unsigned long long)(sys / 1000));
+	win_t0 = 0;
+	win_n = win_frag = 0;
+	win_job_us = win_call_ns = win_max_us = 0;
+}
 
 void
 sweet_drm_log(const char *fmt, ...)
@@ -226,9 +289,12 @@ submit(struct drm_panfrost_submit *s)
 {
 	uint64_t in[2] = {s->jc, s->requirements}, out[2] = {0};
 	uint32_t n = 2;
+	uint64_t c0 = now_ns();
 	kern_return_t kr = IOConnectCallScalarMethod(conn, SEL_SUBMIT, in, 2, out, &n);
+	uint64_t c1 = now_ns();
 	pthread_mutex_lock(&lock);
 	uint32_t nr = ++submits, nf = failed_submits += kr != KERN_SUCCESS;
+	win_account(s->requirements, out[1], c1 - c0);
 	pthread_mutex_unlock(&lock);
 	if (kr != KERN_SUCCESS && nf <= 20) {
 		sweet_drm_log("sweetgl: submit %u (jc 0x%llx req 0x%x, %u bos) failed: 0x%x status 0x%llx",
