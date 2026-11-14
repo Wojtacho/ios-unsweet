@@ -498,6 +498,24 @@ int drmSyncobjExportSyncFile(int fd, uint32_t h, int *s) { (void)fd; (void)h; *s
 int drmSyncobjReset(int fd, const uint32_t *h, uint32_t n) { (void)fd; (void)h; (void)n; return 0; }
 int drmSyncobjSignal(int fd, const uint32_t *h, uint32_t n) { (void)fd; (void)h; (void)n; return 0; }
 
+int drmSyncobjTimelineSignal(int fd, const uint32_t *h, uint64_t *p, uint32_t n) { (void)fd; (void)h; (void)p; (void)n; return 0; }
+int drmSyncobjTransfer(int fd, uint32_t d, uint64_t dp, uint32_t s, uint64_t sp, uint32_t f)
+{ (void)fd; (void)d; (void)dp; (void)s; (void)sp; (void)f; return 0; }
+
+int
+drmSyncobjQuery2(int fd, uint32_t *h, uint64_t *p, uint32_t n, uint32_t f)
+{
+	(void)fd;
+	(void)h;
+	(void)f;
+	for (uint32_t i = 0; i < n && p; i++) {
+		p[i] = UINT64_MAX;                      /* every point signalled */
+	}
+	return 0;
+}
+
+int drmSyncobjQuery(int fd, uint32_t *h, uint64_t *p, uint32_t n) { return drmSyncobjQuery2(fd, h, p, n, 0); }
+
 int
 drmSyncobjWait(int fd, uint32_t *h, unsigned n, int64_t t, unsigned f, uint32_t *s)
 {
