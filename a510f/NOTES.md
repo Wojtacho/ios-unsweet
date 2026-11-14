@@ -965,3 +965,5 @@ GPU milestone 2c (this build): SweetMali runs a FRAGMENT job after the self-test
 that clears a 64x64 RGBA8 target to 0xffc08040 (single framebuffer descriptor,
 tiler disabled, T720 polygon-list magic 0xa0000000) and checks all 4096 pixels.
 Boot line: "SWEET MALI: draw test: ... -> THE GPU DREW" or "FAILED".
+Confirmed on the phone (build 38): "draw test: fragment job 0x0 in 29 us |
+pixels 4096/4096 = 0xffc08040, 0 untouched -> THE GPU DREW". First try.
