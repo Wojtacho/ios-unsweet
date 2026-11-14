@@ -1,0 +1,250 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 0f8e61a..fb5fd99 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -82,6 +82,18 @@ enum {
+ #define SWEET_FB_LOGICAL_W              1242
+ #define SWEET_FB_LOGICAL_H              2208
+ #define SWEET_FB_FORMAT_BGRA            0x42475241
++/* A510F panel buffers and DECON (a510f/shim/shim.c, decon_7580 regs) */
++#define A510F_FB_A                      0x40800000ull
++#define A510F_FB_B                      0x41000000ull
++#define A510F_FB_SIZE                   0x800000ull
++#define A510F_DECON_PA                  0x14830000ull
++#define A510F_DECON_SHADOWCON           0x0030
++#define A510F_DECON_UPDATE              0x0710
++#define A510F_DECON_ADD0                0x0880
++#define A510F_SHADOWCON_WIN0_PROTECT    (1u << 8)
++#define A510F_UPDATE_STANDALONE         (1u << 0)
++extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+ 
+ class IOMobileFramebuffer : public IOService {
+ 	OSDeclareDefaultStructors(IOMobileFramebuffer);
+@@ -125,6 +137,28 @@ public:
+ 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	uint32_t      fFadeStep;      /* fade-out steps done while off */
++	/*
++	 * A510F (boot-arg sweetfb_flip, default 1): double-buffered panel. Each
++	 * frame is drawn into the buffer DECON is not showing, then window 0's
++	 * start address is switched to it (shadow-protected VIDW_ADD0 + standalone
++	 * update, as the shim's fb_move), so a refresh never shows a half-drawn
++	 * frame. Buffer 0 is the boot framebuffer (0x40800000, console/panics),
++	 * buffer 1 the free 8 MiB below S-Boot's ramdisk at 0x41000000.
++	 */
++	bool          fFlip;
++	uint64_t      fBufPA[2];
++	uintptr_t     fBufVA[2];
++	uint32_t      fShown;         /* buffer DECON scans out */
++	uintptr_t     fDraw;          /* buffer being drawn by present() */
++	vm_offset_t   fDecon;
++	IOLock       *fPresentLock;   /* one present at a time (swap thread, vsync) */
++	uint64_t      fMinGap;        /* abs time between presents (sweetfb_hz) */
++	uint64_t      fLastPresent;
++	uint64_t      fPresents, fPresentAbs, fPresentMaxAbs, fFlipWaits;
++
++	uintptr_t frontVA() const { return fFlip ? fBufVA[fShown] : fPixels; }
++	void flipTo(uint32_t idx);
++	bool waitFlipped(void);
+ 
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void addClient(IOMobileFramebufferUserClient *client);
+@@ -244,6 +278,30 @@ AppleCLCD::start(IOService *provider)
+ 	uint32_t hz = 10;
+ 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
++	nanoseconds_to_absolutetime((hz == 0 || hz >= 60) ? 0 : 1000000000ull / hz, &fMinGap);
++	fPresentLock = IOLockAlloc();
++	fBufPA[0] = fPhys;
++	fBufVA[0] = fPixels;
++	fDraw = fPixels;
++	uint32_t flip = 1;
++	PE_parse_boot_argn("sweetfb_flip", &flip, sizeof(flip));
++	if (fPresentLock == NULL) {
++		IOLog("SWEET FB: no present lock\n");
++		return false;
++	}
++	if (flip && fPhys == A510F_FB_A && (uint64_t)fRowBytes * fHeight <= A510F_FB_SIZE) {
++		fDecon = ml_io_map(A510F_DECON_PA, 0x1000);
++		fBufPA[1] = A510F_FB_B;
++		fBufVA[1] = ml_io_map_wcomb(A510F_FB_B, A510F_FB_SIZE);
++		if (fDecon != 0 && fBufVA[1] != 0 &&
++		    *(volatile uint32_t *)(fDecon + A510F_DECON_ADD0) == (uint32_t)fPhys) {
++			memcpy((void *)fBufVA[1], (const void *)fPixels, (size_t)fRowBytes * fHeight);
++			fFlip = true;
++		}
++		IOLog("SWEET FB: double buffer %s (DECON ADD0 0x%x, back 0x%llx), present at most %u Hz\n",
++		    fFlip ? "on" : "OFF", fDecon ? *(volatile uint32_t *)(fDecon + A510F_DECON_ADD0) : 0,
++		    (unsigned long long)A510F_FB_B, hz);
++	}
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+@@ -293,7 +351,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		IOLockUnlock(fb->fLock);
+ 		if (step <= 6) {
+ 			for (uint32_t y = 0; y < fb->fHeight; y++) {
+-				volatile uint32_t *row = (volatile uint32_t *)(fb->fPixels + (uint64_t)y * fb->fRowBytes);
++				volatile uint32_t *row = (volatile uint32_t *)(fb->frontVA() + (uint64_t)y * fb->fRowBytes);
+ 				for (uint32_t x = 0; x < fb->fWidth; x++) {
+ 					row[x] = step < 6 ? (row[x] >> 1) & 0x7f7f7f7f : 0;
+ 				}
+@@ -302,9 +360,11 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 		return;
+ 	}
+-	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
++	/* frames a swap left pending (too soon after the last present) */
++	bool flush = fb->fDirty && now - fb->fLastPresent >= fb->fMinGap;
+ 	uint8_t *rec = NULL;
+ 	if (flush) {
++		fb->fLastPresent = now;
+ 		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+ 		if (rec != NULL) {
+ 			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
+@@ -412,19 +472,81 @@ static uint64_t sweet_fb_swap_count;
+ void
+ AppleCLCD::swap(const uint8_t *rec)
+ {
++	/*
++	 * A510F: present in the swapping thread when due, so CoreAnimation does
++	 * not render into the surface while it is being read (mixed frames);
++	 * otherwise leave it for the vsync timer.
++	 */
++	uint64_t now = mach_absolute_time();
+ 	IOLockLock(fLock);
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+-	fDirty = true;
++	bool due = !fPowerOff && now - fLastPresent >= fMinGap;
++	fDirty = !due;
++	if (due) {
++		fLastPresent = now;
++	}
+ 	IOLockUnlock(fLock);
++	if (due) {
++		present(rec);
++	}
+ 	if ((++sweet_fb_swap_count % 1000) == 0) {
+ 		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
+ 	}
+ }
+ 
++static void
++sweet_fb_dc_civac(uintptr_t p, uint64_t len)
++{
++	for (uintptr_t a = p & ~(uintptr_t)63, end = p + len; a < end; a += 64) {
++		__asm__ volatile ("dc civac, %0" : : "r"(a) : "memory");
++	}
++	__asm__ volatile ("dsb sy" : : : "memory");
++}
++
++void
++AppleCLCD::flipTo(uint32_t idx)
++{
++	volatile uint32_t *shadow = (volatile uint32_t *)(fDecon + A510F_DECON_SHADOWCON);
++	volatile uint32_t *add0 = (volatile uint32_t *)(fDecon + A510F_DECON_ADD0);
++	volatile uint32_t *update = (volatile uint32_t *)(fDecon + A510F_DECON_UPDATE);
++	__asm__ volatile ("dsb sy" : : : "memory");
++	*shadow = *shadow | A510F_SHADOWCON_WIN0_PROTECT;
++	*add0 = (uint32_t)fBufPA[idx];
++	*shadow = *shadow & ~A510F_SHADOWCON_WIN0_PROTECT;
++	*update = *update | A510F_UPDATE_STANDALONE;
++	fShown = idx;
++}
++
++/* The last flip has reached the panel (the shim's CPU1 kicks DECON every 16 ms). */
++bool
++AppleCLCD::waitFlipped(void)
++{
++	volatile uint32_t *update = (volatile uint32_t *)(fDecon + A510F_DECON_UPDATE);
++	for (int i = 0; i < 50; i++) {
++		if (!(*update & A510F_UPDATE_STANDALONE)) {
++			return true;
++		}
++		if (i == 0) {
++			fFlipWaits++;
++		}
++		IOSleep(1);
++	}
++	return false;
++}
++
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+ 	uint32_t mask = get32(rec, 0x104);
++	uint64_t t0 = mach_absolute_time();
++
++	IOLockLock(fPresentLock);
++	if (fFlip && !waitFlipped()) {
++		/* DECON did not take the last address: draw over the shown buffer */
++		fDraw = fBufVA[fShown];
++	} else {
++		fDraw = fFlip ? fBufVA[fShown ^ 1] : fPixels;
++	}
+ 
+ 
+ 	if (!fConsolePaused) {
+@@ -473,6 +595,10 @@ AppleCLCD::present(const uint8_t *rec)
+ 		if (dx < 0 || dy < 0) {
+ 			dx = dy = 0;
+ 		}
++		/* GPU-rendered (Mali, not coherent): drop stale cached lines first */
++		if (src != 0 && s->memory != NULL && s->offset < s->memory->getLength()) {
++			sweet_fb_dc_civac(src + s->offset, s->memory->getLength() - s->offset);
++		}
+ 		if (fFit) {
+ 			presentFit(s, src, bpe, sx, sy, dx, dy, w, h);
+ 			s->release();
+@@ -511,13 +637,31 @@ AppleCLCD::present(const uint8_t *rec)
+ 		}
+ 		if (src != 0 && bpe == 4) {
+ 			for (int32_t y = 0; y < h; y++) {
+-				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
++				memcpy((void *)(fDraw + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+ 				    (size_t)w * 4);
+ 			}
+ 		}
+ 		s->release();
+ 	}
++	if (fFlip && fDraw != fBufVA[fShown]) {
++		flipTo(fShown ^ 1);
++	}
++	uint64_t dt = mach_absolute_time() - t0;
++	fPresents++;
++	fPresentAbs += dt;
++	if (dt > fPresentMaxAbs) {
++		fPresentMaxAbs = dt;
++	}
++	if (fPresents == 1 || fPresents % 300 == 0) {
++		uint64_t avg = 0, max = 0;
++		absolutetime_to_nanoseconds(fPresentAbs / fPresents, &avg);
++		absolutetime_to_nanoseconds(fPresentMaxAbs, &max);
++		IOLog("SWEET FB: %llu presents, avg %llu us max %llu us, flip waits %llu\n",
++		    fPresents, avg / 1000, max / 1000, fFlipWaits);
++		fPresentMaxAbs = 0;
++	}
++	IOLockUnlock(fPresentLock);
+ }
+ 
+ /*
+@@ -547,7 +691,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+ 	if (!fFitCleared) {
+ 		/* Black pillarbox (the console text was there). */
+ 		for (uint32_t y = 0; y < fHeight; y++) {
+-			bzero((void *)(fPixels + (uint64_t)y * fRowBytes), (size_t)fWidth * 4);
++			bzero((void *)(fDraw + (uint64_t)y * fRowBytes), (size_t)fWidth * 4);
+ 		}
+ 		fFitCleared = true;
+ 	}
+@@ -576,7 +720,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+ 			continue;
+ 		}
+ 		const uint32_t *row = (const uint32_t *)(base + (uint64_t)(sy + ly) * s->bytesPerRow) + sx;
+-		uint32_t *out = (uint32_t *)(fPixels + (uint64_t)py * fRowBytes);
++		uint32_t *out = (uint32_t *)(fDraw + (uint64_t)py * fRowBytes);
+ 		for (int32_t px = px0; px < px1; px++) {
+ 			int32_t lx = fFitCol[px] - dx;
+ 			if (lx >= 0 && lx < w) {

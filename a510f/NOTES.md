@@ -1042,3 +1042,15 @@ sweep during motion (the kernel's 10 Hz CPU copy + scale to the panel),
 CA flushes 1-10/s; lock screen without clock/date (only "Press home to
 open"), dark band behind the status bar. Next: display path (present at
 60 Hz, direct scanout/GPU scale), then the lock-screen clock.
+
+Display path, 0125 (sweetfb_flip, default 1): double-buffered panel.
+Buffer 1 at 0x41000000 (free 8 MiB below S-Boot's ramdisk, outside xnu
+RAM), mapped write-combined; each present draws into the buffer DECON is
+not showing, then flips window 0 (SHADOWCON win0 protect, VIDW_ADD0 0x880,
+unprotect, UPDATE 0x710 bit 0 standalone; the shim's CPU1 kick applies it),
+waiting up to 50 ms for the previous flip first. Swaps present at once in
+the swapping thread when sweetfb_hz allows (now 30), so CA cannot render
+into the surface being read; the vsync timer only shows frames left
+pending. Source surfaces get dc civac before the CPU reads them (Mali
+writes are not coherent). Log: "SWEET FB: double buffer on ...",
+"N presents, avg X us max Y us, flip waits Z" every 300.
