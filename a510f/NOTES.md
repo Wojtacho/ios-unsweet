@@ -967,3 +967,19 @@ tiler disabled, T720 polygon-list magic 0xa0000000) and checks all 4096 pixels.
 Boot line: "SWEET MALI: draw test: ... -> THE GPU DREW" or "FAILED".
 Confirmed on the phone (build 38): "draw test: fragment job 0x0 in 29 us |
 pixels 4096/4096 = 0xffc08040, 0 untouched -> THE GPU DREW". First try.
+
+GPU step 3 started (2026-11-14): sweetgl for the Mali.
+  - a510f/sweetgl: sweet_drm_pan.c answers Mesa panfrost's DRM calls over
+    SweetMali (CREATE_BO sel 10, GEM_CLOSE 11, IOSurface import 12, SUBMIT 13
+    synchronous, GET_PARAM 15, log 16); syncobjs always signalled; driver
+    version 1.1. adapt.py takes sailfish's EAGL shim + gallium frontend
+    (pinned 6f27e41) and switches it to panfrost (IOSurfaces as prime fds,
+    MESA_GLES_VERSION_OVERRIDE=3.1 since Mesa lists T720 as ES 2.0).
+    mesa-fixup.py: bo mmap -> kernel's mapping, no munmap, prime size,
+    tiler heap 128 -> 32 MiB. Workflow a510f-sweetgl (macos-15): host
+    mesa_clc/vtn_bindgen2/panfrost_compile with brew LLVM (cached), then
+    mesa-26.2.4 for iOS and the 64 MiB-padded dylib.
+  - kernel: SweetMali selector 16 = log line (SWEETGL proc: ...); 0123
+    sweetenv=NAME:VAR=VAL boot-arg (A510F ENV), for
+    backboardd:DYLD_INSERT_LIBRARIES=/usr/lib/sweetgl.dylib. Do NOT set it
+    before the dylib is on the phone: dyld aborts on a missing insert lib.

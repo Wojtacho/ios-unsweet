@@ -1,0 +1,119 @@
+name: a510f-sweetgl
+
+# GPU step 3: sweetgl.dylib, Mesa's panfrost GLES driver for the Mali-T720 as
+# an iOS library (loaded into backboardd, where CoreAnimation's GL renderer
+# uses it through an EAGL shim). Built on a macOS runner with Xcode:
+#   1. Mesa host tools (mesa_clc, vtn_bindgen2, panfrost_compile) for the
+#      precompiled panfrost shaders, with Homebrew's LLVM (cached)
+#   2. Mesa for iOS arm64 (static), our panfrost DRM emulation, and the
+#      EAGL/GLES frontend from joranv1/ios-sailfish (a510f/sweetgl/adapt.py)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [a510f]
+    paths:
+      - "a510f/sweetgl/**"
+      - ".github/workflows/a510f-sweetgl.yml"
+
+permissions:
+  contents: read
+
+env:
+  MESA_TAG: mesa-26.2.4
+  SAILFISH_SHA: 6f27e41ff249f2680540ebe8ee5ab982c5e641c9
+
+jobs:
+  sweetgl:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          brew install ninja bison flex pkgconf llvm spirv-llvm-translator spirv-tools
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q meson mako pyyaml packaging pycparser
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig:$(brew --prefix llvm)/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LLVM_VERSION=$(brew list --versions llvm | awk '{print $2}')" >> "$GITHUB_ENV"
+          xcodebuild -version
+          xcrun -sdk iphoneos --show-sdk-path
+
+      - name: Sources
+        run: |
+          git clone -q --depth 1 -b "$MESA_TAG" https://gitlab.freedesktop.org/mesa/mesa.git mesa
+          mkdir sailfish && cd sailfish
+          git init -q && git remote add origin https://github.com/joranv1/ios-sailfish.git
+          git fetch -q --depth 1 origin "$SAILFISH_SHA" && git checkout -q FETCH_HEAD
+
+      - name: Cached host tools
+        id: hostcache
+        uses: actions/cache/restore@v4
+        with:
+          path: hostinst
+          key: mesa-host-${{ env.MESA_TAG }}-llvm-${{ env.LLVM_VERSION }}-v1
+
+      - name: Mesa host tools (mesa_clc, vtn_bindgen2, panfrost_compile)
+        if: steps.hostcache.outputs.cache-hit != 'true'
+        run: |
+          # before mesa-fixup.py: the host build is plain Mesa
+          meson setup mesa-host mesa --prefix="$PWD/hostinst" \
+            --buildtype=release -Db_ndebug=true \
+            -Dplatforms= -Degl=disabled -Dglx=disabled -Dgbm=disabled \
+            -Dgallium-drivers= -Dvulkan-drivers= \
+            -Dopengl=false -Dgles1=disabled -Dgles2=disabled \
+            -Dllvm=enabled -Dshared-llvm=enabled \
+            -Dmesa-clc=enabled -Dinstall-mesa-clc=true \
+            -Dprecomp-compiler=enabled -Dinstall-precomp-compiler=true \
+            -Dtools=panfrost -Dbuild-tests=false \
+            -Dzstd=disabled -Dvalgrind=disabled -Dlibunwind=disabled -Dlmsensors=disabled \
+            -Dshader-cache=disabled -Dperfetto=false -Dgallium-va=disabled \
+            -Dgallium-rusticl=false -Dhtml-docs=disabled -Ddisplay-info=disabled -Dteflon=false \
+            -Dc_args="-I$PWD/a510f/sweetgl/include" -Dcpp_args="-I$PWD/a510f/sweetgl/include" \
+            -Dc_link_args=-Wl,-undefined,dynamic_lookup -Dcpp_link_args=-Wl,-undefined,dynamic_lookup
+          ninja -C mesa-host
+          ninja -C mesa-host install
+          ls -la hostinst/bin
+
+      - name: Save host tools
+        if: steps.hostcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: hostinst
+          key: mesa-host-${{ env.MESA_TAG }}-llvm-${{ env.LLVM_VERSION }}-v1
+
+      - name: Mesa for iOS + sweetgl.dylib
+        run: |
+          export PATH="$PWD/hostinst/bin:$PATH"
+          which mesa_clc vtn_bindgen2 panfrost_compile
+          python3 -I a510f/sweetgl/mesa-fixup.py mesa
+          sh a510f/sweetgl/build.sh mesa sailfish/tools/sweetgl out
+
+      - name: Check the library
+        run: |
+          otool -hv out/sweetgl-unpadded.dylib
+          otool -L out/sweetgl-unpadded.dylib
+          nm -gU out/sweetgl-unpadded.dylib | grep sweetgl_
+          ls -la out/sweetgl.dylib out/sweetgl-unpadded.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a510f-sweetgl
+          path: |
+            out/sweetgl.dylib
+            out/sweetgl-unpadded.dylib
+            out/libs.txt
+          retention-days: 30
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          for f in mesa-host/meson-logs/meson-log.txt out/mesa-ios/meson-logs/meson-log.txt; do
+            [ -f "$f" ] && { echo "== $f"; tail -60 "$f"; }
+          done
+          true
