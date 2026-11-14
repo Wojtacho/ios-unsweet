@@ -1,4 +1,5 @@
 #!/bin/sh
+# (a GitHub artifact upload timeout is not a build failure: push again)
 # ci-run.sh NAME CMD...: run CMD, log to $RUNNER_TEMP/NAME.log; on failure
 # post the error lines and the log's tail as GitHub annotations (the public
 # API shows annotations, not job logs).
