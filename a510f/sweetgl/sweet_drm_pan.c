@@ -494,7 +494,20 @@ int drmSyncobjDestroy(int fd, uint32_t h) { (void)fd; (void)h; return 0; }
 int drmSyncobjHandleToFD(int fd, uint32_t h, int *o) { (void)fd; (void)h; *o = -1; return -ENOSYS; }
 int drmSyncobjFDToHandle(int fd, int o, uint32_t *h) { (void)fd; (void)o; (void)h; return -ENOSYS; }
 int drmSyncobjImportSyncFile(int fd, uint32_t h, int s) { (void)fd; (void)h; (void)s; return 0; }
-int drmSyncobjExportSyncFile(int fd, uint32_t h, int *s) { (void)fd; (void)h; *s = -1; return -ENOSYS; }
+/*
+ * Panfrost snapshots every flush's out-fence as a sync file (pan_fence.c);
+ * failing here logged "export failed" thousands of times and gave CA no
+ * fences. Everything has completed already: any fd stands for a signalled
+ * fence (ImportSyncFile ignores it).
+ */
+int
+drmSyncobjExportSyncFile(int fd, uint32_t h, int *s)
+{
+	(void)fd;
+	(void)h;
+	*s = dev_fd >= 0 ? dup(dev_fd) : -1;
+	return *s >= 0 ? 0 : -EMFILE;
+}
 int drmSyncobjReset(int fd, const uint32_t *h, uint32_t n) { (void)fd; (void)h; (void)n; return 0; }
 int drmSyncobjSignal(int fd, const uint32_t *h, uint32_t n) { (void)fd; (void)h; (void)n; return 0; }
 

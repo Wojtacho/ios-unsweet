@@ -1024,3 +1024,12 @@ sailfish) "copy error 0x502" for A008/BGRA/RGBA, and EGLImageTargetTexture2D
 0x502 for 256x1 half-float and 90x58 pitch 384. copy_surface reads
 glGetError only after its upload, so 0x502 may be stale. Next boot:
 MESA_DEBUG=1 in backboardd (repack) for Mesa's own error messages.
+
+MESA_DEBUG boot (repack 41): "Mesa: error: GL_INVALID_OPERATION in
+glTextureBarrier(not supported)" x755 (eagl.c feedback/fbfetch barriers;
+panfrost v4 has no texture barrier) -> the stale 0x502 the upload paths
+reported as their own copy/EGLImage failures (missing corner masks, late
+images). "MESA: error: export failed" x2764: pan_fence.c exports every
+flush's fence as a sync file, our drmSyncobjExportSyncFile said ENOSYS.
+Fixes: adapt.py turns the barrier into glFlush (end of batch), the
+emulation exports a dup of /dev/null (all fences are signalled).

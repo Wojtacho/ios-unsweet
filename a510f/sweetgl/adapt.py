@@ -79,6 +79,25 @@ struct sweetgl_ctx {"""),
 ])
 
 edit('eagl.c', [
+    # Panfrost on Midgard has no texture barrier: glTextureBarrier set
+    # GL_INVALID_OPERATION (MESA_DEBUG boot), which the IOSurface upload
+    # paths then read as their own failure and dropped the image. Ending the
+    # batch makes the next draws sample what was rendered (tiler GPU).
+    ('''extern void _mesa_TextureBarrierNV(void);''',
+     '''/* A510F: Midgard has no texture barrier; end the batch instead (adapt.py) */
+static inline void
+sgl_texture_barrier(void)
+{
+	glFlush();
+}'''),
+    ('''			_mesa_TextureBarrierNV();
+			return;''',
+     '''			sgl_texture_barrier();
+			return;'''),
+    ('''	_mesa_TextureBarrierNV();
+	/* SWEETGL_TRACE: the first draws of each fbfetch program''',
+     '''	sgl_texture_barrier();
+	/* SWEETGL_TRACE: the first draws of each fbfetch program'''),
     ("""			.type = WINSYS_HANDLE_TYPE_KMS,
 			.handle = handle,""",
      """			/* panfrost imports by prime fd only (sweet_drm_pan.c) */
