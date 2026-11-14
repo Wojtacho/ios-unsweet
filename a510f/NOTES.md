@@ -1220,3 +1220,22 @@ More RAM: live DT /proc/device-tree/reserved-memory: video_ext 0xaec00000
 +1 MB, secdma dynamic; System RAM 0x40000000-0xbe7fffff. 0xb0000000-
 0xb8000000 is not reserved. mkadt: PHYS_END 0xaec00000 -> 0xb8000000
 (1708 -> 1856 MB).
+
+RAM boot (1856 MB): free 1816 MB at boot, CollectionsPoster killed once.
+The doubled clock and the small copy of the screen in the top-left corner
+remain, so they are rendering bugs, not kills. The power-off menu hangs the
+system (no crash or panic in the log).
+
+Autopilot (0110 sweet_mmc.c sweet_auto, 0125 sweet_fb_shot): testing from
+the PC with nobody at the phone. It uses the OTA partition (mmcblk0p12,
+8 MiB, all zeros before; backup on the PC): sectors 0..63 hold a script
+written from TWRP, sector 64 the state, then 31 screenshot slots of 256 KiB
+(270x480 RGB565 of the buffer the panel shows; every 10 s if it changed and
+0.7 s after input, or only the script's "shot" while a script runs). Script
+commands: wait, waitlog MS TEXT, tap, hold, swipe, key NAME press|down|up|
+long, shot TAG, log, recovery. A script runs once per id. "recovery" does
+what Samsung's sec_reboot("recovery") does: PMU (0x10460000) INFORM2 =
+0x12345678 (no LPM boot), INFORM3 = 0x12345674 (REBOOT_MODE_RECOVERY), then
+SWRESET = 1, so S-Boot starts TWRP. PC side: twrp-write/auto.py (backup,
+flash BOOT with read-back sha256, script, boot, wait, pull log + PNGs, run).
+present() now also logs every new layer geometry (was the first 16 swaps).
