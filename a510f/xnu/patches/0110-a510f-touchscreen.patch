@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..7b39184
+index 0000000..6e1213a
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,1317 @@
+@@ -0,0 +1,1322 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -689,6 +689,9 @@ index 0000000..7b39184
 + * 1.18125 V (vsel 0x7D, 400 mV + n * 6.25 mV) is the highest voltage of any
 + * ASV group/table at 1.2 GHz (asv-exynos7580.h); ABB is bypassed there.
 + * Divider and PLL values: Samsung's apll_freq[] / table_cpu[].
++ * a510fcpufreq=1400 (round 39, speed): P 4 M 216 S 0 (table_cpu), 1.21875 V
++ * (vsel 0x83, the highest ASV voltage at 1.4 GHz), DIV_CPU_1 0x77 (1.6 GHz's,
++ * the slower of the two known values).
 + */
 +static int a510f_cpufreq;
 +
@@ -710,7 +713,9 @@ index 0000000..7b39184
 +	static const struct { const char *name; uint32_t pa; uint8_t vreg; } cl[2] = {
 +		{ "cluster0/CPU", 0x10900000u, 0x1D }, { "cluster1/APL", 0x10800000u, 0x1B },
 +	};
-+	if (a510f_cpufreq != 1200) {
++	const bool f14 = a510f_cpufreq == 1400;
++	const uint8_t vwant = f14 ? 0x83 : 0x7D;
++	if (a510f_cpufreq != 1200 && !f14) {
 +		printf("A510F CLK: left at the boot clock (a510fcpufreq=%d)\n", a510f_cpufreq);
 +		return;
 +	}
@@ -723,18 +728,18 @@ index 0000000..7b39184
 +		int e = pmic_read(cl[c].vreg, &v);
 +		printf("A510F CLK: %s now pll 0x%x div0 0x%x div1 0x%x, vsel %d 0x%02x (%u uV)\n",
 +		    cl[c].name, rd(b, 0x100), rd(b, 0x600), rd(b, 0x604), e, v, 400000u + v * 6250u);
-+		/* Expect 0.9 .. 1.18125 V for 780 MHz; anything else: leave it alone. */
-+		if (e || v < 0x50 || v > 0x7D) {
++		/* Expect 0.9 .. 1.21875 V; anything else: leave it alone. */
++		if (e || v < 0x50 || v > 0x83) {
 +			printf("A510F CLK: %s voltage reading not plausible, clock unchanged\n", cl[c].name);
 +			continue;
 +		}
-+		if (v != 0x7D) {
-+			int ew = pmic_write(cl[c].vreg, 0x7D);
++		if (v != vwant) {
++			int ew = pmic_write(cl[c].vreg, vwant);
 +			IOSleep(2);
 +			uint8_t back = 0xee;
 +			int er = pmic_read(cl[c].vreg, &back);
-+			printf("A510F CLK: %s vsel -> 0x7D: write %d, read %d 0x%02x\n", cl[c].name, ew, er, back);
-+			if (ew || er || back != 0x7D) {
++			printf("A510F CLK: %s vsel -> 0x%02x: write %d, read %d 0x%02x\n", cl[c].name, vwant, ew, er, back);
++			if (ew || er || back != vwant) {
 +				printf("A510F CLK: %s voltage not confirmed, clock unchanged\n", cl[c].name);
 +				continue;
 +			}
@@ -744,7 +749,7 @@ index 0000000..7b39184
 +		/* Dividers for 1.2 GHz (Samsung apll_freq[1200000]). */
 +		wr(b, 0x600, 0x03727700);
 +		bool d0 = cmu_wait(b, 0x700, 0xffffffffu, 0);
-+		wr(b, 0x604, 0x76);
++		wr(b, 0x604, f14 ? 0x77 : 0x76);
 +		bool d1 = cmu_wait(b, 0x704, 0xffffffffu, 0);
 +
 +		/* Park on the bus PLL (MUX_SEL_x_2 bit 0 = 1, MUX_STAT reads 2). */
@@ -756,7 +761,7 @@ index 0000000..7b39184
 +		uint32_t con = rd(b, 0x100);
 +		wr(b, 0x000, 4 * 200);                          /* lock time = P * 200 */
 +		con &= ~((0x3ffu << 12) | (0x3fu << 4) | 0x7u);
-+		con |= (368u << 12) | (4u << 4) | 1u;
++		con |= f14 ? ((216u << 12) | (4u << 4) | 0u) : ((368u << 12) | (4u << 4) | 1u);
 +		con &= ~(1u << 31);
 +		wr(b, 0x100, con);
 +		con |= 1u << 31;
