@@ -605,3 +605,11 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 	}
 '''),
 ])
+
+# App Library header (variable blur reads an empty copy): trace windows open on
+# the variable blur's 1194x1164 viewport only, every 15 s.
+edit('eagl.c', [
+    ('''#define WIN_SECS 30''', '''#define WIN_SECS 15'''),
+    ('''#define WIN_TRIGGER(w, h) (((w) == 138 && (h) == 306) || ((w) == 296 && (h) == 296) || ((w) == 297 && (h) == 296))''',
+     '''#define WIN_TRIGGER(w, h) ((w) == 1194 && (h) == 1164)'''),
+])
