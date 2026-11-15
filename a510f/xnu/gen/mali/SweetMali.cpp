@@ -67,6 +67,7 @@ extern "C" vm_offset_t ml_vtophys(vm_offset_t va);
 #define SHADER_PWRON            0x180
 #define TILER_PWRON             0x190
 #define L2_PWRON                0x1a0
+#define GPU_SHADER_CONFIG       0xf04           /* implementation specific (quirks) */
 #define JOB_INT_RAWSTAT         0x1000
 #define JOB_INT_CLEAR           0x1004
 #define JOB_INT_MASK            0x1008
@@ -174,9 +175,51 @@ va_alloc(uint64_t size)
 	return 0;
 }
 
+/*
+ * Shader code (BOs Mesa creates without PANFROST_BO_NOEXEC) lives in one
+ * 16 MiB-aligned 16 MiB window: Midgard's program counter is 24 bits, so a
+ * fragment shader and the blend shader it jumps to must share the upper
+ * address bits (Linux panfrost keeps executable BOs from crossing 16 MiB;
+ * Mesa saw INSTR_INVALID_PC "when blend shader BOs were allocated far
+ * apart"). Spread over the whole VA range by the first-fit allocator, they
+ * did not: js0 status 0x50 fragment faults, broken frames after a wake.
+ */
+#define EXEC_VA_BASE    0x0f000000ull
+#define EXEC_VA_SIZE    0x01000000ull
+#define EXEC_GRAN       0x4000ull
+#define EXEC_SLOTS      (EXEC_VA_SIZE / EXEC_GRAN)
+static uint64_t g_exec_bits[EXEC_SLOTS / 64];
+static uint64_t g_exec_used;
+
+static uint64_t
+va_alloc_exec(uint64_t size)
+{
+	uint64_t n = (size + EXEC_GRAN - 1) / EXEC_GRAN, run = 0;
+	for (uint64_t i = 0; i < EXEC_SLOTS; i++) {
+		run = ((g_exec_bits[i / 64] >> (i % 64)) & 1) ? 0 : run + 1;
+		if (run == n) {
+			uint64_t first = i + 1 - n;
+			for (uint64_t k = first; k <= i; k++) {
+				g_exec_bits[k / 64] |= 1ull << (k % 64);
+			}
+			g_exec_used += n;
+			return EXEC_VA_BASE + first * EXEC_GRAN;
+		}
+	}
+	return 0;
+}
+
 static void
 va_free(uint64_t va, uint64_t size)
 {
+	if (va >= EXEC_VA_BASE && va < EXEC_VA_BASE + EXEC_VA_SIZE) {
+		uint64_t first = (va - EXEC_VA_BASE) / EXEC_GRAN, n = (size + EXEC_GRAN - 1) / EXEC_GRAN;
+		for (uint64_t k = first; k < first + n; k++) {
+			g_exec_bits[k / 64] &= ~(1ull << (k % 64));
+		}
+		g_exec_used -= n;
+		return;
+	}
 	va_set((va - MALI_VA_BASE) / VA_GRAN, (size + VA_GRAN - 1) / VA_GRAN, false);
 }
 static uint32_t g_shader, g_tiler, g_l2;
@@ -374,6 +417,12 @@ gpu_reset(void)
 	wr(g_gpu, GPU_COMMAND, 1);                      /* SOFT_RESET */
 	bool reset = poll(g_gpu, GPU_IRQ_RAWSTAT, 1u << 8, 1u << 8, 100);
 	wr(g_gpu, GPU_IRQ_CLEAR, 0xffffffffu);
+	/*
+	 * T720 errata, as Linux panfrost_gpu_init_quirks() after the reset:
+	 * HW_ISSUE_10797 -> SC_ENABLE_TEXGRD_FLAGS (bit 25), and T60x/T62x/T72x
+	 * without GPUCORE_1619 -> SC_LS_ATTR_CHECK_DISABLE (bit 18).
+	 */
+	wr(g_gpu, GPU_SHADER_CONFIG, (1u << 25) | (1u << 18));
 	wr(g_gpu, L2_PWRON, g_l2);
 	bool l2 = poll(g_gpu, L2_READY, g_l2, g_l2, 100);
 	wr(g_gpu, TILER_PWRON, g_tiler);
@@ -572,7 +621,7 @@ SweetMaliBO::free()
 
 /* GPU-map md (size rounded to 4 KB) and map it into task. */
 static SweetMaliBO *
-bo_make(IOMemoryDescriptor *md, uint64_t size, task_t task, IOOptionBits cache)
+bo_make(IOMemoryDescriptor *md, uint64_t size, task_t task, IOOptionBits cache, bool exec)
 {
 	SweetMaliBO *bo = OSTypeAlloc(SweetMaliBO);
 	if (bo == NULL || !bo->init()) {
@@ -583,7 +632,17 @@ bo_make(IOMemoryDescriptor *md, uint64_t size, task_t task, IOOptionBits cache)
 	md->retain();
 	bo->size = (size + 4095) & ~4095ull;
 	IOLockLock(g_lock);
-	uint64_t va = va_alloc(bo->size);
+	uint64_t va = exec ? va_alloc_exec(bo->size) : 0;
+	if (exec && va == 0) {
+		static unsigned full;
+		if (full++ < 5) {
+			IOLog("SWEET MALI: shader window full (%llu KB used), %llu bytes elsewhere\n",
+			    g_exec_used * EXEC_GRAN >> 10, bo->size);
+		}
+	}
+	if (va == 0) {
+		va = va_alloc(bo->size);
+	}
 	bool ok = va != 0 && gpu_map(va, md, bo->size);
 	if (ok) {
 		bo->gpuVA = va;
@@ -611,7 +670,7 @@ bo_make(IOMemoryDescriptor *md, uint64_t size, task_t task, IOOptionBits cache)
 }
 
 static SweetMaliBO *
-bo_new(uint64_t size, task_t task)
+bo_new(uint64_t size, task_t task, bool exec)
 {
 	if (size == 0 || size > (256ull << 20)) {
 		return NULL;
@@ -624,7 +683,7 @@ bo_new(uint64_t size, task_t task)
 	}
 	bzero(md->getBytesNoCopy(), size);
 	dc_civac(md->getBytesNoCopy(), size);
-	SweetMaliBO *bo = bo_make(md, size, task, kIOMapWriteCombineCache);
+	SweetMaliBO *bo = bo_make(md, size, task, kIOMapWriteCombineCache, exec);
 	md->release();
 	if (bo != NULL) {
 		bo->owned = true;
@@ -640,7 +699,7 @@ bo_new(uint64_t size, task_t task)
 static void
 mali_selftest(void)
 {
-	SweetMaliBO *bo = bo_new(16384, NULL);
+	SweetMaliBO *bo = bo_new(16384, NULL, true);
 	if (bo == NULL) {
 		IOLog("SWEET MALI: self-test: no BO\n");
 		return;
@@ -688,7 +747,7 @@ mali_selftest(void)
 static void
 mali_draw_test(void)
 {
-	SweetMaliBO *bo = bo_new(0x8000, NULL);
+	SweetMaliBO *bo = bo_new(0x8000, NULL, true);
 	if (bo == NULL) {
 		IOLog("SWEET MALI: draw test: no BO\n");
 		return;
@@ -853,7 +912,7 @@ SweetMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
 		if (nin < 2) {
 			return kIOReturnBadArgument;
 		}
-		return boReply(bo_new(in[0], fTask), args);
+		return boReply(bo_new(in[0], fTask, (in[1] & 1) == 0), args);      /* 1: PANFROST_BO_NOEXEC */
 	case 11: {                                      /* BO_FREE */
 		if (nin < 1 || in[0] == 0 || in[0] > fBOs->getCount()) {
 			return kIOReturnBadArgument;
@@ -874,7 +933,7 @@ SweetMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
 			return kIOReturnNotFound;
 		}
 		SweetMaliBO *bo = bo_make(s->memory, s->memory->getLength(), fTask,
-		    (s->wrapped || s->display) ? kIOMapDefaultCache : kIOMapWriteCombineCache);
+		    (s->wrapped || s->display) ? kIOMapDefaultCache : kIOMapWriteCombineCache, false);
 		if (bo != NULL) {
 			bo->surface = s;
 		} else {
