@@ -1239,3 +1239,35 @@ what Samsung's sec_reboot("recovery") does: PMU (0x10460000) INFORM2 =
 SWRESET = 1, so S-Boot starts TWRP. PC side: twrp-write/auto.py (backup,
 flash BOOT with read-back sha256, script, boot, wait, pull log + PNGs, run).
 present() now also logs every new layer geometry (was the first 16 swaps).
+
+Autopilot round 1 (kernel 78610c2): the whole loop works unattended (script,
+17 shots, self-reboot into TWRP after 225 s). Power menu opens fine (black
+behind the slider instead of a blur). Garbage at the screen's top left
+("Wedr" = part of the lock-screen date, icon strips, cyan/red boxes with
+dots); swaps are always one full-screen layer, so it is in the GPU-rendered
+frame, not the panel copy. Wake: black, then the old home screen, then
+the lock screen at ~3 s.
+Round 2 (4b0d6ec, sweetgl b95b358f): folders and Control Center blur fine;
+doubled (white, larger, shifted) lock-screen clock and date right after a
+wake, with js0 INSTR_INVALID_PC (0x50) fragment faults on every frame then;
+no incomplete framebuffers (that theory is out). CA sends its first frame
+1.0-3.2 s after "display on". sweetnoexec works (bluetoothd, fairplayd.H2,
+nanotimekitcompaniond, the three speech AUs refused).
+Cause of the 0x50 faults: Midgard's shader PC is 24 bits; a fragment shader
+and the blend shader it jumps to must share the upper address bits (Linux
+panfrost keeps executable BOs inside 16 MiB; Mesa saw INSTR_INVALID_PC "when
+blend shader BOs were allocated far apart"). SweetMali ignored Mesa's
+PANFROST_BO_NOEXEC flag and the first-fit allocator spread shader BOs over
+1 GB of VA. 0122: executable BOs in one window 0x0f000000-0x10000000
+(16 KB granules), T720 SHADER_CONFIG errata (TEXGRD flags, LS attr check
+off, as panfrost_gpu_init_quirks), CMU_MIF PLLs logged.
+Speed (round 2 log): panel copy 39-44 ms/frame in backboardd's swap (sys
+CPU ~1 s per 2 s), GPU ~54 ms/frame on blur-heavy screens (~12 fragment
+jobs a frame), 7.8 CA flushes/s. 0125: the fit scale runs on 4 CPUs in a
+tight loop (no per-pixel checks), each band invalidating its own source
+rows; the swap hands the frame to the present thread and only the next
+swap waits for it (CA alternates two surfaces); "N frames/10 s, swaps
+waited" in the SWEET MEM line. Boot-arg sweetfb_wake_ms=2500.
+Generators now in the repo: a510f/xnu/gen (gen.sh for 0125/0126,
+mali_patch.py for 0122). PC: twrp-write/auto.py (+ gl command for the
+in-place sweetgl write), dl_artifact.py (git's saved GitHub login).
