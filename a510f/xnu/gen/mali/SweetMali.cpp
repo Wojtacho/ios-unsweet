@@ -726,6 +726,22 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 					slot = g;
 				}
 			}
+			/* the tiler context (FBD +0xC0: polygon list size, hierarchy mask, list, body, heap start/end) */
+			if (fbd_ok && key != 0) {
+				static uint32_t ctx_keys[12];
+				static int ctx_n;
+				bool seen = false;
+				for (int g = 0; g < ctx_n; g++) {
+					seen |= ctx_keys[g] == (key ^ (r == kIOReturnSuccess ? 0u : 0x80000000u));
+				}
+				if (!seen && ctx_n < 12) {
+					ctx_keys[ctx_n++] = key ^ (r == kIOReturnSuccess ? 0u : 0x80000000u);
+					const uint32_t *t = &fbd_at_submit[48];
+					IOLog("SWEET MALI: %s job, FBD size %08x params %08x %08x: tiler ctx size %u mask 0x%x list 0x%x%08x body 0x%x%08x heap 0x%x%08x..0x%x%08x\n",
+					    r == kIOReturnSuccess ? "good" : "FAILED", key, fbd_at_submit[8], fbd_at_submit[9],
+					    t[0], t[1] & 0xffff, t[3], t[2], t[5], t[4], t[7], t[6], t[9], t[8]);
+				}
+			}
 			if (r == kIOReturnSuccess && fbd_ok && key != 0) {
 				if (slot < 0) {
 					slot = good_n < 8 ? good_n++ : (int)(key % 8);
