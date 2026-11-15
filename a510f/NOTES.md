@@ -1388,3 +1388,7 @@ User's list for tomorrow (2026-11-16):
   (snapshot), and the background behind the cards is black instead of the
   blurred home screen/wallpaper iOS shows.
 - Speed (round 40, see above).
+- Weather widget gradient shows ~9 color bands instead of a smooth
+  gradient. Suspects: a low-precision path (gradient texture in a 4/5-bit
+  format, lowp shader math, nearest filtering of a small gradient LUT, or no
+  dithering where CA expects it). Capture full-res strips of the widget first.
