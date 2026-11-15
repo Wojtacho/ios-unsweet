@@ -455,10 +455,33 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 {'''),
     ('''	r->seq = ++ring_seq;
 ''', '''	r->seq = ++ring_seq;
-	/* variable blur passes: where they draw, what they sample */
-	static int vb_logged;
-	int vb = vb_logged < 120 ? prog_texfn_kind(prog) : 0;
+	/*
+	 * Variable blur passes (0x26 mip passes, 0x27 blur): CA samples surface
+	 * S with a mipmap filter, but GLES surfaces here have level 0 only, so S
+	 * is mipmap-incomplete and every texel reads black (App Library header
+	 * black when scrolled). Make the sampled textures complete with one level.
+	 */
+	int vb = prog_texfn_kind(prog);
+	GLint vb_min[2] = {0, 0};
 	if (vb) {
+		GLint act0 = 0;
+		glGetIntegerv(GL_ACTIVE_TEXTURE, &act0);
+		for (int u = 0; u < 2; u++) {
+			GLint t = 0;
+			glActiveTexture(GL_TEXTURE0 + u);
+			glGetIntegerv(GL_TEXTURE_BINDING_2D, &t);
+			if (t != 0) {
+				glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &vb_min[u]);
+				if (vb_min[u] != GL_NEAREST && vb_min[u] != GL_LINEAR) {
+					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+				}
+			}
+		}
+		glActiveTexture((GLenum)act0);
+	}
+	/* where they draw, what they sample */
+	static int vb_logged;
+	if (vb && vb_logged < 120) {
 		GLint at = 0, name = 0, t0 = 0, t1 = 0, act = 0;
 		if (r->fbo != 0) {
 			glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -477,9 +500,10 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 		while (glGetError() != GL_NO_ERROR) {
 		}
 		vb_logged++;
-		sweet_drm_log("sweetgl: draw %u %s: fbo %d color0 %s %d, viewport %dx%d, tex0 %d tex1 %d%s",
+		sweet_drm_log("sweetgl: draw %u %s: fbo %d color0 %s %d, viewport %dx%d, tex0 %d tex1 %d, min filters %#x/%#x%s",
 		    r->seq, vb == 1 ? "0x26 mip pass" : "0x27 vblur", r->fbo,
 		    at == GL_TEXTURE ? "tex" : at == GL_RENDERBUFFER ? "rb" : "none", name, r->vw, r->vh, t0, t1,
+		    vb_min[0], vb_min[1],
 		    name != 0 && (name == t0 || name == t1) ? " (samples its own target)" : "");
 	}
 '''),
