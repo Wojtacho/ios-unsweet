@@ -96,3 +96,22 @@ sweet_surface_stats(uint64_t *bytes, uint32_t *count)
 			OSIncrementAtomic(&sweet_surface_live);
 			s->memory = mem;"""),
 ])
+
+# A510F GPU job queue (SweetMali): a CPU lock of a surface waits for the GPU
+# jobs queued so far, as IOSurfaceLock does on iOS (no reads of a half-drawn
+# surface, no writes under a job still sampling it).
+edit(cpp, [
+    ("""IOReturn
+IOSurfaceRootUserClient::trapLock(void *id, __unused void *options, void *seedOut,
+    void *, void *, void *)
+{
+""", """extern "C" uint64_t sweet_mali_seq(void);       /* SweetMali.cpp */
+extern "C" void sweet_mali_wait_seq(uint64_t seq);
+
+IOReturn
+IOSurfaceRootUserClient::trapLock(void *id, __unused void *options, void *seedOut,
+    void *, void *, void *)
+{
+	sweet_mali_wait_seq(sweet_mali_seq());
+"""),
+])

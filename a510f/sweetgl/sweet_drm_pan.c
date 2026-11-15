@@ -10,15 +10,18 @@
  *   CREATE_BO            sel 10 [size, flags] -> [handle, gpu va, user va, size]
  *   GEM_CLOSE            sel 11 [handle]
  *   (IOSurface import)   sel 12 [surface id] -> as sel 10
- *   SUBMIT               sel 13 [jc, requirements] -> [status, us]; synchronous
+ *   SUBMIT               sel 17 [jc, requirements] -> [sequence number]: the
+ *                        kernel's job queue runs it in order, the CPU goes on;
+ *                        sel 13 (synchronous) when the queue is off
+ *   waits                sel 18 [seq, block] -> [done]: WAIT_BO waits for the
+ *                        last job that used the bo, syncobjs and sync files
+ *                        carry the sequence number of the job that signals them
  *   GET_PARAM            sel 15 [param] -> [value] (panfrost param numbering)
  *   log line             sel 16 (struct input)
  *
  *   MMAP_BO              offset = handle << 32; sweet_drm_bo_map() turns it
  *                        back into the kernel's write-combined user mapping
  *   GET_BO_OFFSET        the bo's GPU VA
- *   WAIT_BO, syncobjs    nothing to wait for: every submit has finished when
- *                        the call returns
  *
  * One device per process; the "fd" is /dev/null. Imported IOSurfaces become
  * prime fds (dups of /dev/null) that drmPrimeFDToHandle maps back.
@@ -46,9 +49,12 @@
 #define SEL_SUBMIT      13
 #define SEL_PARAM       15
 #define SEL_LOG         16
+#define SEL_SUBMIT_ASYNC 17
+#define SEL_WAIT_SEQ    18
 
 struct sbo {
 	uint64_t gpu, map, size;
+	uint64_t seq;                   /* last queued job that used it */
 };
 
 struct prime {
@@ -63,6 +69,17 @@ static struct sbo *bos;
 static uint32_t nbos;
 static struct prime primes[64];
 static uint32_t next_syncobj = 1;
+/*
+ * Job queue state. async: -1 not tried yet, 1 sel 17 works, 0 synchronous
+ * (old kernel, sweetmali_async=0 or SWEETGL_SYNC=1). Sequence numbers per
+ * syncobj handle, and per exported sync file (fd -> seq). Lock held.
+ */
+static int async = -1;
+static uint64_t last_seq;
+static uint64_t *sync_seq;
+static uint32_t nsync;
+static struct { int fd; uint64_t seq; } sfiles[256];
+static uint32_t sfile_next;
 static uint32_t submits, failed_submits;
 
 /*
@@ -225,6 +242,49 @@ sbo_add(uint32_t handle, uint64_t gpu, uint64_t map, uint64_t size)
 	return 0;
 }
 
+/* Lock held. */
+static void
+sync_set(uint32_t h, uint64_t seq)
+{
+	if (h == 0) {
+		return;
+	}
+	if (h >= nsync) {
+		uint32_t n = nsync ? nsync : 256;
+		while (n <= h) {
+			n *= 2;
+		}
+		uint64_t *p = realloc(sync_seq, n * sizeof(*p));
+		if (p == NULL) {
+			return;
+		}
+		memset(p + nsync, 0, (n - nsync) * sizeof(*p));
+		sync_seq = p;
+		nsync = n;
+	}
+	sync_seq[h] = seq;
+}
+
+/* Lock held. */
+static uint64_t
+sync_get(uint32_t h)
+{
+	return h < nsync ? sync_seq[h] : 0;
+}
+
+/* Job seq done? block: wait for it. No lock held. */
+static int
+seq_done(uint64_t seq, int block)
+{
+	if (seq == 0 || async != 1) {
+		return 1;
+	}
+	uint64_t in[2] = {seq, block ? 1u : 0u}, out = 0;
+	uint32_t n = 1;
+	kern_return_t kr = IOConnectCallScalarMethod(conn, SEL_WAIT_SEQ, in, 2, &out, &n);
+	return kr == KERN_SUCCESS && out != 0;
+}
+
 /* Lock held. Reply of sel 10 / 12 -> recorded bo. */
 static int
 bo_reply(kern_return_t kr, const uint64_t out[4], uint32_t *handle)
@@ -296,8 +356,55 @@ get_param(struct drm_panfrost_get_param *p)
 }
 
 static int
+submit_async(struct drm_panfrost_submit *s)
+{
+	uint64_t in[2] = {s->jc, s->requirements}, seq = 0;
+	uint32_t n = 1;
+	uint64_t c0 = now_ns();
+	kern_return_t kr = IOConnectCallScalarMethod(conn, SEL_SUBMIT_ASYNC, in, 2, &seq, &n);
+	uint64_t c1 = now_ns();
+	pthread_mutex_lock(&lock);
+	if (kr != KERN_SUCCESS) {
+		async = 0;
+		pthread_mutex_unlock(&lock);
+		sweet_drm_log("sweetgl: no job queue (0x%x), synchronous submits", kr);
+		return -1;
+	}
+	if (async != 1) {
+		async = 1;
+		sweet_drm_log("sweetgl: job queue on, submits do not wait for the GPU");
+	}
+	last_seq = seq;
+	const uint32_t *h = (const uint32_t *)(uintptr_t)s->bo_handles;
+	for (uint32_t i = 0; h != NULL && i < s->bo_handle_count; i++) {
+		struct sbo *b = sbo(h[i]);
+		if (b != NULL) {
+			b->seq = seq;
+		}
+	}
+	sync_set(s->out_sync, seq);
+	++submits;
+	win_account(s->requirements, 0, c1 - c0);
+	pthread_mutex_unlock(&lock);
+	return 0;
+}
+
+static int
 submit(struct drm_panfrost_submit *s)
 {
+	if (async != 0) {
+		static int checked;
+		if (!checked) {
+			checked = 1;
+			const char *e = getenv("SWEETGL_SYNC");
+			if (e != NULL && e[0] == '1') {
+				async = 0;
+			}
+		}
+		if (async != 0 && submit_async(s) == 0) {
+			return 0;
+		}
+	}
 	uint64_t in[2] = {s->jc, s->requirements}, out[2] = {0};
 	uint32_t n = 2;
 	uint64_t c0 = now_ns();
@@ -332,8 +439,14 @@ command(unsigned nr, void *data)
 	switch (nr) {
 	case DRM_PANFROST_SUBMIT:
 		return submit(data);
-	case DRM_PANFROST_WAIT_BO:
-		return 0;
+	case DRM_PANFROST_WAIT_BO: {
+		struct drm_panfrost_wait_bo *w = data;
+		pthread_mutex_lock(&lock);
+		struct sbo *b = sbo(w->handle);
+		uint64_t seq = b ? b->seq : 0;
+		pthread_mutex_unlock(&lock);
+		return seq_done(seq, w->timeout_ns != 0) ? 0 : -ETIMEDOUT;
+	}
 	case DRM_PANFROST_CREATE_BO:
 		return create_bo(data);
 	case DRM_PANFROST_MMAP_BO: {
@@ -561,7 +674,11 @@ drmGetCap(int fd, uint64_t capability, uint64_t *value)
 	return -EINVAL;
 }
 
-/* Every submit has completed by the time it returns: syncobjs are always signalled. */
+/*
+ * Syncobjs carry the sequence number of the job that signals them (0:
+ * signalled). Waits go to the kernel (sel 18), conservatively for the
+ * newest of the handles.
+ */
 int
 drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle)
 {
@@ -569,14 +686,40 @@ drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle)
 	(void)flags;
 	pthread_mutex_lock(&lock);
 	*handle = next_syncobj++;
+	sync_set(*handle, 0);
 	pthread_mutex_unlock(&lock);
 	return 0;
 }
 
-int drmSyncobjDestroy(int fd, uint32_t h) { (void)fd; (void)h; return 0; }
+int
+drmSyncobjDestroy(int fd, uint32_t h)
+{
+	(void)fd;
+	pthread_mutex_lock(&lock);
+	sync_set(h, 0);
+	pthread_mutex_unlock(&lock);
+	return 0;
+}
 int drmSyncobjHandleToFD(int fd, uint32_t h, int *o) { (void)fd; (void)h; *o = -1; return -ENOSYS; }
 int drmSyncobjFDToHandle(int fd, int o, uint32_t *h) { (void)fd; (void)o; (void)h; return -ENOSYS; }
-int drmSyncobjImportSyncFile(int fd, uint32_t h, int s) { (void)fd; (void)h; (void)s; return 0; }
+
+/* A sync file from drmSyncobjExportSyncFile: its sequence number; unknown -> the newest job. */
+int
+drmSyncobjImportSyncFile(int fd, uint32_t h, int s)
+{
+	(void)fd;
+	pthread_mutex_lock(&lock);
+	uint64_t seq = last_seq;
+	for (unsigned i = 0; i < sizeof(sfiles) / sizeof(sfiles[0]); i++) {
+		if (sfiles[i].fd == s && s > 0) {
+			seq = sfiles[i].seq;
+			break;
+		}
+	}
+	sync_set(h, seq);
+	pthread_mutex_unlock(&lock);
+	return 0;
+}
 /*
  * Panfrost snapshots every flush's out-fence as a sync file (pan_fence.c);
  * failing here logged "export failed" thousands of times and gave CA no
@@ -587,25 +730,82 @@ int
 drmSyncobjExportSyncFile(int fd, uint32_t h, int *s)
 {
 	(void)fd;
-	(void)h;
 	*s = dev_fd >= 0 ? dup(dev_fd) : -1;
-	return *s >= 0 ? 0 : -EMFILE;
+	if (*s < 0) {
+		return -EMFILE;
+	}
+	/* fds are reused once closed: forget older entries for this fd */
+	pthread_mutex_lock(&lock);
+	for (unsigned i = 0; i < sizeof(sfiles) / sizeof(sfiles[0]); i++) {
+		if (sfiles[i].fd == *s) {
+			sfiles[i].fd = 0;
+		}
+	}
+	sfiles[sfile_next].fd = *s;
+	sfiles[sfile_next].seq = sync_get(h);
+	sfile_next = (sfile_next + 1) % (sizeof(sfiles) / sizeof(sfiles[0]));
+	pthread_mutex_unlock(&lock);
+	return 0;
 }
-int drmSyncobjReset(int fd, const uint32_t *h, uint32_t n) { (void)fd; (void)h; (void)n; return 0; }
-int drmSyncobjSignal(int fd, const uint32_t *h, uint32_t n) { (void)fd; (void)h; (void)n; return 0; }
+
+int
+drmSyncobjReset(int fd, const uint32_t *h, uint32_t n)
+{
+	(void)fd;
+	pthread_mutex_lock(&lock);
+	for (uint32_t i = 0; i < n; i++) {
+		sync_set(h[i], 0);
+	}
+	pthread_mutex_unlock(&lock);
+	return 0;
+}
+
+int
+drmSyncobjSignal(int fd, const uint32_t *h, uint32_t n)
+{
+	return drmSyncobjReset(fd, h, n);
+}
 
 int drmSyncobjTimelineSignal(int fd, const uint32_t *h, uint64_t *p, uint32_t n) { (void)fd; (void)h; (void)p; (void)n; return 0; }
-int drmSyncobjTransfer(int fd, uint32_t d, uint64_t dp, uint32_t s, uint64_t sp, uint32_t f)
-{ (void)fd; (void)d; (void)dp; (void)s; (void)sp; (void)f; return 0; }
+int
+drmSyncobjTransfer(int fd, uint32_t d, uint64_t dp, uint32_t s, uint64_t sp, uint32_t f)
+{
+	(void)fd;
+	(void)dp;
+	(void)sp;
+	(void)f;
+	pthread_mutex_lock(&lock);
+	sync_set(d, sync_get(s));
+	pthread_mutex_unlock(&lock);
+	return 0;
+}
+
+/* Lock not held: the newest sequence number among the handles. */
+static uint64_t
+sync_max(const uint32_t *h, uint32_t n)
+{
+	uint64_t seq = 0;
+	pthread_mutex_lock(&lock);
+	for (uint32_t i = 0; h != NULL && i < n; i++) {
+		uint64_t q = sync_get(h[i]);
+		if (q > seq) {
+			seq = q;
+		}
+	}
+	pthread_mutex_unlock(&lock);
+	return seq;
+}
 
 int
 drmSyncobjQuery2(int fd, uint32_t *h, uint64_t *p, uint32_t n, uint32_t f)
 {
 	(void)fd;
-	(void)h;
 	(void)f;
 	for (uint32_t i = 0; i < n && p; i++) {
-		p[i] = UINT64_MAX;                      /* every point signalled */
+		pthread_mutex_lock(&lock);
+		uint64_t seq = sync_get(h[i]);
+		pthread_mutex_unlock(&lock);
+		p[i] = seq_done(seq, 0) ? UINT64_MAX : 0;
 	}
 	return 0;
 }
@@ -616,14 +816,12 @@ int
 drmSyncobjWait(int fd, uint32_t *h, unsigned n, int64_t t, unsigned f, uint32_t *s)
 {
 	(void)fd;
-	(void)h;
-	(void)n;
-	(void)t;
 	(void)f;
 	if (s) {
 		*s = 0;
 	}
-	return 0;
+	/* t: absolute deadline (ns); 0 or past = poll. Any later deadline waits for the job. */
+	return seq_done(sync_max(h, n), t > 0) ? 0 : -ETIME;
 }
 
 int

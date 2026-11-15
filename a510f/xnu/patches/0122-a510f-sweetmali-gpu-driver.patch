@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
-@@ -0,0 +1,1086 @@
+@@ -0,0 +1,1286 @@
 +/*
 + * SweetMali: kernel driver for the A510F's Mali-T720 MP2 (Exynos 7580),
 + * shaped after Linux panfrost (drivers/gpu/drm/panfrost) so that Mesa's
@@ -28,7 +28,9 @@ index 0000000..1111111
 + *   11 BO_FREE    in [handle]
 + *   12 IMPORT     in [IOSurface id] out [handle, gpu_va, user_va, size]
 + *   13 SUBMIT     in [jc, requirements (bit 0 = fragment)]  out [js status, us]
-+ *   14 WAIT       in [handle, timeout]  (submits are synchronous: no-op)
++ *   14 WAIT       in [handle, timeout]  (no-op)
++ *   17 SUBMIT_ASYNC in [jc, requirements]  out [sequence number]  (job queue)
++ *   18 WAIT_SEQ   in [seq, block]  out [done]
 + *   15 GET_PARAM  in [panfrost DRM_PANFROST_PARAM_*]  out [value]
 + */
 +#include <pexpert/arm64/board_config.h>
@@ -552,7 +554,7 @@ index 0000000..1111111
 +		if ((raw & (done | err)) || (mmu & 1) || mach_absolute_time() > deadline) {
 +			break;
 +		}
-+		if (spin < 50) {
++		if (spin < 2000) {                      /* 20 ms: IOSleep(1) left the GPU idle 1-2 ms per job */
 +			IODelay(10);
 +		} else {
 +			IOSleep(1);
@@ -590,6 +592,171 @@ index 0000000..1111111
 +	return kIOReturnIOError;
 +}
 +
++/*
++ * Job queue (A510F): SUBMIT_ASYNC (17) queues a job chain and returns its
++ * sequence number at once, a worker thread runs the queue in order (so the
++ * vertex/tiler -> fragment order Mesa relies on still holds without fences)
++ * and WAIT_SEQ (18) blocks until a sequence number is done. The CPU builds
++ * the next render pass while the GPU runs this one. Anything that unmaps
++ * GPU memory waits for the queue to drain first; the panel copy waits for
++ * the jobs queued before its swap (sweet_mali_wait_seq). Boot-arg
++ * sweetmali_async=0: synchronous submits only.
++ */
++#define MALI_QLEN               64
++extern "C" kern_return_t kernel_thread_start(void (*)(void *, int), void *, thread_t *);
++extern "C" void thread_deallocate(thread_t);
++static IOLock *g_qlock;
++static struct { uint64_t jc; uint32_t req; } g_q[MALI_QLEN];
++static uint64_t g_q_submitted, g_q_done;        /* sequence numbers; g_qlock */
++static bool g_q_on;
++static uint64_t g_q_t0, g_q_busy_us, g_q_max_us, g_q_wait_us;
++static uint32_t g_q_n, g_q_frag, g_q_depth_max, g_q_failed;
++
++static void
++mali_queue_worker(__unused void *arg, __unused int wres)
++{
++	IOLockLock(g_qlock);
++	for (;;) {
++		while (g_q_done == g_q_submitted) {
++			IOLockSleep(g_qlock, &g_q_submitted, THREAD_UNINT);
++		}
++		uint64_t seq = g_q_done + 1;
++		uint64_t jc = g_q[seq % MALI_QLEN].jc;
++		uint32_t req = g_q[seq % MALI_QLEN].req;
++		uint32_t depth = (uint32_t)(g_q_submitted - g_q_done);
++		IOLockUnlock(g_qlock);
++		uint32_t status = 0;
++		uint64_t us = 0;
++		IOLockLock(g_lock);
++		IOReturn r = gpu_run(jc, req, &status, &us);
++		IOLockUnlock(g_lock);
++		IOLockLock(g_qlock);
++		g_q_done = seq;
++		IOLockWakeup(g_qlock, &g_q_done, false);
++		IOLockWakeup(g_qlock, &g_q_submitted, false);   /* a submitter waiting for room */
++		uint64_t now = mach_absolute_time(), ns = 0;
++		if (g_q_t0 == 0) {
++			g_q_t0 = now;
++		}
++		g_q_n++;
++		g_q_frag += req & 1;
++		g_q_busy_us += us;
++		g_q_failed += r != kIOReturnSuccess;
++		if (us > g_q_max_us) {
++			g_q_max_us = us;
++		}
++		if (depth > g_q_depth_max) {
++			g_q_depth_max = depth;
++		}
++		absolutetime_to_nanoseconds(now - g_q_t0, &ns);
++		if (ns >= 2000000000ull) {
++			IOLog("SWEET MALI: queue %llu ms: %u jobs (%u fragment, %u failed), GPU busy %llu ms (max job %llu ms), deepest queue %u, waits %llu ms\n",
++			    ns / 1000000, g_q_n, g_q_frag, g_q_failed, g_q_busy_us / 1000, g_q_max_us / 1000,
++			    g_q_depth_max, g_q_wait_us / 1000);
++			g_q_t0 = 0;
++			g_q_n = g_q_frag = g_q_failed = g_q_depth_max = 0;
++			g_q_busy_us = g_q_max_us = g_q_wait_us = 0;
++		}
++	}
++}
++
++/* Queue a job chain: its sequence number, 0 if the queue is off. */
++static uint64_t
++mali_queue_submit(uint64_t jc, uint32_t req)
++{
++	if (!g_q_on) {
++		return 0;
++	}
++	IOLockLock(g_qlock);
++	while (g_q_submitted - g_q_done >= MALI_QLEN - 1) {
++		IOLockSleep(g_qlock, &g_q_submitted, THREAD_UNINT);
++	}
++	uint64_t seq = ++g_q_submitted;
++	g_q[seq % MALI_QLEN].jc = jc;
++	g_q[seq % MALI_QLEN].req = req;
++	IOLockWakeup(g_qlock, &g_q_submitted, false);
++	IOLockUnlock(g_qlock);
++	return seq;
++}
++
++/* Wait until job seq is done (poll only: true if done). */
++static bool
++mali_queue_wait(uint64_t seq, bool poll)
++{
++	if (!g_q_on) {
++		return true;
++	}
++	IOLockLock(g_qlock);
++	uint64_t t0 = mach_absolute_time();
++	bool waited = false;
++	while (g_q_done < seq && seq <= g_q_submitted && !poll) {
++		waited = true;
++		IOLockSleep(g_qlock, &g_q_done, THREAD_UNINT);
++	}
++	bool done = g_q_done >= seq || seq > g_q_submitted;
++	if (waited) {
++		uint64_t ns = 0;
++		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++		g_q_wait_us += ns / 1000;
++	}
++	IOLockUnlock(g_qlock);
++	return done;
++}
++
++static uint64_t
++mali_queue_last(void)
++{
++	if (!g_q_on) {
++		return 0;
++	}
++	IOLockLock(g_qlock);
++	uint64_t seq = g_q_submitted;
++	IOLockUnlock(g_qlock);
++	return seq;
++}
++
++/* Every queued job done (before GPU memory goes away, or a synchronous submit). */
++static void
++mali_queue_idle(void)
++{
++	mali_queue_wait(mali_queue_last(), false);
++}
++
++extern "C" uint64_t sweet_mali_seq(void);
++extern "C" void sweet_mali_wait_seq(uint64_t seq);
++extern "C" uint64_t
++sweet_mali_seq(void)
++{
++	return mali_queue_last();
++}
++extern "C" void
++sweet_mali_wait_seq(uint64_t seq)
++{
++	if (seq != 0) {
++		mali_queue_wait(seq, false);
++	}
++}
++
++static void
++mali_queue_start(void)
++{
++	uint32_t on = 1;
++	PE_parse_boot_argn("sweetmali_async", &on, sizeof(on));
++	g_qlock = IOLockAlloc();
++	if (!on || g_qlock == NULL) {
++		IOLog("SWEET MALI: job queue off, synchronous submits\n");
++		return;
++	}
++	thread_t th;
++	if (kernel_thread_start(mali_queue_worker, NULL, &th) != KERN_SUCCESS) {
++		IOLog("SWEET MALI: job queue worker not started, synchronous submits\n");
++		return;
++	}
++	thread_deallocate(th);
++	g_q_on = true;
++	IOLog("SWEET MALI: job queue on (%u entries)\n", MALI_QLEN);
++}
++
 +/* ---- buffer objects ---------------------------------------------------- */
 +
 +class SweetMaliBO : public OSObject {
@@ -610,6 +777,7 @@ index 0000000..1111111
 +SweetMaliBO::free()
 +{
 +	if (gpuVA != 0) {
++		mali_queue_idle();                      /* no queued job still reads it */
 +		IOLockLock(g_lock);
 +		gpu_unmap(gpuVA, size);
 +		va_free(gpuVA, size);
@@ -953,12 +1121,32 @@ index 0000000..1111111
 +		}
 +		uint32_t status = 0;
 +		uint64_t us = 0;
++		mali_queue_idle();                      /* after everything queued before it */
 +		IOLockLock(g_lock);
 +		IOReturn r = gpu_run(in[0], (uint32_t)in[1], &status, &us);
 +		IOLockUnlock(g_lock);
 +		args->scalarOutput[0] = status;
 +		args->scalarOutput[1] = us;
 +		return r;
++	}
++	case 17: {                                      /* SUBMIT_ASYNC: in [jc, req] out [seq] */
++		if (nin < 2 || args->scalarOutputCount < 1) {
++			return kIOReturnBadArgument;
++		}
++		uint64_t seq = mali_queue_submit(in[0], (uint32_t)in[1]);
++		if (seq == 0) {
++			return kIOReturnUnsupported;
++		}
++		args->scalarOutput[0] = seq;
++		return kIOReturnSuccess;
++	}
++	case 18: {                                      /* WAIT_SEQ: in [seq, block] out [done] */
++		if (nin < 2 || args->scalarOutputCount < 1) {
++			return kIOReturnBadArgument;
++		}
++		bool done = mali_queue_wait(in[0], in[1] == 0);
++		args->scalarOutput[0] = done;
++		return done ? kIOReturnSuccess : kIOReturnTimeout;
 +	}
 +	case 14:                                        /* WAIT: submits are synchronous */
 +		return kIOReturnSuccess;
@@ -1076,6 +1264,7 @@ index 0000000..1111111
 +	g_ready = true;
 +	mali_selftest();
 +	mali_draw_test();
++	mali_queue_start();
 +	SweetMali *m = OSTypeAlloc(SweetMali);
 +	if (m != NULL && m->init() && m->attach(provider)) {
 +		m->registerService();
@@ -1086,6 +1275,17 @@ index 0000000..1111111
 +#else
 +void
 +sweet_mali_publish(IOService *)
++{
++}
++extern "C" uint64_t sweet_mali_seq(void);
++extern "C" void sweet_mali_wait_seq(uint64_t seq);
++extern "C" uint64_t
++sweet_mali_seq(void)
++{
++	return 0;
++}
++extern "C" void
++sweet_mali_wait_seq(uint64_t)
 +{
 +}
 +#endif /* SWEET_GIC_V2 */

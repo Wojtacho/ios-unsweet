@@ -846,5 +846,21 @@ rep("""		IOLog("SWEET MEM: free %llu MB, wired %llu MB | surfaces %u = %llu MB |
 		    (uint64_t)vm_page_free_count * page_size >> 20, (uint64_t)vm_page_wire_count * page_size >> 20,
 		    sn, sb >> 20, bn, bb >> 20, fb->fPresents - fb->fPresentsAt10s, sw / 1000000);
 		fb->fPresentsAt10s = fb->fPresents;""")
+# GPU job queue (SweetMali): the frame's render jobs may still be running; copy after them
+rep("""extern "C" void sweet_mali_bo_stats(uint64_t *bytes, uint32_t *count);     /* SweetMali.cpp */
+""", """extern "C" void sweet_mali_bo_stats(uint64_t *bytes, uint32_t *count);     /* SweetMali.cpp */
+extern "C" uint64_t sweet_mali_seq(void);                                   /* SweetMali.cpp */
+extern "C" void sweet_mali_wait_seq(uint64_t seq);
+""")
+rep("""AppleCLCD::present(const uint8_t *rec)
+{
+	uint32_t mask = get32(rec, 0x104);
+	uint64_t t0 = mach_absolute_time();
+""", """AppleCLCD::present(const uint8_t *rec)
+{
+	uint32_t mask = get32(rec, 0x104);
+	sweet_mali_wait_seq(sweet_mali_seq());          /* every GPU job queued so far is done */
+	uint64_t t0 = mach_absolute_time();
+""")
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
 print('ok async')
