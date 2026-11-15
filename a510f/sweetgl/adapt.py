@@ -659,3 +659,159 @@ edit('eagl.c', [
 		win_next = ts.tv_sec + atoi(t);
 	}'''),
 ])
+
+
+# Variable blur, round 29 (user: "the App Library search field blur looks weird";
+# search pull-down: black blocks in the status bar).
+# 1. Clears of a variable blur's source S are held until the next draw and
+#    dropped when that draw is a 0x26 mip pass on S (they wiped S's only
+#    level; covers sources filled by copies sweetgl does not see as draws).
+# 2. Before the 0x27 pass the sampled texture gets a real mip chain, and
+#    sgl_vblur reads the level that matches the radius (5 bilinear taps,
+#    trilinear) instead of 24 full-resolution taps (grainy, doubled edges).
+edit('eagl.c', [
+    ('''static const char vblur_func[] =''', '''static const char vblur_func_old[] ='''),
+    ('''static const char nop_copy_func[] =''', '''static const char vblur_func[] =
+    "uniform highp vec4 minmax_dir;\\n"
+    "lowp vec4 sgl_vblur(lowp vec4 m) {\\n"
+    "  highp vec2 tc = texcoord0_0;\\n"
+    "  highp vec2 px = vec2(length(vec2(dFdx(tc.x), dFdy(tc.x))), length(vec2(dFdx(tc.y), dFdy(tc.y))));\\n"
+    "  mediump float r = (minmax_dir.y > .5 ? 1. - m.a : m.a) * minmax_dir.x * .5;\\n"
+    "  if (r < .75) {\\n"
+    "    return texture2D(texture0, tc);\\n"
+    "  }\\n"
+    "  mediump float b = max(log2(r) - 1., 0.);\\n"
+    "  highp vec2 d = .55 * r * px;\\n"
+    "  mediump vec4 acc = 2. * texture2D(texture0, tc, b);\\n"
+    "  acc += texture2D(texture0, tc + vec2(d.x, d.y), b);\\n"
+    "  acc += texture2D(texture0, tc + vec2(-d.x, d.y), b);\\n"
+    "  acc += texture2D(texture0, tc + vec2(d.x, -d.y), b);\\n"
+    "  acc += texture2D(texture0, tc + vec2(-d.x, -d.y), b);\\n"
+    "  return acc / 6.;\\n"
+    "}\\n";
+
+static const char nop_copy_func[] ='''),
+    ('''static GLint copy_src_of[8192];''', '''static GLint copy_src_of[8192];
+static GLint vb_restore_tex, vb_restore_min;
+static uint8_t is_blur_s[8192];         /* textures a 0x26 mip pass drew into */
+static struct {
+	int on;
+	GLint fb;
+	GLbitfield mask;
+	GLfloat cc[4];
+	GLboolean sc_on;
+	GLint sc[4];
+} pend_clear;
+
+/* run a held clear now, with the clear colour and scissor it was issued with */
+static void
+pend_clear_apply(void)
+{
+	if (!pend_clear.on) {
+		return;
+	}
+	pend_clear.on = 0;
+	GLint cur = 0, sc[4] = {0};
+	GLfloat cc[4] = {0};
+	GLboolean on = glIsEnabled(GL_SCISSOR_TEST);
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &cur);
+	glGetFloatv(GL_COLOR_CLEAR_VALUE, cc);
+	glGetIntegerv(GL_SCISSOR_BOX, sc);
+	if (cur != pend_clear.fb) {
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)pend_clear.fb);
+	}
+	glClearColor(pend_clear.cc[0], pend_clear.cc[1], pend_clear.cc[2], pend_clear.cc[3]);
+	if (pend_clear.sc_on) {
+		glEnable(GL_SCISSOR_TEST);
+		glScissor(pend_clear.sc[0], pend_clear.sc[1], pend_clear.sc[2], pend_clear.sc[3]);
+	} else {
+		glDisable(GL_SCISSOR_TEST);
+	}
+	glClear(pend_clear.mask);
+	glClearColor(cc[0], cc[1], cc[2], cc[3]);
+	glScissor(sc[0], sc[1], sc[2], sc[3]);
+	if (on) {
+		glEnable(GL_SCISSOR_TEST);
+	} else {
+		glDisable(GL_SCISSOR_TEST);
+	}
+	if (cur != pend_clear.fb) {
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)cur);
+	}
+}'''),
+    ('''	r->seq = ++ring_seq;
+	/* which texture each draw renders into''', '''	r->seq = ++ring_seq;
+	/* a held clear: dropped before a 0x26 pass on the same fbo, otherwise run first */
+	if (pend_clear.on) {
+		if (prog_texfn_kind(prog) == 1 && r->fbo == pend_clear.fb) {
+			pend_clear.on = 0;
+		} else {
+			pend_clear_apply();
+		}
+	}
+	/* which texture each draw renders into'''),
+    ('''			if (r->tex0 > 0 && prog_texfn_kind(prog) == 0) {
+				copy_src_of[att_tex] = r->tex0;
+			}''', '''			if (r->tex0 > 0 && prog_texfn_kind(prog) == 0) {
+				copy_src_of[att_tex] = r->tex0;
+			}
+			if (prog_texfn_kind(prog) == 1) {
+				is_blur_s[att_tex] = 1;
+			}'''),
+    ('''	int vb = prog_texfn_kind(prog);
+	GLint vb_min[2] = {0, 0};''', '''	/* the previous draw was a variable blur: its source's filter back to what CA set */
+	if (vb_restore_tex > 0) {
+		GLint act1 = 0, keep = 0;
+		glGetIntegerv(GL_ACTIVE_TEXTURE, &act1);
+		glActiveTexture(GL_TEXTURE0);
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &keep);
+		glBindTexture(GL_TEXTURE_2D, (GLuint)vb_restore_tex);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, vb_restore_min);
+		glBindTexture(GL_TEXTURE_2D, (GLuint)keep);
+		glActiveTexture((GLenum)act1);
+		vb_restore_tex = 0;
+	}
+	int vb = prog_texfn_kind(prog);
+	GLint vb_min[2] = {0, 0};'''),
+    ('''				sweet_drm_log("sweetgl: variable blur reads %d (the copy source of %d, cleared by the mip passes)",
+				    copy_src_of[t], t);
+			}
+		}''', '''				sweet_drm_log("sweetgl: variable blur reads %d (the copy source of %d, cleared by the mip passes)",
+				    copy_src_of[t], t);
+			}
+		}
+		/* a real mip chain for the level-based blur; the filter goes back at the next draw */
+		GLint st = 0;
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &st);
+		if (st > 0) {
+			glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &vb_restore_min);
+			vb_restore_tex = st;
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000);
+			glGenerateMipmap(GL_TEXTURE_2D);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+		}'''),
+    ('''	glClear(mask);
+	SGL_POST(10);''', '''	/* a variable blur source: hold the clear (see pend_clear) */
+	if (fb != 0 && mask == GL_COLOR_BUFFER_BIT) {
+		GLint at = 0, nm = 0;
+		glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &at);
+		if (at == GL_TEXTURE) {
+			glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &nm);
+		}
+		if (nm > 0 && nm < 8192 && is_blur_s[nm]) {
+			pend_clear_apply();
+			pend_clear.on = 1;
+			pend_clear.fb = fb;
+			pend_clear.mask = mask;
+			memcpy(pend_clear.cc, cc, sizeof(cc));
+			pend_clear.sc_on = glIsEnabled(GL_SCISSOR_TEST);
+			memcpy(pend_clear.sc, sc, sizeof(sc));
+			SGL_POST(10);
+			return;
+		}
+	}
+	glClear(mask);
+	SGL_POST(10);'''),
+])
