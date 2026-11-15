@@ -432,6 +432,7 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 {''', '''/* the last draw that rendered into each texture name, and through which fbo */
 static uint32_t tex_last_draw[8192];
 static GLint tex_last_fbo[8192];
+static GLint copy_src_of[8192];
 
 /* 1: the program's fragment shader uses sgl_nop (0x26), 2: sgl_vblur (0x27), 0: neither */
 static int
@@ -489,6 +490,10 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 		if (att_tex > 0 && att_tex < 8192) {
 			tex_last_draw[att_tex] = r->seq;
 			tex_last_fbo[att_tex] = r->fbo;
+			/* an ordinary draw into a texture: what it copied (variable blur source, below) */
+			if (r->tex0 > 0 && prog_texfn_kind(prog) == 0) {
+				copy_src_of[att_tex] = r->tex0;
+			}
 		}
 	}
 	/*
@@ -499,6 +504,29 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 	 */
 	int vb = prog_texfn_kind(prog);
 	GLint vb_min[2] = {0, 0};
+	/*
+	 * Variable blur (App Library header and bars over scrolled content): CA
+	 * copies the backdrop into S, then before each 0x26 mip pass clears the
+	 * framebuffer of S, which on Apple's GPUs targets the next mip level.
+	 * Here S has level 0 only, so the clears wiped it and the 0x27 blur read
+	 * nothing (black header, round 21 trace). The blur reads the texture the
+	 * copy came from instead: the same pixels S held before the clears.
+	 */
+	if (vb == 2) {
+		GLint act0 = 0, t = 0;
+		glGetIntegerv(GL_ACTIVE_TEXTURE, &act0);
+		glActiveTexture(GL_TEXTURE0);
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &t);
+		if (t > 0 && t < 8192 && copy_src_of[t] > 0) {
+			glBindTexture(GL_TEXTURE_2D, (GLuint)copy_src_of[t]);
+			static int told;
+			if (told++ < 3) {
+				sweet_drm_log("sweetgl: variable blur reads %d (the copy source of %d, cleared by the mip passes)",
+				    copy_src_of[t], t);
+			}
+		}
+		glActiveTexture((GLenum)act0);
+	}
 	if (vb) {
 		GLint act0 = 0;
 		glGetIntegerv(GL_ACTIVE_TEXTURE, &act0);
