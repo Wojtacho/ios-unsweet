@@ -602,7 +602,7 @@ gpu_run(uint64_t jc, uint32_t req, uint32_t *status_out, uint64_t *us_out)
 extern "C" kern_return_t kernel_thread_start(void (*)(void *, int), void *, thread_t *);
 extern "C" void thread_deallocate(thread_t);
 static IOLock *g_qlock;
-static struct { uint64_t jc; uint32_t req; uint64_t t; } g_q[MALI_QLEN];
+static struct { uint64_t jc; uint32_t req; uint64_t t; uint32_t fbd[16]; bool fbd_ok; } g_q[MALI_QLEN];
 static uint32_t g_q_delay_us;                   /* sweetmali_qdelay: wait before each job (test) */
 static uint32_t g_q_dumps;
 
@@ -690,6 +690,9 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 		uint64_t seq = g_q_done + 1;
 		uint64_t jc = g_q[seq % MALI_QLEN].jc;
 		uint64_t queued_at = g_q[seq % MALI_QLEN].t;
+		uint32_t fbd_at_submit[16];
+		bool fbd_ok = g_q[seq % MALI_QLEN].fbd_ok;
+		memcpy(fbd_at_submit, g_q[seq % MALI_QLEN].fbd, sizeof(fbd_at_submit));
 		uint32_t req = g_q[seq % MALI_QLEN].req;
 		uint32_t depth = (uint32_t)(g_q_submitted - g_q_done);
 		IOLockUnlock(g_qlock);
@@ -705,6 +708,15 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 		if (r != kIOReturnSuccess && g_q_dumps < 12) {
 			g_q_dumps++;
 			mali_fault_dump(jc, g_fault_head, age_ns / 1000, depth);
+			uint32_t now_[16];
+			uint64_t base = jc & ~0xffffull;
+			if (fbd_ok && mali_peek(base, &now_[0]) && mali_peek(base + 32, &now_[8])) {
+				bool same = memcmp(now_, fbd_at_submit, sizeof(now_)) == 0;
+				IOLog("SWEET MALI: pool 0x%llx at submit %08x %08x %08x %08x %08x %08x %08x %08x | %08x %08x %08x %08x -> %s\n",
+				    base, fbd_at_submit[0], fbd_at_submit[1], fbd_at_submit[2], fbd_at_submit[3], fbd_at_submit[4],
+				    fbd_at_submit[5], fbd_at_submit[6], fbd_at_submit[7], fbd_at_submit[8], fbd_at_submit[9],
+				    fbd_at_submit[10], fbd_at_submit[11], same ? "UNCHANGED since submit" : "CHANGED since submit");
+			}
 		}
 		IOLockUnlock(g_lock);
 		IOLockLock(g_qlock);
@@ -753,6 +765,16 @@ mali_queue_submit(uint64_t jc, uint32_t req)
 	g_q[seq % MALI_QLEN].jc = jc;
 	g_q[seq % MALI_QLEN].req = req;
 	g_q[seq % MALI_QLEN].t = mach_absolute_time();
+	/*
+	 * The first 64 bytes of the job's 64 KB-aligned pool bo (where queued
+	 * jobs found their framebuffer descriptor bad) as they are at submit, to
+	 * compare when the job fails: changed in the queue, or bad from the start.
+	 */
+	{
+		uint64_t base = jc & ~0xffffull;
+		g_q[seq % MALI_QLEN].fbd_ok = mali_peek(base, &g_q[seq % MALI_QLEN].fbd[0]) &&
+		    mali_peek(base + 32, &g_q[seq % MALI_QLEN].fbd[8]);
+	}
 	IOLockWakeup(g_qlock, &g_q_submitted, false);
 	IOLockUnlock(g_qlock);
 	return seq;

@@ -613,3 +613,19 @@ edit('eagl.c', [
     ('''#define WIN_TRIGGER(w, h) (((w) == 138 && (h) == 306) || ((w) == 296 && (h) == 296) || ((w) == 297 && (h) == 296))''',
      '''#define WIN_TRIGGER(w, h) ((w) == 1194 && (h) == 1164)'''),
 ])
+
+# Round 21 trace: windows only from SWEETGL_TRACE=N s after backboardd's
+# start (the App Library scroll), every 3 s, 300 draws; thumbnails also for the
+# 1194x1164 App Library surfaces (up to 1.5 Mpx, was 250 kpx).
+edit('eagl.c', [
+    ('''#define WIN_SECS 15''', '''#define WIN_SECS 3'''),
+    ('''#define WIN_DRAWS 500''', '''#define WIN_DRAWS 300'''),
+    ('''(size_t)r[2] * (size_t)r[3] > 250000) {''', '''(size_t)r[2] * (size_t)r[3] > 1500000) {'''),
+    ('''	trace_left = t && t[0] == '1' ? 20000 : 0;''', '''	/* SWEETGL_TRACE=1: trace; =N (N > 1): trace, windows from N s after start */
+	trace_left = t && atoi(t) > 0 ? 20000 : 0;
+	if (t && atoi(t) > 1) {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		win_next = ts.tv_sec + atoi(t);
+	}'''),
+])

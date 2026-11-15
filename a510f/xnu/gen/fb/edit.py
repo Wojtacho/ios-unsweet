@@ -750,10 +750,11 @@ rep("""		if (src != 0 && s->memory != NULL && s->offset < s->memory->getLength()
 			sweet_fb_dc_civac(""")
 rep("""	const bool convert = fmt == SWEET_FMT_L10R || fmt == SWEET_FMT_W30R;
 """, """	const bool convert = fmt == SWEET_FMT_L10R || fmt == SWEET_FMT_W30R;
-	if (!convert && fDim == 0) {
+	if (!convert) {
+		/* the fade too: dimmed in the same fast copy (the slow path did not dim without fRowBuf) */
 		struct sweet_fit_job j = {
 			base, s->bytesPerRow, fDraw, fRowBytes, fFitCol, sx, sy, dx, dy, w, h,
-			px0, px1, py0, py1, fFitNum, fFitDen,
+			px0, px1, py0, py1, fFitNum, fFitDen, fDim,
 		};
 		sweet_fit_run(&j);
 		return;
