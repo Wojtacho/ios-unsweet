@@ -1345,3 +1345,34 @@ busy-bo swap path (WAITBO_BLOCK), GPU timing (2 ms pause), retry after the
 reset (fails every time). The first 64 bytes of the pool bo (the FBD) are
 unchanged between submit and failure; round 26 compares 1 KB.
 Next: GPU fix, then cheaper blur (downsample first), CPU profiling.
+
+## 2026-11-15 (night): rounds 26-39, handoff
+
+Fixed and verified on the phone (twrp-write/out/rNN: screenshots + log.txt):
+- App exit crash: 0127 user VA limit (see above). Round 26+.
+- App Library header blur: held clears (pend_clear) + private mipmapped copy
+  for the 0x27 variable blur; 0x26 mip draws skipped (sgl_skip_draw); blur
+  direction flipped (SWEETGL_VBLUR_FLIP, default 1). Rounds 29-33.
+- Thin full-width line under the App Library search field (scrolled, output
+  row 281, ~20% darker): the backdrop's edge row was partly transparent;
+  sgl_vblur now un-premultiplies samples with alpha > .02 and makes them
+  opaque. Round 37 (sweetgl 6c5240a, region sha b1786b9f...).
+- Passcode screen after the power menu's Cancel: SpringBoard sends keybag
+  sel 32, then sel 8 (lock). Fixed by 0128 (ss = 0x6: keybag_state_no_pin)
+  + 0130 (sls = 3 = kMobileKeyBagDisabled). Round 38: Cancel -> home screen.
+  0129 logs SpringBoard's keybag calls (first 400) and all failed calls.
+- Screen-off fade: 7 eased steps (80..5%) + black, every 3 vsyncs, ~0.38 s
+  (dim is now a multiply: 256 - brightness). Round 38 log: steps at +23 ..
+  +378 ms.
+- GPU DATA_INVALID failures: 0 in rounds 36, 37, 38 (were ~12 per run; the
+  1056x1068 variable-blur surface's jobs; gone since the 0x26 draws are not
+  sent). 0122 logs failed jobs' tiler context in their own 12 entries.
+
+Speed (round 39, 37f02ab, a510f-ios-boot-r39.tar): CPU 1.4 GHz
+(a510fcpufreq=1400: table_cpu P4 M216 S0, 1.21875 V vsel 0x83, DIV_CPU_1
+0x77). Frame time was ~90 ms of which ~18 ms GPU wait (finish), so CPU-bound
+in backboardd. Round 38 baseline, home swipes: 134 fragment jobs / 2 s, GPU
+busy 1298 ms. No thermal throttling exists: watch it. Revert: boot-arg 1200.
+
+Next: compare round 39 speed; further speed (cheaper dock/folder/CC blurs,
+CPU profile of backboardd, max GPU job 49 ms at 1242x2208).
