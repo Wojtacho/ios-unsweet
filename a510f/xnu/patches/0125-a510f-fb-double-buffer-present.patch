@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 0f8e61a..4aad1d0 100644
+index 0f8e61a..3f4ef48 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -82,6 +82,25 @@ enum {
@@ -28,7 +28,7 @@ index 0f8e61a..4aad1d0 100644
  
  class IOMobileFramebuffer : public IOService {
  	OSDeclareDefaultStructors(IOMobileFramebuffer);
-@@ -124,7 +143,47 @@ public:
+@@ -124,7 +143,48 @@ public:
  	bool          fDirty;
  	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
  	bool          fPowerOff;      /* RequestPowerChange(0) */
@@ -65,6 +65,7 @@ index 0f8e61a..4aad1d0 100644
 +	uint64_t            fHoldWait;      /* this hold: fWakeWait, or the boot hold */
 +	bool                fBootSeen;      /* the first "display on" of the boot came */
 +	uint32_t            fDim;           /* fade: shift right by fDim (presentFit) */
++	SweetSurface       *fFadeSurf[SWEET_FB_LAYERS];     /* last surface of each layer, kept for the fade */
 +	uint32_t           *fRowBuf;        /* one panel row, cached (presentFit) */
 +	IOTimerEventSource *fPresentTimer;
 +	bool                fPresentBusy;
@@ -76,7 +77,7 @@ index 0f8e61a..4aad1d0 100644
  
  	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
  	void addClient(IOMobileFramebufferUserClient *client);
-@@ -174,6 +233,196 @@ public:
+@@ -174,6 +234,196 @@ public:
  
  OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
  
@@ -273,7 +274,7 @@ index 0f8e61a..4aad1d0 100644
  bool
  AppleCLCD::start(IOService *provider)
  {
-@@ -244,8 +493,48 @@ AppleCLCD::start(IOService *provider)
+@@ -244,8 +494,48 @@ AppleCLCD::start(IOService *provider)
  	uint32_t hz = 10;
  	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
  	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
@@ -322,7 +323,7 @@ index 0f8e61a..4aad1d0 100644
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
  	setProperty("external", false);
  	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
-@@ -285,6 +574,28 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -285,6 +575,28 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		client->notify(SWEET_FB_NOTIFY_VSYNC, values, 6);
  	}
  	if (fb->fPowerOff) {
@@ -351,7 +352,7 @@ index 0f8e61a..4aad1d0 100644
  		/* Fade out: halve every channel each vsync, then black, then idle. */
  		uint32_t step = fb->fFadeStep;
  		if (step <= 6) {
-@@ -293,7 +604,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -293,7 +605,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		IOLockUnlock(fb->fLock);
  		if (step <= 6) {
  			for (uint32_t y = 0; y < fb->fHeight; y++) {
@@ -360,7 +361,7 @@ index 0f8e61a..4aad1d0 100644
  				for (uint32_t x = 0; x < fb->fWidth; x++) {
  					row[x] = step < 6 ? (row[x] >> 1) & 0x7f7f7f7f : 0;
  				}
-@@ -302,21 +613,92 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -302,21 +614,92 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
  		return;
  	}
@@ -392,16 +393,16 @@ index 0f8e61a..4aad1d0 100644
 +	 */
 +	bool flush = fb->fDirty && !fb->fPresentBusy && fb->fPresentTimer != NULL &&
 +	    now - fb->fLastPresent >= fb->fMinGap;
++	if (flush) {
++		fb->fLastPresent = now;
++		fb->fPresentBusy = true;
++	}
++	IOLockUnlock(fb->fLock);
  	if (flush) {
 -		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
 -		if (rec != NULL) {
 -			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
 -			fb->fDirty = false;
-+		fb->fLastPresent = now;
-+		fb->fPresentBusy = true;
-+	}
-+	IOLockUnlock(fb->fLock);
-+	if (flush) {
 +		fb->fPresentTimer->setTimeoutUS(1);
 +	}
 +	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
@@ -460,7 +461,7 @@ index 0f8e61a..4aad1d0 100644
  }
  
  void
-@@ -347,6 +729,8 @@ get32(const uint8_t *p, uint32_t off)
+@@ -347,6 +730,8 @@ get32(const uint8_t *p, uint32_t off)
  }
  
  static uint32_t sweet_fb_swaps_logged;
@@ -469,7 +470,7 @@ index 0f8e61a..4aad1d0 100644
  
  /*
   * A510F: layer pixel formats. Every 4-byte format used to be copied as if it
-@@ -412,19 +796,131 @@ static uint64_t sweet_fb_swap_count;
+@@ -412,19 +797,131 @@ static uint64_t sweet_fb_swap_count;
  void
  AppleCLCD::swap(const uint8_t *rec)
  {
@@ -603,11 +604,24 @@ index 0f8e61a..4aad1d0 100644
  
  
  	if (!fConsolePaused) {
-@@ -449,7 +945,18 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -448,8 +945,30 @@ AppleCLCD::present(const uint8_t *rec)
+ 		if (!(mask & (1u << layer)) || id == 0) {
  			continue;
  		}
- 		SweetSurface *s = sweet_surface_copy(id);
+-		SweetSurface *s = sweet_surface_copy(id);
 -		if (sweet_fb_swaps_logged < 16) {
++		SweetSurface *s = NULL;
++		if (fDim != 0 && fFadeSurf[layer] != NULL) {
++			s = fFadeSurf[layer];   /* CA may have dropped it at display off */
++			s->retain();
++		} else {
++			s = sweet_surface_copy(id);
++			if (s != NULL && fFadeSurf[layer] != s) {
++				OSSafeReleaseNULL(fFadeSurf[layer]);
++				s->retain();
++				fFadeSurf[layer] = s;
++			}
++		}
 +		uint64_t sig = ((uint64_t)layer << 60) ^ ((uint64_t)(s ? s->width : 0) << 44) ^
 +		    ((uint64_t)(s ? s->height : 0) << 30) ^ ((uint64_t)get32(a, 8) << 17) ^ get32(a, 12) ^
 +		    ((uint64_t)(uint32_t)dx << 50) ^ ((uint64_t)(uint32_t)dy << 36) ^ ((uint64_t)(uint32_t)w << 22) ^
@@ -623,7 +637,7 @@ index 0f8e61a..4aad1d0 100644
  			sweet_fb_swaps_logged++;
  			IOLog("SWEET FB: swap %u layer %u surface %u %ux%u fmt 0x%x bpr %u a %d,%d %ux%u b %d,%d %dx%d\n",
  			    get32(rec, 0x50), layer, id, s ? s->width : 0, s ? s->height : 0,
-@@ -460,7 +967,16 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -460,7 +979,16 @@ AppleCLCD::present(const uint8_t *rec)
  			OSSafeReleaseNULL(s);
  			continue;
  		}
@@ -641,7 +655,7 @@ index 0f8e61a..4aad1d0 100644
  		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
  		sweet_fb_note_format(s->pixelFormat, bpe, s->width, s->height);
  		if (w <= 0 || h <= 0) {
-@@ -473,8 +989,18 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -473,8 +1001,18 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -660,7 +674,7 @@ index 0f8e61a..4aad1d0 100644
  			s->release();
  			continue;
  		}
-@@ -511,13 +1037,41 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -511,13 +1049,41 @@ AppleCLCD::present(const uint8_t *rec)
  		}
  		if (src != 0 && bpe == 4) {
  			for (int32_t y = 0; y < h; y++) {
@@ -703,7 +717,7 @@ index 0f8e61a..4aad1d0 100644
  }
  
  /*
-@@ -547,7 +1101,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -547,7 +1113,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	if (!fFitCleared) {
  		/* Black pillarbox (the console text was there). */
  		for (uint32_t y = 0; y < fHeight; y++) {
@@ -712,7 +726,7 @@ index 0f8e61a..4aad1d0 100644
  		}
  		fFitCleared = true;
  	}
-@@ -570,19 +1124,47 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -570,19 +1136,47 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	const uint8_t *base = (const uint8_t *)(src + s->offset);
  	const uint32_t fmt = s->pixelFormat;
  	const bool convert = fmt == SWEET_FMT_L10R || fmt == SWEET_FMT_W30R;
@@ -762,7 +776,7 @@ index 0f8e61a..4aad1d0 100644
  	}
  }
  
-@@ -737,7 +1319,34 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -737,7 +1331,34 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			if (off != fFB->fPowerOff) {
  				fFB->fPowerOff = off;
  				fFB->fFadeStep = 0;

@@ -924,3 +924,25 @@ rep("""				fFB->fDirty = false;
 			}""")
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
 print('ok boot hold')
+
+# Fade frames found no surface (round 19 bursts: full-brightness frames, then
+# black): CA drops its display surfaces at "display off", so the lookup by id
+# failed and the dim redraw drew nothing over an older frame. Keep a
+# reference to each layer's last surface; the fade redraws from it.
+rep("""	uint32_t            fDim;           /* fade: shift right by fDim (presentFit) */""",
+    """	uint32_t            fDim;           /* fade: shift right by fDim (presentFit) */
+	SweetSurface       *fFadeSurf[SWEET_FB_LAYERS];     /* last surface of each layer, kept for the fade */""")
+rep("""		SweetSurface *s = sweet_surface_copy(id);""", """		SweetSurface *s = NULL;
+		if (fDim != 0 && fFadeSurf[layer] != NULL) {
+			s = fFadeSurf[layer];   /* CA may have dropped it at display off */
+			s->retain();
+		} else {
+			s = sweet_surface_copy(id);
+			if (s != NULL && fFadeSurf[layer] != s) {
+				OSSafeReleaseNULL(fFadeSurf[layer]);
+				s->retain();
+				fFadeSurf[layer] = s;
+			}
+		}""")
+open(p, 'w', encoding='utf-8', newline='\n').write(s)
+print('ok fade surfaces')
