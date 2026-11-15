@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 0f8e61a..57e175a 100644
+index 0f8e61a..a24e042 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -82,6 +82,23 @@ enum {
@@ -26,7 +26,7 @@ index 0f8e61a..57e175a 100644
  
  class IOMobileFramebuffer : public IOService {
  	OSDeclareDefaultStructors(IOMobileFramebuffer);
-@@ -125,6 +142,41 @@ public:
+@@ -125,6 +142,43 @@ public:
  	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
  	bool          fPowerOff;      /* RequestPowerChange(0) */
  	uint32_t      fFadeStep;      /* fade-out steps done while off */
@@ -54,6 +54,8 @@ index 0f8e61a..57e175a 100644
 +	IOWorkLoop         *fPresentLoop;
 +	uint8_t             fLastRec[SWEET_FB_SWAP_REC_SIZE];   /* last presented swap (fade) */
 +	bool                fHaveLast;
++	uint64_t            fTSwapWait;     /* swaps waiting for the previous present (async) */
++	uint64_t            fPresentsAt10s;
 +	bool                fWakeSkip;      /* display just on: wait for a new frame */
 +	uint64_t            fWakeAt, fWakeWait;
 +	uint32_t            fDim;           /* fade: shift right by fDim (presentFit) */
@@ -68,7 +70,7 @@ index 0f8e61a..57e175a 100644
  
  	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
  	void addClient(IOMobileFramebufferUserClient *client);
-@@ -174,6 +226,38 @@ public:
+@@ -174,6 +228,196 @@ public:
  
  OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
  
@@ -78,6 +80,164 @@ index 0f8e61a..57e175a 100644
 + * double buffer, bits 8.. the shown buffer. Reads only, no lock: a flip in
 + * the middle tears the picture at worst.
 + */
++/*
++ * A510F: the fit scale (1242x2208 -> 1080x1920) split over CPUs. One job
++ * a frame: SWEET_FIT_WORKERS kernel threads plus the presenting thread each
++ * take a band of panel rows: drop the stale cached lines of the source rows
++ * they read (the GPU wrote them), scale a row into a cached row buffer, then
++ * one block copy into the write-combined panel memory. Single-threaded and
++ * per-pixel-checked this took ~48 ms a frame.
++ */
++#define SWEET_FIT_WORKERS 3
++struct sweet_fit_job {
++	const uint8_t *base;            /* surface pixels (cached mapping) + offset */
++	uint64_t       bpr;
++	uintptr_t      draw;
++	uint64_t       drawBpr;
++	const int32_t *col;             /* panel column -> logical column */
++	int32_t        sx, sy, dx, dy, w, h, px0, px1, py0, py1;
++	int32_t        num, den;
++};
++#ifndef THREAD_UNINT
++#define THREAD_UNINT 0
++#endif
++static uint32_t             sweet_fb_async = 1;
++static IOLock              *sweet_fit_lock;
++static struct sweet_fit_job sweet_fit_cur;
++static uint32_t             sweet_fit_gen, sweet_fit_left;
++static uint32_t            *sweet_fit_rows[SWEET_FIT_WORKERS + 1];
++static bool                 sweet_fit_ready;
++extern "C" kern_return_t kernel_thread_start(void (*)(void *, int), void *, thread_t *);
++extern "C" void thread_deallocate(thread_t);
++
++static void
++sweet_fit_band(const struct sweet_fit_job *j, uint32_t band, uint32_t nbands)
++{
++	int32_t rows = j->py1 - j->py0;
++	int32_t b0 = j->py0 + (int32_t)((int64_t)rows * band / nbands);
++	int32_t b1 = j->py0 + (int32_t)((int64_t)rows * (band + 1) / nbands);
++	uint32_t *buf = sweet_fit_rows[band];
++	if (b0 >= b1 || buf == NULL) {
++		return;
++	}
++	/* source rows this band reads, out of the cache first */
++	int32_t l0 = (int32_t)(((int64_t)b0 * j->den) / j->num) - j->dy;
++	int32_t l1 = (int32_t)(((int64_t)(b1 - 1) * j->den) / j->num) - j->dy;
++	l0 = l0 < 0 ? 0 : l0;
++	l1 = l1 >= j->h ? j->h - 1 : l1;
++	if (l1 >= l0) {
++		uintptr_t a = (uintptr_t)(j->base + (uint64_t)(j->sy + l0) * j->bpr) & ~(uintptr_t)63;
++		uintptr_t end = (uintptr_t)(j->base + (uint64_t)(j->sy + l1 + 1) * j->bpr);
++		for (; a < end; a += 64) {
++			__asm__ volatile ("dc civac, %0" : : "r"(a) : "memory");
++		}
++		__asm__ volatile ("dsb sy" : : : "memory");
++	}
++	/* columns inside the layer: the same for every row */
++	int32_t c0 = j->px0, c1 = j->px1;
++	while (c0 < c1 && (j->col[c0] - j->dx < 0 || j->col[c0] - j->dx >= j->w)) {
++		c0++;
++	}
++	while (c1 > c0 && (j->col[c1 - 1] - j->dx < 0 || j->col[c1 - 1] - j->dx >= j->w)) {
++		c1--;
++	}
++	if (c0 >= c1) {
++		return;
++	}
++	const int32_t *col = j->col;
++	const int32_t off = j->sx - j->dx;
++	for (int32_t py = b0; py < b1; py++) {
++		int32_t ly = (int32_t)(((int64_t)py * j->den) / j->num) - j->dy;
++		if (ly < 0 || ly >= j->h) {
++			continue;
++		}
++		const uint32_t *row = (const uint32_t *)(j->base + (uint64_t)(j->sy + ly) * j->bpr) + off;
++		int32_t px = c0;
++		for (; px + 4 <= c1; px += 4) {
++			uint32_t v0 = row[col[px]], v1 = row[col[px + 1]], v2 = row[col[px + 2]], v3 = row[col[px + 3]];
++			buf[px] = v0;
++			buf[px + 1] = v1;
++			buf[px + 2] = v2;
++			buf[px + 3] = v3;
++		}
++		for (; px < c1; px++) {
++			buf[px] = row[col[px]];
++		}
++		memcpy((void *)(j->draw + (uint64_t)py * j->drawBpr + (uint64_t)c0 * 4), buf + c0, (size_t)(c1 - c0) * 4);
++	}
++}
++
++static void
++sweet_fit_worker(void *arg, int wr)
++{
++	(void)wr;
++	uint32_t band = (uint32_t)(uintptr_t)arg, seen = 0;
++	IOLockLock(sweet_fit_lock);
++	for (;;) {
++		while (sweet_fit_gen == seen) {
++			IOLockSleep(sweet_fit_lock, &sweet_fit_gen, THREAD_UNINT);
++		}
++		seen = sweet_fit_gen;
++		struct sweet_fit_job j = sweet_fit_cur;
++		IOLockUnlock(sweet_fit_lock);
++		sweet_fit_band(&j, band, SWEET_FIT_WORKERS + 1);
++		IOLockLock(sweet_fit_lock);
++		if (--sweet_fit_left == 0) {
++			IOLockWakeup(sweet_fit_lock, &sweet_fit_left, false);
++		}
++	}
++}
++
++static void
++sweet_fit_setup(uint32_t width)
++{
++	uint32_t on = 1;
++	PE_parse_boot_argn("sweetfb_mt", &on, sizeof(on));
++	sweet_fit_lock = IOLockAlloc();
++	for (uint32_t i = 0; i <= SWEET_FIT_WORKERS; i++) {
++		sweet_fit_rows[i] = (uint32_t *)IOMallocData((vm_size_t)width * 4);
++		if (sweet_fit_rows[i] == NULL) {
++			return;
++		}
++	}
++	if (sweet_fit_lock == NULL || !on) {
++		IOLog("SWEET FB: fit scale single-threaded\n");
++		return;
++	}
++	for (uint32_t i = 0; i < SWEET_FIT_WORKERS; i++) {
++		thread_t th;
++		if (kernel_thread_start(sweet_fit_worker, (void *)(uintptr_t)(i + 1), &th) != KERN_SUCCESS) {
++			IOLog("SWEET FB: fit worker %u not started\n", i);
++			return;
++		}
++		thread_deallocate(th);
++	}
++	sweet_fit_ready = true;
++	IOLog("SWEET FB: fit scale on %u CPUs\n", SWEET_FIT_WORKERS + 1);
++}
++
++/* Band 0 here, the others on the workers; returns when all are done. */
++static void
++sweet_fit_run(const struct sweet_fit_job *j)
++{
++	if (!sweet_fit_ready) {
++		sweet_fit_band(j, 0, 1);
++		return;
++	}
++	IOLockLock(sweet_fit_lock);
++	sweet_fit_cur = *j;
++	sweet_fit_left = SWEET_FIT_WORKERS;
++	sweet_fit_gen++;
++	IOLockWakeup(sweet_fit_lock, &sweet_fit_gen, false);
++	IOLockUnlock(sweet_fit_lock);
++	sweet_fit_band(j, 0, SWEET_FIT_WORKERS + 1);
++	IOLockLock(sweet_fit_lock);
++	while (sweet_fit_left != 0) {
++		IOLockSleep(sweet_fit_lock, &sweet_fit_left, THREAD_UNINT);
++	}
++	IOLockUnlock(sweet_fit_lock);
++}
++
 +extern "C" int
 +sweet_fb_shot(uint16_t *out, uint32_t maxpix, uint32_t div, uint32_t *w, uint32_t *h, uint32_t *flags)
 +{
@@ -107,7 +267,7 @@ index 0f8e61a..57e175a 100644
  bool
  AppleCLCD::start(IOService *provider)
  {
-@@ -244,8 +328,46 @@ AppleCLCD::start(IOService *provider)
+@@ -244,8 +488,48 @@ AppleCLCD::start(IOService *provider)
  	uint32_t hz = 10;
  	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
  	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
@@ -140,7 +300,9 @@ index 0f8e61a..57e175a 100644
 +		    fFlip ? "on" : "OFF", fDecon ? *(volatile uint32_t *)(fDecon + A510F_DECON_ADD0) : 0,
 +		    (unsigned long long)A510F_FB_B, hz);
 +	}
++	PE_parse_boot_argn("sweetfb_async", &sweet_fb_async, sizeof(sweet_fb_async));
 +	fRowBuf = (uint32_t *)IOMallocData((vm_size_t)fWidth * 4);
++	sweet_fit_setup(fWidth);
 +	fPresentLoop = IOWorkLoop::workLoop();
 +	fPresentTimer = IOTimerEventSource::timerEventSource(this, &AppleCLCD::presentFired);
 +	if (fPresentLoop == NULL || fPresentTimer == NULL ||
@@ -154,7 +316,7 @@ index 0f8e61a..57e175a 100644
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
  	setProperty("external", false);
  	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
-@@ -285,6 +407,28 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -285,6 +569,28 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		client->notify(SWEET_FB_NOTIFY_VSYNC, values, 6);
  	}
  	if (fb->fPowerOff) {
@@ -183,7 +345,7 @@ index 0f8e61a..57e175a 100644
  		/* Fade out: halve every channel each vsync, then black, then idle. */
  		uint32_t step = fb->fFadeStep;
  		if (step <= 6) {
-@@ -293,7 +437,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -293,7 +599,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		IOLockUnlock(fb->fLock);
  		if (step <= 6) {
  			for (uint32_t y = 0; y < fb->fHeight; y++) {
@@ -192,7 +354,7 @@ index 0f8e61a..57e175a 100644
  				for (uint32_t x = 0; x < fb->fWidth; x++) {
  					row[x] = step < 6 ? (row[x] >> 1) & 0x7f7f7f7f : 0;
  				}
-@@ -302,21 +446,79 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -302,21 +608,86 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
  		return;
  	}
@@ -208,9 +370,14 @@ index 0f8e61a..57e175a 100644
 +		uint32_t sn = 0, bn = 0;
 +		sweet_surface_stats(&sb, &sn);
 +		sweet_mali_bo_stats(&bb, &bn);
-+		IOLog("SWEET MEM: free %llu MB, wired %llu MB | surfaces %u = %llu MB | GPU buffers %u = %llu MB\n",
++		uint64_t sw = 0;
++		absolutetime_to_nanoseconds(fb->fTSwapWait, &sw);
++		fb->fTSwapWait = 0;
++		IOLog("SWEET MEM: free %llu MB, wired %llu MB | surfaces %u = %llu MB | GPU buffers %u = %llu MB | "
++		    "%llu frames/10 s, swaps waited %llu ms\n",
 +		    (uint64_t)vm_page_free_count * page_size >> 20, (uint64_t)vm_page_wire_count * page_size >> 20,
-+		    sn, sb >> 20, bn, bb >> 20);
++		    sn, sb >> 20, bn, bb >> 20, fb->fPresents - fb->fPresentsAt10s, sw / 1000000);
++		fb->fPresentsAt10s = fb->fPresents;
 +	}
 +	/*
 +	 * A510F: the panel copy runs on its own workloop (presentFired). Run
@@ -219,16 +386,16 @@ index 0f8e61a..57e175a 100644
 +	 */
 +	bool flush = fb->fDirty && !fb->fPresentBusy && fb->fPresentTimer != NULL &&
 +	    now - fb->fLastPresent >= fb->fMinGap;
-+	if (flush) {
-+		fb->fLastPresent = now;
-+		fb->fPresentBusy = true;
-+	}
-+	IOLockUnlock(fb->fLock);
  	if (flush) {
 -		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
 -		if (rec != NULL) {
 -			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
 -			fb->fDirty = false;
++		fb->fLastPresent = now;
++		fb->fPresentBusy = true;
++	}
++	IOLockUnlock(fb->fLock);
++	if (flush) {
 +		fb->fPresentTimer->setTimeoutUS(1);
 +	}
 +	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
@@ -258,6 +425,7 @@ index 0f8e61a..57e175a 100644
  		}
 +		IOLockLock(fb->fLock);
 +		fb->fPresentBusy = false;
++		IOLockWakeup(fb->fLock, &fb->fPresentBusy, false);
 +		IOLockUnlock(fb->fLock);
 +		return;
 +	}
@@ -275,11 +443,12 @@ index 0f8e61a..57e175a 100644
 -	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
 +	IOLockLock(fb->fLock);
 +	fb->fPresentBusy = false;
++	IOLockWakeup(fb->fLock, &fb->fPresentBusy, false);
 +	IOLockUnlock(fb->fLock);
  }
  
  void
-@@ -347,6 +549,8 @@ get32(const uint8_t *p, uint32_t off)
+@@ -347,6 +718,8 @@ get32(const uint8_t *p, uint32_t off)
  }
  
  static uint32_t sweet_fb_swaps_logged;
@@ -288,7 +457,7 @@ index 0f8e61a..57e175a 100644
  
  /*
   * A510F: layer pixel formats. Every 4-byte format used to be copied as if it
-@@ -412,19 +616,109 @@ static uint64_t sweet_fb_swap_count;
+@@ -412,19 +785,130 @@ static uint64_t sweet_fb_swap_count;
  void
  AppleCLCD::swap(const uint8_t *rec)
  {
@@ -301,6 +470,7 @@ index 0f8e61a..57e175a 100644
  	IOLockLock(fLock);
  	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
 -	fDirty = true;
+-	IOLockUnlock(fLock);
 +	if (fWakeSkip || now - fWakeAt < fWakeWait * 4) {
 +		static uint32_t wake_logged;
 +		if (wake_logged < 200) {
@@ -324,11 +494,32 @@ index 0f8e61a..57e175a 100644
 +	 * the present workloop.
 +	 */
 +	bool due = !fPowerOff && now - fLastPresent >= fMinGap;
-+	fDirty = !due;
-+	if (due) {
-+		fLastPresent = now;
++	if (due && sweet_fb_async && fPresentTimer != NULL) {
++		/*
++		 * A510F (sweetfb_async, default 1): CoreAnimation alternates two
++		 * surfaces, so the copy of this one can run while it draws the
++		 * next into the other; only the next swap waits for this copy
++		 * (before CA can draw into this surface again).
++		 */
++		uint64_t w0 = mach_absolute_time();
++		while (fPresentBusy) {
++			IOLockSleep(fLock, &fPresentBusy, THREAD_UNINT);
++		}
++		fTSwapWait += mach_absolute_time() - w0;
++		memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);  /* the newest swap */
++		fPresentBusy = true;
++		fDirty = true;
++		fLastPresent = mach_absolute_time();
++		IOLockUnlock(fLock);
++		fPresentTimer->setTimeoutUS(1);
++		due = false;
++	} else {
++		fDirty = !due;
++		if (due) {
++			fLastPresent = now;
++		}
++		IOLockUnlock(fLock);
 +	}
- 	IOLockUnlock(fLock);
 +	if (due) {
 +		present(rec);
 +	}
@@ -399,7 +590,7 @@ index 0f8e61a..57e175a 100644
  
  
  	if (!fConsolePaused) {
-@@ -449,7 +743,18 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -449,7 +933,18 @@ AppleCLCD::present(const uint8_t *rec)
  			continue;
  		}
  		SweetSurface *s = sweet_surface_copy(id);
@@ -419,7 +610,7 @@ index 0f8e61a..57e175a 100644
  			sweet_fb_swaps_logged++;
  			IOLog("SWEET FB: swap %u layer %u surface %u %ux%u fmt 0x%x bpr %u a %d,%d %ux%u b %d,%d %dx%d\n",
  			    get32(rec, 0x50), layer, id, s ? s->width : 0, s ? s->height : 0,
-@@ -460,7 +765,16 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -460,7 +955,16 @@ AppleCLCD::present(const uint8_t *rec)
  			OSSafeReleaseNULL(s);
  			continue;
  		}
@@ -437,13 +628,14 @@ index 0f8e61a..57e175a 100644
  		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
  		sweet_fb_note_format(s->pixelFormat, bpe, s->width, s->height);
  		if (w <= 0 || h <= 0) {
-@@ -473,8 +787,17 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -473,8 +977,18 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
 +		/* GPU-rendered (Mali, not coherent): drop stale cached lines first */
 +		uint64_t t2 = mach_absolute_time();
-+		if (src != 0 && s->memory != NULL && s->offset < s->memory->getLength()) {
++		if (!fFit && src != 0 && s->memory != NULL && s->offset < s->memory->getLength()) {
++			/* (fit: presentFit drops the lines it reads, band by band) */
 +			sweet_fb_dc_civac(src + s->offset, s->memory->getLength() - s->offset);
 +		}
 +		uint64_t t3 = mach_absolute_time();
@@ -455,7 +647,7 @@ index 0f8e61a..57e175a 100644
  			s->release();
  			continue;
  		}
-@@ -511,13 +834,41 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -511,13 +1025,41 @@ AppleCLCD::present(const uint8_t *rec)
  		}
  		if (src != 0 && bpe == 4) {
  			for (int32_t y = 0; y < h; y++) {
@@ -498,7 +690,7 @@ index 0f8e61a..57e175a 100644
  }
  
  /*
-@@ -547,7 +898,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -547,7 +1089,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	if (!fFitCleared) {
  		/* Black pillarbox (the console text was there). */
  		for (uint32_t y = 0; y < fHeight; y++) {
@@ -507,7 +699,22 @@ index 0f8e61a..57e175a 100644
  		}
  		fFitCleared = true;
  	}
-@@ -576,13 +927,32 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -570,19 +1112,47 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+ 	const uint8_t *base = (const uint8_t *)(src + s->offset);
+ 	const uint32_t fmt = s->pixelFormat;
+ 	const bool convert = fmt == SWEET_FMT_L10R || fmt == SWEET_FMT_W30R;
++	if (!convert && fDim == 0) {
++		struct sweet_fit_job j = {
++			base, s->bytesPerRow, fDraw, fRowBytes, fFitCol, sx, sy, dx, dy, w, h,
++			px0, px1, py0, py1, fFitNum, fFitDen,
++		};
++		sweet_fit_run(&j);
++		return;
++	}
++	sweet_fb_dc_civac((uintptr_t)base, s->memory->getLength() - s->offset);
+ 	for (int32_t py = py0; py < py1; py++) {
+ 		int32_t ly = (int32_t)(((int64_t)py * fFitDen) / fFitNum) - dy;
+ 		if (ly < 0 || ly >= h) {
  			continue;
  		}
  		const uint32_t *row = (const uint32_t *)(base + (uint64_t)(sy + ly) * s->bytesPerRow) + sx;
@@ -542,7 +749,7 @@ index 0f8e61a..57e175a 100644
  	}
  }
  
-@@ -737,7 +1107,15 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -737,7 +1307,15 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			if (off != fFB->fPowerOff) {
  				fFB->fPowerOff = off;
  				fFB->fFadeStep = 0;
