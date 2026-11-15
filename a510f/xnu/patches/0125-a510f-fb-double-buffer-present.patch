@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 0f8e61a..b149489 100644
+index 0f8e61a..4aad1d0 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -82,6 +82,25 @@ enum {
@@ -28,9 +28,11 @@ index 0f8e61a..b149489 100644
  
  class IOMobileFramebuffer : public IOService {
  	OSDeclareDefaultStructors(IOMobileFramebuffer);
-@@ -125,6 +144,43 @@ public:
+@@ -124,7 +143,47 @@ public:
+ 	bool          fDirty;
  	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
  	bool          fPowerOff;      /* RequestPowerChange(0) */
++	uint64_t      fOffAt;         /* when it went off (fade log) */
  	uint32_t      fFadeStep;      /* fade-out steps done while off */
 +	/*
 +	 * A510F (boot-arg sweetfb_flip, default 1): double-buffered panel. Each
@@ -60,6 +62,8 @@ index 0f8e61a..b149489 100644
 +	uint64_t            fPresentsAt10s;
 +	bool                fWakeSkip;      /* display just on: wait for a new frame */
 +	uint64_t            fWakeAt, fWakeWait;
++	uint64_t            fHoldWait;      /* this hold: fWakeWait, or the boot hold */
++	bool                fBootSeen;      /* the first "display on" of the boot came */
 +	uint32_t            fDim;           /* fade: shift right by fDim (presentFit) */
 +	uint32_t           *fRowBuf;        /* one panel row, cached (presentFit) */
 +	IOTimerEventSource *fPresentTimer;
@@ -72,7 +76,7 @@ index 0f8e61a..b149489 100644
  
  	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
  	void addClient(IOMobileFramebufferUserClient *client);
-@@ -174,6 +230,196 @@ public:
+@@ -174,6 +233,196 @@ public:
  
  OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
  
@@ -269,7 +273,7 @@ index 0f8e61a..b149489 100644
  bool
  AppleCLCD::start(IOService *provider)
  {
-@@ -244,8 +490,48 @@ AppleCLCD::start(IOService *provider)
+@@ -244,8 +493,48 @@ AppleCLCD::start(IOService *provider)
  	uint32_t hz = 10;
  	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
  	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
@@ -318,7 +322,7 @@ index 0f8e61a..b149489 100644
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
  	setProperty("external", false);
  	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
-@@ -285,6 +571,28 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -285,6 +574,28 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		client->notify(SWEET_FB_NOTIFY_VSYNC, values, 6);
  	}
  	if (fb->fPowerOff) {
@@ -331,8 +335,8 @@ index 0f8e61a..b149489 100644
 +		 */
 +		if (fb->fFlip && fb->fPresentTimer != NULL) {
 +			uint32_t fstep = fb->fFadeStep;
-+			/* one step every 6 vsyncs (~0.1 s plus the redraw): ~0.5 s in all */
-+			bool go = fstep <= 3 && !fb->fPresentBusy && (count % 6) == 0;
++			/* first step at once, then every 2 vsyncs: ~0.15 s in all */
++			bool go = fstep <= 3 && !fb->fPresentBusy && (fstep == 0 || (count % 2) == 0);
 +			if (go) {
 +				fb->fFadeStep = fstep + 1;
 +				fb->fPresentBusy = true;
@@ -347,7 +351,7 @@ index 0f8e61a..b149489 100644
  		/* Fade out: halve every channel each vsync, then black, then idle. */
  		uint32_t step = fb->fFadeStep;
  		if (step <= 6) {
-@@ -293,7 +601,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -293,7 +604,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		IOLockUnlock(fb->fLock);
  		if (step <= 6) {
  			for (uint32_t y = 0; y < fb->fHeight; y++) {
@@ -356,13 +360,13 @@ index 0f8e61a..b149489 100644
  				for (uint32_t x = 0; x < fb->fWidth; x++) {
  					row[x] = step < 6 ? (row[x] >> 1) & 0x7f7f7f7f : 0;
  				}
-@@ -302,21 +610,86 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -302,21 +613,92 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
  		return;
  	}
 -	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
 -	uint8_t *rec = NULL;
-+	if (fb->fWakeSkip && now - fb->fWakeAt > fb->fWakeWait) {
++	if (fb->fWakeSkip && now - fb->fWakeAt > (fb->fHoldWait ? fb->fHoldWait : fb->fWakeWait)) {
 +		fb->fWakeSkip = false;
 +		fb->fDirty = true;              /* the newest frame (held since the wake), or the last one */
 +	}
@@ -413,6 +417,12 @@ index 0f8e61a..b149489 100644
 +	uint32_t fstep = fb->fFadeStep;
 +	IOLockUnlock(fb->fLock);
 +	if (off) {
++		{
++			uint64_t ns = 0;
++			absolutetime_to_nanoseconds(mach_absolute_time() - fb->fOffAt, &ns);
++			IOLog("SWEET FB: fade step %u at off +%llu ms%s\n", fstep, ns / 1000000,
++			    fb->fHaveLast ? "" : " (no last frame)");
+ 		}
 +		if (fstep >= 1 && fstep <= 3 && fb->fHaveLast) {
 +			fb->fDim = fstep;               /* 1/2, 1/4, 1/8 */
 +			fb->present(fb->fLastRec);
@@ -424,7 +434,7 @@ index 0f8e61a..b149489 100644
 +			bzero((void *)back, (size_t)fb->fRowBytes * fb->fHeight);
 +			fb->flipTo(fb->fShown ^ 1);
 +			IOLockUnlock(fb->fPresentLock);
- 		}
++		}
 +		IOLockLock(fb->fLock);
 +		fb->fPresentBusy = false;
 +		IOLockWakeup(fb->fLock, &fb->fPresentBusy, false);
@@ -450,7 +460,7 @@ index 0f8e61a..b149489 100644
  }
  
  void
-@@ -347,6 +720,8 @@ get32(const uint8_t *p, uint32_t off)
+@@ -347,6 +729,8 @@ get32(const uint8_t *p, uint32_t off)
  }
  
  static uint32_t sweet_fb_swaps_logged;
@@ -459,7 +469,7 @@ index 0f8e61a..b149489 100644
  
  /*
   * A510F: layer pixel formats. Every 4-byte format used to be copied as if it
-@@ -412,19 +787,131 @@ static uint64_t sweet_fb_swap_count;
+@@ -412,19 +796,131 @@ static uint64_t sweet_fb_swap_count;
  void
  AppleCLCD::swap(const uint8_t *rec)
  {
@@ -593,7 +603,7 @@ index 0f8e61a..b149489 100644
  
  
  	if (!fConsolePaused) {
-@@ -449,7 +936,18 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -449,7 +945,18 @@ AppleCLCD::present(const uint8_t *rec)
  			continue;
  		}
  		SweetSurface *s = sweet_surface_copy(id);
@@ -613,7 +623,7 @@ index 0f8e61a..b149489 100644
  			sweet_fb_swaps_logged++;
  			IOLog("SWEET FB: swap %u layer %u surface %u %ux%u fmt 0x%x bpr %u a %d,%d %ux%u b %d,%d %dx%d\n",
  			    get32(rec, 0x50), layer, id, s ? s->width : 0, s ? s->height : 0,
-@@ -460,7 +958,16 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -460,7 +967,16 @@ AppleCLCD::present(const uint8_t *rec)
  			OSSafeReleaseNULL(s);
  			continue;
  		}
@@ -631,7 +641,7 @@ index 0f8e61a..b149489 100644
  		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
  		sweet_fb_note_format(s->pixelFormat, bpe, s->width, s->height);
  		if (w <= 0 || h <= 0) {
-@@ -473,8 +980,18 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -473,8 +989,18 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -650,7 +660,7 @@ index 0f8e61a..b149489 100644
  			s->release();
  			continue;
  		}
-@@ -511,13 +1028,41 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -511,13 +1037,41 @@ AppleCLCD::present(const uint8_t *rec)
  		}
  		if (src != 0 && bpe == 4) {
  			for (int32_t y = 0; y < h; y++) {
@@ -693,7 +703,7 @@ index 0f8e61a..b149489 100644
  }
  
  /*
-@@ -547,7 +1092,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -547,7 +1101,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	if (!fFitCleared) {
  		/* Black pillarbox (the console text was there). */
  		for (uint32_t y = 0; y < fHeight; y++) {
@@ -702,7 +712,7 @@ index 0f8e61a..b149489 100644
  		}
  		fFitCleared = true;
  	}
-@@ -570,19 +1115,47 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -570,19 +1124,47 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	const uint8_t *base = (const uint8_t *)(src + s->offset);
  	const uint32_t fmt = s->pixelFormat;
  	const bool convert = fmt == SWEET_FMT_L10R || fmt == SWEET_FMT_W30R;
@@ -752,11 +762,14 @@ index 0f8e61a..b149489 100644
  	}
  }
  
-@@ -737,7 +1310,15 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -737,7 +1319,34 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			if (off != fFB->fPowerOff) {
  				fFB->fPowerOff = off;
  				fFB->fFadeStep = 0;
 -				fFB->fDirty = true;     /* on: redraw the latest frame */
++				if (off) {
++					fFB->fOffAt = mach_absolute_time();
++				}
 +				/*
 +				 * A510F: on wake, wait for CoreAnimation's new frame (the
 +				 * lock screen) instead of showing the one from before
@@ -766,6 +779,22 @@ index 0f8e61a..b149489 100644
 +				fFB->fDirty = false;
 +				fFB->fWakeSkip = !off;
 +				fFB->fWakeAt = mach_absolute_time();
++				fFB->fHoldWait = fFB->fWakeWait;
++				if (!off) {
++					fFB->fBootSeen = true;
++				}
++			} else if (!off && !fFB->fBootSeen) {
++				/* the first "on" of the boot (no change: it starts on): boot hold */
++				uint32_t ms = 8000;
++				PE_parse_boot_argn("sweetfb_boot_hold_ms", &ms, sizeof(ms));
++				fFB->fBootSeen = true;
++				if (ms > 0) {
++					fFB->fDirty = false;
++					fFB->fWakeSkip = true;
++					fFB->fWakeAt = mach_absolute_time();
++					nanoseconds_to_absolutetime((uint64_t)ms * 1000000ull, &fFB->fHoldWait);
++					IOLog("SWEET FB: boot hold: frames held up to %u ms\n", ms);
++				}
  			}
  			IOLockUnlock(fFB->fLock);
  			IOLog("SWEET FB: display %s\n", off ? "off" : "on");

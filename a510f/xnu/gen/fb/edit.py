@@ -864,3 +864,63 @@ rep("""AppleCLCD::present(const uint8_t *rec)
 """)
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
 print('ok async')
+
+# Screen-off fade: begin at the first vsync after "display off" and step every
+# 2 vsyncs (~0.15 s in all, about an iPhone's); log each step's time since off.
+rep("""			/* one step every 6 vsyncs (~0.1 s plus the redraw): ~0.5 s in all */
+			bool go = fstep <= 3 && !fb->fPresentBusy && (count % 6) == 0;""", """			/* first step at once, then every 2 vsyncs: ~0.15 s in all */
+			bool go = fstep <= 3 && !fb->fPresentBusy && (fstep == 0 || (count % 2) == 0);""")
+rep("""	if (off) {
+		if (fstep >= 1 && fstep <= 3 && fb->fHaveLast) {""", """	if (off) {
+		{
+			uint64_t ns = 0;
+			absolutetime_to_nanoseconds(mach_absolute_time() - fb->fOffAt, &ns);
+			IOLog("SWEET FB: fade step %u at off +%llu ms%s@NL@", fstep, ns / 1000000,
+			    fb->fHaveLast ? "" : " (no last frame)");
+		}
+		if (fstep >= 1 && fstep <= 3 && fb->fHaveLast) {""")
+rep("""				fFB->fPowerOff = off;
+				fFB->fFadeStep = 0;""", """				fFB->fPowerOff = off;
+				fFB->fFadeStep = 0;
+				if (off) {
+					fFB->fOffAt = mach_absolute_time();
+				}""")
+rep("""	bool          fPowerOff;      /* RequestPowerChange(0) */""", """	bool          fPowerOff;      /* RequestPowerChange(0) */
+	uint64_t      fOffAt;         /* when it went off (fade log) */""")
+open(p, 'w', encoding='utf-8', newline='\n').write(s)
+print('ok fade timing')
+
+# Boot hold: at startup backboardd turns the display on and draws an early
+# lock screen (half-drawn wallpaper), SpringBoard turns it off while it sets
+# up, then on again (round 18: on -> 2 swaps -> off -> on, no key). Hold the
+# frames of the first "on" of the boot for up to sweetfb_boot_hold_ms
+# (default 8000): the console stays until the real lock screen.
+rep("""	uint64_t            fWakeAt, fWakeWait;""", """	uint64_t            fWakeAt, fWakeWait;
+	uint64_t            fHoldWait;      /* this hold: fWakeWait, or the boot hold */
+	bool                fBootSeen;      /* the first "display on" of the boot came */""")
+rep("""	if (fb->fWakeSkip && now - fb->fWakeAt > fb->fWakeWait) {""", """	if (fb->fWakeSkip && now - fb->fWakeAt > (fb->fHoldWait ? fb->fHoldWait : fb->fWakeWait)) {""")
+rep("""				fFB->fDirty = false;
+				fFB->fWakeSkip = !off;
+				fFB->fWakeAt = mach_absolute_time();
+			}""", """				fFB->fDirty = false;
+				fFB->fWakeSkip = !off;
+				fFB->fWakeAt = mach_absolute_time();
+				fFB->fHoldWait = fFB->fWakeWait;
+				if (!off) {
+					fFB->fBootSeen = true;
+				}
+			} else if (!off && !fFB->fBootSeen) {
+				/* the first "on" of the boot (no change: it starts on): boot hold */
+				uint32_t ms = 8000;
+				PE_parse_boot_argn("sweetfb_boot_hold_ms", &ms, sizeof(ms));
+				fFB->fBootSeen = true;
+				if (ms > 0) {
+					fFB->fDirty = false;
+					fFB->fWakeSkip = true;
+					fFB->fWakeAt = mach_absolute_time();
+					nanoseconds_to_absolutetime((uint64_t)ms * 1000000ull, &fFB->fHoldWait);
+					IOLog("SWEET FB: boot hold: frames held up to %u ms@NL@", ms);
+				}
+			}""")
+open(p, 'w', encoding='utf-8', newline='\n').write(s)
+print('ok boot hold')
