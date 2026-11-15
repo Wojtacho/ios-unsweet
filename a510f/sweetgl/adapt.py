@@ -167,7 +167,7 @@ draw_prep(GLenum mode, GLsizei count)
      '''/* A510F: ring of recent draws (adapt.py) */
 #define RING_N 64
 static struct ring_draw {
-	GLint prog, fbo, vw, vh;
+	GLint prog, fbo, vw, vh, tex0;
 	GLenum mode;
 	GLsizei count;
 	uint32_t seq;
@@ -184,6 +184,17 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 	glGetIntegerv(GL_VIEWPORT, vp);
 	r->vw = vp[2];
 	r->vh = vp[3];
+	{
+		GLint a = 0;
+		glGetIntegerv(GL_ACTIVE_TEXTURE, &a);
+		if (a != GL_TEXTURE0) {
+			glActiveTexture(GL_TEXTURE0);
+		}
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &r->tex0);
+		if (a != GL_TEXTURE0) {
+			glActiveTexture((GLenum)a);
+		}
+	}
 	r->mode = mode;
 	r->count = count;
 	r->seq = ++ring_seq;
@@ -506,8 +517,8 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 			vb_read++;
 			for (int k = 6; k >= 1; k--) {
 				struct ring_draw *q = &ring[(ring_seq - (uint32_t)k) % RING_N];
-				sweet_drm_log("sweetgl:   before: draw %u prog %d kind %d fbo %d viewport %dx%d mode %#x count %d",
-				    q->seq, q->prog, prog_texfn_kind(q->prog), q->fbo, q->vw, q->vh, q->mode, q->count);
+				sweet_drm_log("sweetgl:   before: draw %u prog %d kind %d fbo %d viewport %dx%d mode %#x count %d tex0 %d",
+				    q->seq, q->prog, prog_texfn_kind(q->prog), q->fbo, q->vw, q->vh, q->mode, q->count, q->tex0);
 			}
 			GLint keep_draw = 0, keep_read = 0;
 			glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &keep_draw);
@@ -515,8 +526,17 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 			GLuint tmp = 0;
 			glGenFramebuffers(1, &tmp);
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, tmp);
-			GLint tex[2] = {t0, t1};
-			for (int u = 0; u < 2; u++) {
+			/* the copy into S: the last ordinary draw before the mip passes */
+			GLint copy_src = 0;
+			for (uint32_t k = 1; k <= 8; k++) {
+				struct ring_draw *q = &ring[(ring_seq - k) % RING_N];
+				if (prog_texfn_kind(q->prog) == 0) {
+					copy_src = q->tex0;
+					break;
+				}
+			}
+			GLint tex[3] = {t0, t1, copy_src};
+			for (int u = 0; u < 3; u++) {
 				if (tex[u] == 0) {
 					continue;
 				}
@@ -531,8 +551,8 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 						glReadPixels(pts[i][0], pts[i][1], 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[i]);
 					}
 				}
-				sweet_drm_log("sweetgl:   tex%d %d (status %#x) rgba: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
-				    "%02x%02x%02x%02x %02x%02x%02x%02x", u, tex[u], st,
+				sweet_drm_log("sweetgl:   %s %d (status %#x) rgba: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+				    "%02x%02x%02x%02x %02x%02x%02x%02x", u == 0 ? "S (tex0)" : u == 1 ? "mask (tex1)" : "copy source", tex[u], st,
 				    px[0][0], px[0][1], px[0][2], px[0][3], px[1][0], px[1][1], px[1][2], px[1][3],
 				    px[2][0], px[2][1], px[2][2], px[2][3], px[3][0], px[3][1], px[3][2], px[3][3],
 				    px[4][0], px[4][1], px[4][2], px[4][3]);

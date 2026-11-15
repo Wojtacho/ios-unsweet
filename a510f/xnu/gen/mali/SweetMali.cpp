@@ -633,10 +633,28 @@ mali_peek(uint64_t va, uint32_t w[8])
 	return true;
 }
 
+static void
+mali_dump_at(const char *what, uint64_t va)
+{
+	uint32_t a[8], b[8];
+	if (!mali_peek(va, a) || !mali_peek(va + 32, b)) {
+		IOLog("SWEET MALI: dump %s 0x%llx: not mapped\n", what, va);
+		return;
+	}
+	IOLog("SWEET MALI: dump %s 0x%llx: %08x %08x %08x %08x %08x %08x %08x %08x | %08x %08x %08x %08x %08x %08x %08x %08x\n",
+	    what, va, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+}
+
 /* A failed queued job: what the GPU read, and the same words 3 ms later. */
 static void
 mali_fault_dump(uint64_t jc, uint64_t head, uint64_t age_us, uint32_t depth)
 {
+	/* the first job whole (a write-value job's target), and what the faulting job found invalid */
+	mali_dump_at("jc+64", jc);
+	uint32_t h[8];
+	if (head != 0 && mali_peek(head, h) && (h[2] | h[3]) != 0) {
+		mali_dump_at("at fault pointer", ((uint64_t)h[3] << 32) | h[2]);
+	}
 	uint64_t vas[2] = {jc, head};
 	for (int k = 0; k < 2; k++) {
 		uint32_t a[8], b[8];
