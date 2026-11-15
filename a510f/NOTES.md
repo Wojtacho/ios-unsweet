@@ -1376,3 +1376,15 @@ busy 1298 ms. No thermal throttling exists: watch it. Revert: boot-arg 1200.
 
 Next: compare round 39 speed; further speed (cheaper dock/folder/CC blurs,
 CPU profile of backboardd, max GPU job 49 ms at 1242x2208).
+
+Round 39 result: CPU 1404 MHz confirmed (vsel 0x83 read back), but home
+swipes unchanged (127 vs 134 fragment jobs / 2 s), Spotlight +19%, and 14
+DATA_INVALID failures back (FBD 042b041f, at the first swipe). Plan: back to
+a510fcpufreq=1200; speed work on the GPU side (49 ms job at 1242x2208,
+CPU/GPU overlap in backboardd's finish).
+
+User's list for tomorrow (2026-11-16):
+- App switcher (double home press): some app cards show no preview
+  (snapshot), and the background behind the cards is black instead of the
+  blurred home screen/wallpaper iOS shows.
+- Speed (round 40, see above).
