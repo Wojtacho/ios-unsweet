@@ -1,0 +1,21 @@
+diff --git a/iokit/Kernel/arm/SweetKeyStore.cpp b/iokit/Kernel/arm/SweetKeyStore.cpp
+index 76ec68e..b385e01 100644
+--- a/iokit/Kernel/arm/SweetKeyStore.cpp
++++ b/iokit/Kernel/arm/SweetKeyStore.cpp
+@@ -259,7 +259,15 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 		(void)PE_parse_boot_argn("sweetakslog", &v, sizeof(v));
+ 		aks_log = v;
+ 	}
+-	if (!aks_log && aks_lines >= 48) {
++	/*
++	 * A510F round 37: SpringBoard's calls (first 400) and every failed call are
++	 * always logged: the passcode screen after the power menu's Cancel.
++	 */
++	char sbn[32];
++	proc_selfname(sbn, sizeof(sbn));
++	static uint32_t sb_lines;
++	bool always = (strcmp(sbn, "SpringBoard") == 0 && sb_lines++ < 400) || ret != kIOReturnSuccess;
++	if (!aks_log && !always && aks_lines >= 48) {
+ 		if (aks_lines++ == 48) {
+ 			IOLog("SWEET AKS: further calls not logged (sweetakslog=1 logs all)\n");
+ 		}

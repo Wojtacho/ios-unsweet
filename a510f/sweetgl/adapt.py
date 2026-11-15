@@ -946,3 +946,21 @@ sgl_vblur_src(void)
 static const char nop_copy_func[] ='''),
     ('''strstr(src, "sgl_vblur(") ? vblur_func : ""''', '''strstr(src, "sgl_vblur(") ? sgl_vblur_src() : ""'''),
 ])
+
+
+# Round 36: the scrolled App Library header showed one full-width row about
+# 20% darker (output row 281) at the variable blur's bottom edge: the backdrop
+# copy's last row is partly transparent, and the blurred (or plain) sample
+# carried that alpha into an opaque backdrop. Backdrops are opaque: a sample
+# with some alpha is un-premultiplied and made opaque (fully transparent
+# samples stay as they are).
+edit('eagl.c', [
+    ('''    "  if (r < .75) {\\n"
+    "    return texture2D(texture0, tc);\\n"
+    "  }\\n"''', '''    "  if (r < .75) {\\n"
+    "    mediump vec4 c = texture2D(texture0, tc);\\n"
+    "    return c.a > .02 ? vec4(c.rgb / c.a, 1.) : c;\\n"
+    "  }\\n"'''),
+    ('''    "  return acc / 6.;\\n"''', '''    "  acc /= 6.;\\n"
+    "  return acc.a > .02 ? vec4(acc.rgb / acc.a, 1.) : acc;\\n"'''),
+])
