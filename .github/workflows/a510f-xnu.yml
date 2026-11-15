@@ -94,6 +94,9 @@ jobs:
           ccache --set-config hash_dir=false
           ccache --set-config compiler_type=clang
           ccache --set-config sloppiness=time_macros,include_file_mtime,include_file_ctime,pch_defines
+          # why misses: per-object hash inputs (compare two builds' *.ccache-input-text)
+          ccache --set-config debug=true
+          ccache --set-config debug_dir=/Users/runner/ccache-debug
           ccache -z
           echo "::notice title=ccache before::$(ccache -s | paste -sd' ' - | cut -c1-250)"
 
@@ -105,6 +108,20 @@ jobs:
           set -o pipefail
           bash build.sh 2>&1 | tee ../build.log
           echo "::notice title=ccache after build::$(ccache -s | paste -sd' ' - | cut -c1-300)"
+
+      - name: ccache debug sample
+        if: always()
+        run: |
+          mkdir -p ccdbg
+          find /Users/runner/ccache-debug -name '*.ccache-input-text' 2>/dev/null | grep -E '/(thread|sched_prim|vm_map|IOService|kalloc)\.' | sort | head -12 | while read f; do cp "$f" ccdbg/; done
+          ls -la ccdbg | head -20
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: a510f-ccache-debug
+          path: ccdbg/
+          if-no-files-found: warn
 
       - name: Report
         if: always()
