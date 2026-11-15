@@ -118,7 +118,9 @@ sgl_native_fbfetch(void)
 	static int native = -1;
 	if (native < 0) {
 		const char *e = (const char *)glGetString(GL_EXTENSIONS);
-		native = e != NULL && strstr(e, "GL_EXT_shader_framebuffer_fetch") != NULL;
+		const char *emul = getenv("SWEETGL_FBFETCH_EMUL");      /* =1: the emulation (test) */
+		native = e != NULL && strstr(e, "GL_EXT_shader_framebuffer_fetch") != NULL &&
+		    !(emul != NULL && emul[0] == '1');
 		sweet_drm_log("sweetgl: framebuffer fetch %s", native ? "native (Mesa)" : "emulated");
 	}
 	return native;
