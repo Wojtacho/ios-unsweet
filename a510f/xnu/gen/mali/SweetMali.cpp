@@ -231,6 +231,7 @@ static unsigned g_ntables;
 static uint8_t *g_pool;
 static unsigned g_pool_left;
 static uint32_t g_jobs, g_faults;
+static uint64_t g_fault_head;
 
 static inline uint32_t
 rd(vm_offset_t b, uint32_t o)
@@ -569,6 +570,7 @@ gpu_run(uint64_t jc, uint32_t req, uint32_t *status_out, uint64_t *us_out)
 		return kIOReturnSuccess;
 	}
 	g_faults++;
+	g_fault_head = rd(g_gpu, JS(js, JS_HEAD));
 	if (g_faults <= 20) {
 		char name[32];
 		proc_selfname(name, sizeof(name));
@@ -600,7 +602,51 @@ gpu_run(uint64_t jc, uint32_t req, uint32_t *status_out, uint64_t *us_out)
 extern "C" kern_return_t kernel_thread_start(void (*)(void *, int), void *, thread_t *);
 extern "C" void thread_deallocate(thread_t);
 static IOLock *g_qlock;
-static struct { uint64_t jc; uint32_t req; } g_q[MALI_QLEN];
+static struct { uint64_t jc; uint32_t req; uint64_t t; } g_q[MALI_QLEN];
+static uint32_t g_q_delay_us;                   /* sweetmali_qdelay: wait before each job (test) */
+static uint32_t g_q_dumps;
+
+/* The 32-byte job header at GPU VA va as memory holds it now (0 if unmapped). */
+static bool
+mali_peek(uint64_t va, uint32_t w[8])
+{
+	uint64_t *e = pte(va & ~0xfffull, false);
+	if (e == NULL || (*e & 1) == 0) {
+		return false;
+	}
+	vm_offset_t m = ml_io_map((vm_offset_t)(*e & 0xfffffffff000ull), 0x1000);
+	if (m == 0) {
+		return false;
+	}
+	for (int i = 0; i < 8; i++) {
+		w[i] = *(volatile uint32_t *)(m + ((va & 0xfe0) + 4 * i));
+	}
+	return true;
+}
+
+/* A failed queued job: what the GPU read, and the same words 3 ms later. */
+static void
+mali_fault_dump(uint64_t jc, uint64_t head, uint64_t age_us, uint32_t depth)
+{
+	uint64_t vas[2] = {jc, head};
+	for (int k = 0; k < 2; k++) {
+		uint32_t a[8], b[8];
+		if (!mali_peek(vas[k], a)) {
+			IOLog("SWEET MALI: dump %s 0x%llx: not mapped\n", k ? "head" : "jc", vas[k]);
+			continue;
+		}
+		IODelay(3000);
+		mali_peek(vas[k], b);
+		bool same = memcmp(a, b, sizeof(a)) == 0;
+		IOLog("SWEET MALI: dump %s 0x%llx (queued %llu us, depth %u): %08x %08x %08x %08x %08x %08x %08x %08x%s\n",
+		    k ? "head" : "jc", vas[k], age_us, depth, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7],
+		    same ? "" : " | CHANGED 3 ms later");
+		if (!same) {
+			IOLog("SWEET MALI: dump %s now %08x %08x %08x %08x %08x %08x %08x %08x\n",
+			    k ? "head" : "jc", b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+		}
+	}
+}
 static uint64_t g_q_submitted, g_q_done;        /* sequence numbers; g_qlock */
 static bool g_q_on;
 static uint64_t g_q_t0, g_q_busy_us, g_q_max_us, g_q_wait_us;
@@ -616,13 +662,23 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 		}
 		uint64_t seq = g_q_done + 1;
 		uint64_t jc = g_q[seq % MALI_QLEN].jc;
+		uint64_t queued_at = g_q[seq % MALI_QLEN].t;
 		uint32_t req = g_q[seq % MALI_QLEN].req;
 		uint32_t depth = (uint32_t)(g_q_submitted - g_q_done);
 		IOLockUnlock(g_qlock);
 		uint32_t status = 0;
 		uint64_t us = 0;
 		IOLockLock(g_lock);
+		if (g_q_delay_us) {
+			IODelay(g_q_delay_us);
+		}
+		uint64_t age_ns = 0;
+		absolutetime_to_nanoseconds(mach_absolute_time() - queued_at, &age_ns);
 		IOReturn r = gpu_run(jc, req, &status, &us);
+		if (r != kIOReturnSuccess && g_q_dumps < 12) {
+			g_q_dumps++;
+			mali_fault_dump(jc, g_fault_head, age_ns / 1000, depth);
+		}
 		IOLockUnlock(g_lock);
 		IOLockLock(g_qlock);
 		g_q_done = seq;
@@ -668,6 +724,7 @@ mali_queue_submit(uint64_t jc, uint32_t req)
 	uint64_t seq = ++g_q_submitted;
 	g_q[seq % MALI_QLEN].jc = jc;
 	g_q[seq % MALI_QLEN].req = req;
+	g_q[seq % MALI_QLEN].t = mach_absolute_time();
 	IOLockWakeup(g_qlock, &g_q_submitted, false);
 	IOLockUnlock(g_qlock);
 	return seq;
@@ -736,6 +793,7 @@ mali_queue_start(void)
 {
 	uint32_t on = 1;
 	PE_parse_boot_argn("sweetmali_async", &on, sizeof(on));
+	PE_parse_boot_argn("sweetmali_qdelay", &g_q_delay_us, sizeof(g_q_delay_us));
 	g_qlock = IOLockAlloc();
 	if (!on || g_qlock == NULL) {
 		IOLog("SWEET MALI: job queue off, synchronous submits\n");
