@@ -838,7 +838,7 @@ pend_clear_apply(void)
 			glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
 			    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &nm);
 		}
-		if (nm > 0 && nm < 8192 && is_blur_s[nm]) {
+		if (nm > 0 && nm < 8192 && (is_blur_s[nm] || (cc[0] == 0 && cc[1] == 0 && cc[2] == 0 && cc[3] == 0))) {
 			pend_clear_apply();
 			pend_clear.on = 1;
 			pend_clear.fb = fb;
@@ -852,4 +852,33 @@ pend_clear_apply(void)
 	}
 	glClear(mask);
 	SGL_POST(10);'''),
+])
+
+
+# held clears (variable blur): run before a framebuffer switch, a flush, a finish
+edit('eagl.c', [
+    ('''	WTRACE("BindFramebuffer %u", framebuffer);
+	glBindFramebuffer(target, framebuffer);''', '''	WTRACE("BindFramebuffer %u", framebuffer);
+	if (pend_clear.on && (GLint)framebuffer != pend_clear.fb) {
+		pend_clear_apply();
+	}
+	glBindFramebuffer(target, framebuffer);'''),
+    ('''sgl_Flush(void *rctx)
+{
+	SGL_CUR(rctx);''', '''sgl_Flush(void *rctx)
+{
+	SGL_CUR(rctx);
+	pend_clear_apply();'''),
+    ('''sgl_FinishObjectAPPLE(void *rctx, GLenum object, GLint name)
+{
+	(void)object;
+	(void)name;
+	SGL_CUR(rctx);
+	glFinish();''', '''sgl_FinishObjectAPPLE(void *rctx, GLenum object, GLint name)
+{
+	(void)object;
+	(void)name;
+	SGL_CUR(rctx);
+	pend_clear_apply();
+	glFinish();'''),
 ])
