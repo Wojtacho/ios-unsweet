@@ -1271,3 +1271,36 @@ waited" in the SWEET MEM line. Boot-arg sweetfb_wake_ms=2500.
 Generators now in the repo: a510f/xnu/gen (gen.sh for 0125/0126,
 mali_patch.py for 0122). PC: twrp-write/auto.py (+ gl command for the
 in-place sweetgl write), dl_artifact.py (git's saved GitHub login).
+
+## 2026-11-15: rounds 3-5, GPU job queue (handoff)
+
+Round 3 (0839350) hung right after the G3D clock change on the first GPU
+job: the new read of CMU_MIF (0x10430000) locks the bus. Read removed
+(9ef44df). Round 3 again (9ef44df): no hang, zero GPU job errors (the
+16 MiB shader window fixed the 0x50 faults), doubled clock and top-left
+garbage gone. Speed 4-11 frames/s, GPU busy 1.1-1.4 s per 2 s on blur
+screens. Wake took ~3 s because sweetfb_wake_ms=2500 held a frame that
+was ready at ~1 s; now 1000 (lock screen at 1.3 s in round 5).
+
+Watchdog (0110, f0812f5): SoC WDT 0x101B0000 (s3c2410 style, pclk_wdt =
+CMU_PERI 0x139F0000 +0x900 bit 1, PMU 0x408/0x40C bits 23/24) armed while
+a script runs, INFORM2/3 preset to recovery. Round 4: the boot running the
+script died ~30 s in (log overwritten), the next boot came up normally
+(INFORM preset did not survive / was ignored) and the 60 s fail-safe sent
+it to TWRP. Guess: kicks do not reach the counter or the clock is far
+faster than 66 MHz. e23e02d logs the count left at each kick; sweetwdt=2
+counts without resetting. Boot-args now sweetwdt=0.
+
+GPU job queue (932e742): SweetMali sel 17 SUBMIT_ASYNC / 18 WAIT_SEQ, a
+worker runs jobs in order, BO frees and sel 13 drain the queue, completion
+polled 20 ms before sleeping, "SWEET MALI: queue" stats every 2 s. Panel
+copy (present) and IOSurface trapLock wait for queued jobs. sweetgl
+(sha 8115dcdc..., in place): per-bo / per-syncobj / per-sync-file
+sequence numbers, real WAIT_BO and syncobj waits. Off switches:
+sweetmali_async=0, SWEETGL_SYNC=1. Round 5 (repack 43703923637 of 932e742
++ that sweetgl): no hang, all screens correct, queue up to 30 deep, but
+pairs of DATA_INVALID_FAULT (0x58) vertex+fragment jobs at each activity
+start (12-14 per 2 s). Cause (likely): the dsb before the job ran on the
+worker's CPU, not on the CPU whose write-combined descriptor writes it
+must drain. e23e02d adds dsb sy in sel 17 on the submitting CPU. Next:
+flash e23e02d (with sweetwdt=2 for the watchdog numbers), round 6.
