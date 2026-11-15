@@ -1304,3 +1304,44 @@ start (12-14 per 2 s). Cause (likely): the dsb before the job ran on the
 worker's CPU, not on the CPU whose write-combined descriptor writes it
 must drain. e23e02d adds dsb sy in sel 17 on the submitting CPU. Next:
 flash e23e02d (with sweetwdt=2 for the watchdog numbers), round 6.
+
+## 2026-11-15 (later): rounds 6-25, handoff
+
+Fixed and verified on the phone (screenshots/bursts in twrp-write/pulled):
+- App Library header black when scrolled: CA's variable blur clears S's
+  framebuffer before each 0x26 mip pass (on Apple GPUs that targets the next
+  mip level); with one level the clears wiped S. sweetgl (adapt.py) makes
+  the 0x27 blur read the texture S was copied from (copy_src_of). Round 22.
+  (Rounds 10-17 chased an early-boot variable blur by mistake; the trace
+  windows (SWEETGL_TRACE=N, now on the 1194x1164 viewport) found the real one.)
+- Startup blink (half-drawn lock screen, off, on): boot hold, the first
+  display-on's frames wait up to sweetfb_boot_hold_ms (8000). Round 19.
+- Screen-off fade: steps start at once, every 2 vsyncs; dimmed in the fast
+  parallel copy (job.dim); fade keeps refs to the last surfaces (fFadeSurf)
+  and ignores swaps that show no surface (CA sends one before display off).
+  Round 25 burst: 114 -> 55 -> 11 -> 0 over ~120 ms.
+- Crash after Settings (rounds 9-11): my fault recorder's ml_io_map left a
+  kernel mapping on bo pages (pmap_assert_free). Reads use phystokv now.
+- Crash at app exit (user photo): pmap_remove_options invalid range: the
+  macOS-target arm64_pmap_max_offset_default (128 TB) exceeds 4K-page user
+  VA (T0SZ_BOOT 26 -> 2^38). Patch 0127 sets it to 2^(64-T0SZ_BOOT).
+- Kernel builds: ccache (Xcode clang wrapped) 99.9% hits, ~12 min per run.
+- Keybag sel 8/32 now succeed (the passcode screen after the power menu
+  still shows: iOS thinks a passcode is set; one home press dismisses it).
+- Autopilot: 'burst TAG N MS' (N frames at 1/8 size, MS apart).
+
+Measured (rounds 13-16): G3D 400 MHz is ~40% slower than 668 (GPU-bound,
+not memory-bound here, unlike orhunnx/ios-a5xelte); the GPU job queue gives
+~25% more frames than synchronous submits. Kept: 668 MHz + queue.
+
+Watchdog: arming killed the boot when PMU bit 24 (APL_WDTRESET) was
+unmasked; count-only mode works, the counter runs at ~2 kHz (66 MHz/256/128)
+and kicks reach it. Full mode now unmasks bit 23 only: untested. sweetwdt=2.
+
+Open: queued GPU jobs fail with DATA_INVALID (0x58) in bursts at gesture
+starts (~10-20 per run; 0 with synchronous submits). Ruled out: Mesa BO
+cache (nocache), overruns (64 KB guard gaps: no MMU faults), submitter dsb,
+busy-bo swap path (WAITBO_BLOCK), GPU timing (2 ms pause), retry after the
+reset (fails every time). The first 64 bytes of the pool bo (the FBD) are
+unchanged between submit and failure; round 26 compares 1 KB.
+Next: GPU fix, then cheaper blur (downsample first), CPU profiling.
