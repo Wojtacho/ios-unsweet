@@ -507,14 +507,6 @@ gpu_pll(void)
 	IOLog("SWEET MALI: G3D clock %u MHz: pll 0x%08x -> 0x%08x (parked %d locked %d), mux stat 0x%x, div 0x%x, buck4 0x%x -> %s\n",
 	    mhz, before, rd(g_g3d, 0x100), parked, locked, rd(g_g3d, 0x408), rd(g_g3d, 0x600), a510f_g3d_vsel,
 	    muxed ? "on" : "FAILED, staying at 400");
-	/* A510F: the memory side as S-Boot left it (read only; CMU_MIF 0x10430000) */
-	vm_offset_t mif = ml_io_map(0x10430000, 0x1000);
-	if (mif != 0) {
-		IOLog("SWEET MALI: CMU_MIF mem0_pll 0x%08x media_pll 0x%08x bus_pll 0x%08x, mux stat 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x, div 0x%x 0x%x 0x%x 0x%x\n",
-		    rd(mif, 0x100), rd(mif, 0x120), rd(mif, 0x130), rd(mif, 0x400), rd(mif, 0x404), rd(mif, 0x408),
-		    rd(mif, 0x40c), rd(mif, 0x410), rd(mif, 0x414), rd(mif, 0x600), rd(mif, 0x604), rd(mif, 0x608),
-		    rd(mif, 0x60c));
-	}
 }
 
 /* ---- jobs ------------------------------------------------------------- */
