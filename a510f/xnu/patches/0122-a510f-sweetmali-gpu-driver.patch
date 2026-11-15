@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
-@@ -0,0 +1,1515 @@
+@@ -0,0 +1,1514 @@
 +/*
 + * SweetMali: kernel driver for the A510F's Mali-T720 MP2 (Exynos 7580),
 + * shaped after Linux panfrost (drivers/gpu/drm/panfrost) so that Mesa's
@@ -746,8 +746,7 @@ index 0000000..1111111
 +					ctx_keys[bad][ctx_n[bad]++] = key;
 +					if (bad) {
 +						const uint32_t *w = &fbd_at_submit[32];
-+						IOLog("SWEET MALI: FAILED FBD %08x words +0x80..+0xff: %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x
-+",
++						IOLog("SWEET MALI: FAILED FBD %08x words +0x80..+0xff: %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x\n",
 +						    key, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11], w[12], w[13], w[14], w[15],
 +						    w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23], w[24], w[25], w[26], w[27], w[28], w[29], w[30], w[31]);
 +					}

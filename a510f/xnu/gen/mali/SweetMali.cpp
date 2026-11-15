@@ -740,8 +740,7 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 					ctx_keys[bad][ctx_n[bad]++] = key;
 					if (bad) {
 						const uint32_t *w = &fbd_at_submit[32];
-						IOLog("SWEET MALI: FAILED FBD %08x words +0x80..+0xff: %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x
-",
+						IOLog("SWEET MALI: FAILED FBD %08x words +0x80..+0xff: %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x\n",
 						    key, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11], w[12], w[13], w[14], w[15],
 						    w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23], w[24], w[25], w[26], w[27], w[28], w[29], w[30], w[31]);
 					}
