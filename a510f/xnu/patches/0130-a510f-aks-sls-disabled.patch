@@ -1,0 +1,27 @@
+diff --git a/iokit/Kernel/arm/SweetKeyStore.cpp b/iokit/Kernel/arm/SweetKeyStore.cpp
+index b385e01..9c591bd 100644
+--- a/iokit/Kernel/arm/SweetKeyStore.cpp
++++ b/iokit/Kernel/arm/SweetKeyStore.cpp
+@@ -68,6 +68,13 @@ enum {
+ #undef SWEET_AKS_LOCK_STATE
+ #define SWEET_AKS_LOCK_STATE    0x6
+ 
++/*
++ * A510F round 38: sls is MKBGetDeviceLockState's answer; 3 is
++ * kMobileKeyBagDisabled, "no passcode" (0 = unlocked made SpringBoard show
++ * a passcode screen after the power menu: selector 32, then lock).
++ */
++#define SWEET_AKS_SLS           3
++
+ class AppleKeyStore : public IOService {
+ 	OSDeclareDefaultStructors(AppleKeyStore);
+ 
+@@ -159,7 +166,7 @@ sweet_aks_device_state(IOExternalMethodArguments *args)
+ 		const char *key;
+ 		uint8_t value;
+ 	} fields[] = {
+-		{ "ss", SWEET_AKS_LOCK_STATE }, { "sls", 0 }, { "sb", 0 }, { "sfa", 0 },
++		{ "ss", SWEET_AKS_LOCK_STATE }, { "sls", SWEET_AKS_SLS }, { "sb", 0 }, { "sfa", 0 },
+ 		{ "sgs", 0 }, { "sas", 0 }, { "sgpe", 0 }, { "srcd", 0 },
+ 	};
+ 	uint8_t buf[128];
