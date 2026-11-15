@@ -105,10 +105,16 @@ index d11fe26..a8881a1 100644
  #include <IOKit/IOMemoryDescriptor.h>
  #include <libkern/c++/OSString.h>
  #include <sys/proc.h>
-@@ -232,6 +233,25 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+@@ -232,6 +233,31 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
  		break;
  	}
  
++	/* A510F: lock device (8) and 32, after the power-off slider: no passcode, nothing to lock */
++	if ((selector == 8 || selector == 32) && ret == kIOReturnUnsupported) {
++		args->scalarOutputCount = 0;
++		ret = kIOReturnSuccess;
++	}
++
 +	/*
 +	 * A510F: every keystore call printed a console line (hundreds per boot,
 +	 * each one drawn and scrolled on the 1080x1920 console). Now the first
