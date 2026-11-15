@@ -1334,7 +1334,7 @@ index 0000000..7b39184
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..05ee3d4 100644
+index 6f8dba3..1bbbb7b 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
 @@ -33,6 +33,7 @@
@@ -1705,7 +1705,7 @@ index 6f8dba3..05ee3d4 100644
  	lck_mtx_unlock(&sweet_mmc_lock);
  	if (error) {
  		return error;
-@@ -986,9 +1322,793 @@ sweet_mmc_init(void)
+@@ -986,9 +1322,803 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
@@ -2203,7 +2203,8 @@ index 6f8dba3..05ee3d4 100644
 + * Hang guard while a script runs: the SoC watchdog (s3c2410-style, 0x101B0000,
 + * PCLK 66 MHz) resets the phone if this kernel stops kicking it, and INFORM2/3
 + * already say "recovery", so a hang, a panic or a reset lands in TWRP. Both are
-+ * undone when the script ends. Boot-arg sweetwdt=0 turns it off.
++ * undone when the script ends. Boot-arg sweetwdt=0 turns it off, sweetwdt=2
++ * runs the counter without the reset (logs how far it counted per kick).
 + */
 +#define A510F_WDT_PA            0x101B0000u
 +#define A510F_CMU_PERI_PA       0x139F0000u
@@ -2226,8 +2227,16 @@ index 6f8dba3..05ee3d4 100644
 +static void
 +auto_wdt_thread(__unused void *arg, __unused wait_result_t wr)
 +{
++	uint32_t n = 0;
 +	while (au_wdt_on) {
++		uint32_t left = R32(au_wdt, WDT_CNT);
 +		R32(au_wdt, WDT_CNT) = WDT_COUNT;
++		if (n < 6) {
++			/* the count left after ~2 s tells the real watchdog clock */
++			printf("SWEET AUTO: watchdog kick %u: count was %u of %u, con 0x%x\n", n, left, WDT_COUNT,
++			    R32(au_wdt, WDT_CON));
++		}
++		n++;
 +		IOSleep(2000);
 +	}
 +}
@@ -2263,7 +2272,8 @@ index 6f8dba3..05ee3d4 100644
 +	R32(au_wdt, WDT_CNT) = WDT_COUNT;
 +	R32(au_pmu, PMU_AUTO_DISABLE_WDT) = dis & ~PMU_WDT_CPU_BITS;
 +	R32(au_pmu, PMU_MASK_WDT_RESET) = mask & ~PMU_WDT_CPU_BITS;
-+	R32(au_wdt, WDT_CON) = WDT_CON_ON;
++	/* sweetwdt=2: count only (no reset), to measure the clock */
++	R32(au_wdt, WDT_CON) = on == 2 ? (WDT_CON_ON & ~1u) : WDT_CON_ON;
 +	au_wdt_on = true;
 +	thread_t th;
 +	if (kernel_thread_start(auto_wdt_thread, NULL, &th) == KERN_SUCCESS) {

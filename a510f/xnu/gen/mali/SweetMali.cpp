@@ -1127,6 +1127,12 @@ SweetMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
 		if (nin < 2 || args->scalarOutputCount < 1) {
 			return kIOReturnBadArgument;
 		}
+		/*
+		 * Mesa wrote the job descriptors through write-combined mappings on
+		 * this CPU; the worker's dsb runs on another one and does not drain
+		 * them (DATA_INVALID_FAULT 0x58 on fresh jobs). Drain here.
+		 */
+		__asm__ volatile ("dsb sy" : : : "memory");
 		uint64_t seq = mali_queue_submit(in[0], (uint32_t)in[1]);
 		if (seq == 0) {
 			return kIOReturnUnsupported;
