@@ -462,7 +462,18 @@ command(unsigned nr, void *data)
 		struct sbo *b = sbo(w->handle);
 		uint64_t seq = b ? b->seq : 0;
 		pthread_mutex_unlock(&lock);
-		return seq_done(seq, w->timeout_ns != 0) ? 0 : -ETIMEDOUT;
+		/*
+		 * SWEETGL_WAITBO_BLOCK=1: a "busy?" poll (timeout 0) waits for the
+		 * job instead, so Mesa never takes its busy-buffer path (swap in a new
+		 * bo, copy): only that path differs from synchronous submits, and
+		 * queued jobs fail with DATA_INVALID (test).
+		 */
+		static int block_polls = -1;
+		if (block_polls < 0) {
+			const char *e = getenv("SWEETGL_WAITBO_BLOCK");
+			block_polls = e != NULL && e[0] == '1';
+		}
+		return seq_done(seq, w->timeout_ns != 0 || block_polls) ? 0 : -ETIMEDOUT;
 	}
 	case DRM_PANFROST_CREATE_BO:
 		return create_bo(data);

@@ -971,3 +971,29 @@ rep("""	if (!convert) {
 		/* the fade too: dimmed in the same fast copy (the slow path did not dim without fRowBuf) */""")
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
 print('ok fade debug')
+
+# Fade: the dim redraws found no layers (round 23: no per-layer lines), so
+# fLastRec was an empty swap (CA's last frame before display off). Remember
+# only swaps that show at least one surface.
+rep("""	IOLockLock(fPresentLock);
+	if (rec != fLastRec) {
+		memcpy(fLastRec, rec, SWEET_FB_SWAP_REC_SIZE);
+		fHaveLast = true;
+	}""", """	IOLockLock(fPresentLock);
+	if (rec != fLastRec) {
+		bool shows = false;
+		for (uint32_t l = 0; l < SWEET_FB_LAYERS; l++) {
+			shows |= (mask & (1u << l)) && get32(rec, 0x54 + 4 * l) != 0;
+		}
+		if (shows) {
+			memcpy(fLastRec, rec, SWEET_FB_SWAP_REC_SIZE);
+			fHaveLast = true;
+		} else {
+			static unsigned told;
+			if (told++ < 5) {
+				IOLog("SWEET FB: swap %u shows no surface (mask 0x%x): not kept for the fade@NL@", get32(rec, 0x50), mask);
+			}
+		}
+	}""")
+open(p, 'w', encoding='utf-8', newline='\n').write(s)
+print('ok fade last frame')
