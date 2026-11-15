@@ -1334,7 +1334,7 @@ index 0000000..7b39184
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..1bbbb7b 100644
+index 6f8dba3..c4c9fe3 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
 @@ -33,6 +33,7 @@
@@ -1705,7 +1705,7 @@ index 6f8dba3..1bbbb7b 100644
  	lck_mtx_unlock(&sweet_mmc_lock);
  	if (error) {
  		return error;
-@@ -986,9 +1322,803 @@ sweet_mmc_init(void)
+@@ -986,9 +1322,810 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
@@ -2211,7 +2211,7 @@ index 6f8dba3..1bbbb7b 100644
 +#define PERI_EN_PCLK_PERIS      0x0900u                 /* bit 1: pclk_wdt_cpu */
 +#define PMU_AUTO_DISABLE_WDT    0x0408u
 +#define PMU_MASK_WDT_RESET      0x040Cu
-+#define PMU_WDT_CPU_BITS        ((1u << 23) | (1u << 24))
++#define PMU_WDT_CPU_BITS        (1u << 23)               /* CPU_WDTRESET: pclk_wdt_cpu's watchdog */
 +#define WDT_CON                 0x00u
 +#define WDT_DAT                 0x04u
 +#define WDT_CNT                 0x08u
@@ -2270,8 +2270,15 @@ index 6f8dba3..1bbbb7b 100644
 +	R32(au_wdt, WDT_CON) = 0;
 +	R32(au_wdt, WDT_DAT) = WDT_COUNT;
 +	R32(au_wdt, WDT_CNT) = WDT_COUNT;
-+	R32(au_pmu, PMU_AUTO_DISABLE_WDT) = dis & ~PMU_WDT_CPU_BITS;
-+	R32(au_pmu, PMU_MASK_WDT_RESET) = mask & ~PMU_WDT_CPU_BITS;
++	/*
++	 * Rounds 4 and 6 died ~30 s after arming even without the reset bit:
++	 * clearing bit 24 (APL_WDTRESET) too probably let a watchdog nobody
++	 * kicks reset the SoC. Count-only mode leaves the PMU alone.
++	 */
++	if (on == 1) {
++		R32(au_pmu, PMU_AUTO_DISABLE_WDT) = dis & ~PMU_WDT_CPU_BITS;
++		R32(au_pmu, PMU_MASK_WDT_RESET) = mask & ~PMU_WDT_CPU_BITS;
++	}
 +	/* sweetwdt=2: count only (no reset), to measure the clock */
 +	R32(au_wdt, WDT_CON) = on == 2 ? (WDT_CON_ON & ~1u) : WDT_CON_ON;
 +	au_wdt_on = true;
