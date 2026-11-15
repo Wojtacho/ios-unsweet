@@ -882,3 +882,67 @@ edit('eagl.c', [
 	pend_clear_apply();
 	glFinish();'''),
 ])
+
+
+# The 0x26 mip passes draw nothing (sgl_nop discards): do not send them. The
+# queued GPU jobs that fail with DATA_INVALID all render into the 1056x1068
+# variable-blur surface (their FBD; round 32), i.e. batches of only these
+# discard-everything draws (+ the held clears, dropped before them).
+edit('eagl.c', [
+    ('''static GLint copy_src_of[8192];''', '''static GLint copy_src_of[8192];
+static bool sgl_skip_draw;              /* ring_note: this draw is a 0x26 pass, skip it */'''),
+    ('''	int vb = prog_texfn_kind(prog);
+	GLint vb_min[2] = {0, 0};''', '''	int vb = prog_texfn_kind(prog);
+	GLint vb_min[2] = {0, 0};
+	sgl_skip_draw = vb == 1;'''),
+    ('''	glDrawArrays(mode, first, count);''', '''	if (sgl_skip_draw) {
+		sgl_skip_draw = false;
+		SGL_POST(65);
+		return;
+	}
+	glDrawArrays(mode, first, count);'''),
+    ('''	glDrawElements(mode, count, type, indices);''', '''	if (sgl_skip_draw) {
+		sgl_skip_draw = false;
+		SGL_POST(67);
+		return;
+	}
+	glDrawElements(mode, count, type, indices);'''),
+])
+
+
+# Variable blur direction: round 32 full-resolution strips show the App Library
+# header's blur weak at the top (icons behind the status bar almost sharp) and
+# strong at its bottom edge (a dark line where the taps leave the copied area):
+# the reverse of iOS. SWEETGL_VBLUR_FLIP (default 1) flips the mask direction.
+edit('eagl.c', [
+    ('''static const char nop_copy_func[] =''', '''static const char *
+sgl_vblur_src(void)
+{
+	static char *flipped;
+	static int flip = -1;
+	if (flip < 0) {
+		const char *e = getenv("SWEETGL_VBLUR_FLIP");
+		flip = !(e != NULL && e[0] == '0');
+	}
+	if (!flip) {
+		return vblur_func;
+	}
+	if (flipped == NULL) {
+		const char *a = "(minmax_dir.y > .5 ? 1. - m.a : m.a)";
+		const char *at = strstr(vblur_func, a);
+		size_t n = strlen(vblur_func);
+		flipped = malloc(n + 8);
+		if (flipped == NULL || at == NULL) {
+			return vblur_func;
+		}
+		size_t pre = (size_t)(at - vblur_func);
+		memcpy(flipped, vblur_func, pre);
+		strcpy(flipped + pre, "(minmax_dir.y > .5 ? m.a : 1. - m.a)");
+		strcat(flipped, at + strlen(a));
+	}
+	return flipped;
+}
+
+static const char nop_copy_func[] ='''),
+    ('''strstr(src, "sgl_vblur(") ? vblur_func : ""''', '''strstr(src, "sgl_vblur(") ? sgl_vblur_src() : ""'''),
+])
