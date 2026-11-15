@@ -1,0 +1,20 @@
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -481,7 +481,16 @@
+     "Small device address space size outside allowable range");
+ 
+ #  ifdef XNU_TARGET_OS_OSX
++#  if !defined(__ARM_16K_PG__)
++/*
++ * A510F: 4 KB pages with the subpage L1 give user pmaps 2^(64 - T0SZ_BOOT) =
++ * 256 GB, not the macOS 128 TB: maps reaching above it (large WebKit-style
++ * reservations) panicked in pmap_remove_options() when the process exited.
++ */
++SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm64_pmap_max_offset_default = (1ULL << (64 - T0SZ_BOOT));
++#  else
+ SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm64_pmap_max_offset_default = MACH_VM_MAX_ADDRESS;
++#  endif
+ #  else
+ SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm64_pmap_max_offset_default = 0x0;
+ #  endif
