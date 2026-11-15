@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
-@@ -0,0 +1,1443 @@
+@@ -0,0 +1,1490 @@
 +/*
 + * SweetMali: kernel driver for the A510F's Mali-T720 MP2 (Exynos 7580),
 + * shaped after Linux panfrost (drivers/gpu/drm/panfrost) so that Mesa's
@@ -717,6 +717,53 @@ index 0000000..1111111
 +		 * data. The GPU was reset; run the chain once more (as Linux panfrost
 +		 * resubmits jobs after a reset).
 +		 */
++		/*
++		 * The last successful job's pool (2 KB) per FBD size (word 11: the
++		 * failing ones all have 042b041f = 1056x1068); a failure prints the
++		 * words that differ from the last good job of the same size.
++		 */
++		{
++			static uint32_t good_key[8], good_buf[8][512];
++			static int good_n;
++			uint32_t key = fbd_at_submit[11];
++			int slot = -1;
++			for (int g = 0; g < good_n; g++) {
++				if (good_key[g] == key) {
++					slot = g;
++				}
++			}
++			if (r == kIOReturnSuccess && fbd_ok && key != 0) {
++				if (slot < 0) {
++					slot = good_n < 8 ? good_n++ : (int)(key % 8);
++					good_key[slot] = key;
++				}
++				memcpy(good_buf[slot], fbd_at_submit, sizeof(good_buf[slot]));
++			} else if (r != kIOReturnSuccess && fbd_ok) {
++				static unsigned told;
++				if (told++ < 30) {
++					if (slot < 0) {
++						IOLog("SWEET MALI: failed job jc +0x%llx: no good job with FBD size %08x yet\n", jc & 0xffff, key);
++					} else {
++						char where[300];
++						where[0] = 0;
++						int nd = 0, shown = 0;
++						for (int k = 0; k < 512; k++) {
++							if (good_buf[slot][k] != fbd_at_submit[k]) {
++								nd++;
++								if (shown < 10) {
++									shown++;
++									char one[40];
++									snprintf(one, sizeof(one), " +0x%x %x/%x", k * 4, good_buf[slot][k], fbd_at_submit[k]);
++									strlcat(where, one, sizeof(where));
++								}
++							}
++						}
++						IOLog("SWEET MALI: failed job jc +0x%llx vs last good with FBD size %08x: %d of 512 words differ (good/bad):%s\n",
++						    jc & 0xffff, key, nd, where);
++					}
++				}
++			}
++		}
 +		if (r != kIOReturnSuccess && g_q_dumps < 12) {
 +			g_q_dumps++;
 +			mali_fault_dump(jc, g_fault_head, age_ns / 1000, depth);
