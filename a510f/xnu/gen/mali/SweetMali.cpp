@@ -728,14 +728,23 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 			}
 			/* the tiler context (FBD +0xC0: polygon list size, hierarchy mask, list, body, heap start/end) */
 			if (fbd_ok && key != 0) {
-				static uint32_t ctx_keys[12];
-				static int ctx_n;
+				/* separate budgets: round 35's 12 entries all went to good jobs */
+				static uint32_t ctx_keys[2][12];
+				static int ctx_n[2];
+				int bad = r != kIOReturnSuccess;
 				bool seen = false;
-				for (int g = 0; g < ctx_n; g++) {
-					seen |= ctx_keys[g] == (key ^ (r == kIOReturnSuccess ? 0u : 0x80000000u));
+				for (int g = 0; g < ctx_n[bad]; g++) {
+					seen |= ctx_keys[bad][g] == key;
 				}
-				if (!seen && ctx_n < 12) {
-					ctx_keys[ctx_n++] = key ^ (r == kIOReturnSuccess ? 0u : 0x80000000u);
+				if (!seen && ctx_n[bad] < 12) {
+					ctx_keys[bad][ctx_n[bad]++] = key;
+					if (bad) {
+						const uint32_t *w = &fbd_at_submit[32];
+						IOLog("SWEET MALI: FAILED FBD %08x words +0x80..+0xff: %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x
+",
+						    key, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11], w[12], w[13], w[14], w[15],
+						    w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23], w[24], w[25], w[26], w[27], w[28], w[29], w[30], w[31]);
+					}
 					const uint32_t *t = &fbd_at_submit[48];
 					IOLog("SWEET MALI: %s job, FBD size %08x params %08x %08x: tiler ctx size %u mask 0x%x list 0x%x%08x body 0x%x%08x heap 0x%x%08x..0x%x%08x\n",
 					    r == kIOReturnSuccess ? "good" : "FAILED", key, fbd_at_submit[8], fbd_at_submit[9],

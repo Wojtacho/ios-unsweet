@@ -1,0 +1,19 @@
+diff --git a/iokit/Kernel/arm/SweetKeyStore.cpp b/iokit/Kernel/arm/SweetKeyStore.cpp
+index 7718280..76ec68e 100644
+--- a/iokit/Kernel/arm/SweetKeyStore.cpp
++++ b/iokit/Kernel/arm/SweetKeyStore.cpp
+@@ -60,6 +60,14 @@ enum {
+  */
+ #define SWEET_AKS_LOCK_STATE    0x4
+ 
++/*
++ * A510F: plus bit 1 (keybag_state_no_pin). Without it SpringBoard took the
++ * device for one with a passcode: after the power-off slider's Cancel
++ * (lock device, selector 8) it showed a passcode screen.
++ */
++#undef SWEET_AKS_LOCK_STATE
++#define SWEET_AKS_LOCK_STATE    0x6
++
+ class AppleKeyStore : public IOService {
+ 	OSDeclareDefaultStructors(AppleKeyStore);
+ 
