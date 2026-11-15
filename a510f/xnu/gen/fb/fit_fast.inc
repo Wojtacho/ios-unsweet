@@ -15,7 +15,7 @@ struct sweet_fit_job {
 	const int32_t *col;             /* panel column -> logical column */
 	int32_t        sx, sy, dx, dy, w, h, px0, px1, py0, py1;
 	int32_t        num, den;
-	uint32_t       dim;             /* screen-off fade: each channel >> dim */
+	uint32_t       dim;             /* screen-off fade: each channel * (256 - dim) / 256 */
 };
 static IOLock              *sweet_fit_lock;
 static struct sweet_fit_job sweet_fit_cur;
@@ -79,9 +79,11 @@ sweet_fit_band(const struct sweet_fit_job *j, uint32_t band, uint32_t nbands)
 			buf[px] = row[col[px]];
 		}
 		if (j->dim) {
-			const uint32_t keep = 0x01010101u * (0xffu >> j->dim);
+			/* screen-off fade: every channel * (256 - dim) / 256 */
+			const uint32_t m = 256 - j->dim;
 			for (int32_t q = c0; q < c1; q++) {
-				buf[q] = (buf[q] >> j->dim) & keep;
+				uint32_t v = buf[q];
+				buf[q] = ((((v & 0x00ff00ffu) * m) >> 8) & 0x00ff00ffu) | ((((v >> 8) & 0x00ff00ffu) * m) & 0xff00ff00u);
 			}
 		}
 		memcpy((void *)(j->draw + (uint64_t)py * j->drawBpr + (uint64_t)c0 * 4), buf + c0, (size_t)(c1 - c0) * 4);

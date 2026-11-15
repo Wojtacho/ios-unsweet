@@ -1029,3 +1029,25 @@ rep("""	uint32_t ow = fb->fWidth / div, oh = fb->fHeight / div;
 		const volatile uint32_t *row = (const volatile uint32_t *)(base + (uint64_t)y * div * fb->fRowBytes);""")
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
 print('ok shotrow')
+
+# Round 38: a slower, smooth screen-off fade (user: "the iPhone's dont have it
+# so fast"). fDim is now 256 - brightness (a multiply, not a shift), 7 eased
+# steps every 3 vsyncs then black: ~0.35-0.4 s instead of 3 halvings in ~0.15 s.
+s = open(p, encoding='utf-8').read()
+rep("""	uint32_t            fDim;           /* fade: shift right by fDim (presentFit) */""",
+    """	uint32_t            fDim;           /* fade: 256 - brightness/256 (presentFit) */""")
+rep("""			/* first step at once, then every 2 vsyncs: ~0.15 s in all */
+			bool go = fstep <= 3 && !fb->fPresentBusy && (fstep == 0 || (count % 2) == 0);""",
+    """			/* first step at once, then every 3 vsyncs: 7 dim steps + black, ~0.4 s */
+			bool go = fstep <= 7 && !fb->fPresentBusy && (fstep == 0 || (count % 3) == 0);""")
+rep("""		if (fstep >= 1 && fstep <= 3 && fb->fHaveLast) {
+			fb->fDim = fstep;               /* 1/2, 1/4, 1/8 */""",
+    """		if (fstep >= 1 && fstep <= 7 && fb->fHaveLast) {
+			/* eased brightness out of 256: 80%, 62%, 46%, 32%, 20%, 11%, 5% */
+			static const uint16_t bright[8] = { 256, 205, 159, 118, 82, 51, 28, 13 };
+			fb->fDim = 256 - bright[fstep];""")
+rep("""				fRowBuf[px] = fDim ? (v >> fDim) & (0x01010101u * (0xffu >> fDim)) : v;""",
+    """				fRowBuf[px] = fDim ? (((((v & 0x00ff00ffu) * (256 - fDim)) >> 8) & 0x00ff00ffu) |
+				    ((((v >> 8) & 0x00ff00ffu) * (256 - fDim)) & 0xff00ff00u)) : v;""")
+open(p, 'w', encoding='utf-8', newline='\n').write(s)
+print('ok smooth fade')
