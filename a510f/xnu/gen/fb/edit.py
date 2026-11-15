@@ -997,3 +997,35 @@ rep("""	IOLockLock(fPresentLock);
 	}""")
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
 print('ok fade last frame')
+
+# Full-resolution rows for the autopilot's "shotrow" (div = (Y + 1) << 16): thin
+# lines are lost at the usual 1/4 size (user: "really thin" line in App Library).
+rep("""	uint32_t ow = fb->fWidth / div, oh = fb->fHeight / div;
+	if ((uint64_t)ow * oh > maxpix) {
+		return 22;      /* EINVAL */
+	}
+	uintptr_t base = fb->frontVA();
+	for (uint32_t y = 0; y < oh; y++) {
+		const volatile uint32_t *row = (const volatile uint32_t *)(base + (uint64_t)y * div * fb->fRowBytes);""", """	uint32_t y0 = 0;
+	if (div >= 0x10000) {
+		y0 = (div >> 16) - 1;
+		div = 1;
+	}
+	uint32_t ow = fb->fWidth / div, oh = fb->fHeight / div;
+	if (y0 != 0 || (uint64_t)ow * oh > maxpix) {
+		if (y0 == 0 && div != 1) {
+			return 22;      /* EINVAL */
+		}
+		if (y0 >= fb->fHeight) {
+			return 22;
+		}
+		oh = (uint32_t)(maxpix / ow);
+		if (oh > fb->fHeight - y0) {
+			oh = fb->fHeight - y0;
+		}
+	}
+	uintptr_t base = fb->frontVA() + (uint64_t)y0 * fb->fRowBytes;
+	for (uint32_t y = 0; y < oh; y++) {
+		const volatile uint32_t *row = (const volatile uint32_t *)(base + (uint64_t)y * div * fb->fRowBytes);""")
+open(p, 'w', encoding='utf-8', newline='\n').write(s)
+print('ok shotrow')

@@ -571,7 +571,7 @@ gpu_run(uint64_t jc, uint32_t req, uint32_t *status_out, uint64_t *us_out)
 	}
 	g_faults++;
 	g_fault_head = rd(g_gpu, JS(js, JS_HEAD));
-	if (g_faults <= 20) {
+	if (g_faults <= 300) {
 		char name[32];
 		proc_selfname(name, sizeof(name));
 		IOLog("SWEET MALI: %s job 0x%llx js%u %s: irq 0x%x mmu 0x%x status 0x%x head 0x%x | AS0 fault 0x%x at 0x%x%08x (%llu us)\n",
@@ -602,7 +602,7 @@ gpu_run(uint64_t jc, uint32_t req, uint32_t *status_out, uint64_t *us_out)
 extern "C" kern_return_t kernel_thread_start(void (*)(void *, int), void *, thread_t *);
 extern "C" void thread_deallocate(thread_t);
 static IOLock *g_qlock;
-static struct { uint64_t jc; uint32_t req; uint64_t t; uint32_t fbd[256]; bool fbd_ok; } g_q[MALI_QLEN];
+static struct { uint64_t jc; uint32_t req; uint64_t t; uint32_t fbd[2048]; bool fbd_ok; } g_q[MALI_QLEN];
 static uint32_t g_q_delay_us;                   /* sweetmali_qdelay: wait before each job (test) */
 static uint32_t g_q_dumps;
 
@@ -690,7 +690,7 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 		uint64_t seq = g_q_done + 1;
 		uint64_t jc = g_q[seq % MALI_QLEN].jc;
 		uint64_t queued_at = g_q[seq % MALI_QLEN].t;
-		static uint32_t fbd_at_submit[256];          /* worker only */
+		static uint32_t fbd_at_submit[2048];         /* worker only */
 		bool fbd_ok = g_q[seq % MALI_QLEN].fbd_ok;
 		memcpy(fbd_at_submit, g_q[seq % MALI_QLEN].fbd, sizeof(fbd_at_submit));
 		uint32_t req = g_q[seq % MALI_QLEN].req;
@@ -711,50 +711,32 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 		 * data. The GPU was reset; run the chain once more (as Linux panfrost
 		 * resubmits jobs after a reset).
 		 */
-		static uint32_t g_retry_ok, g_retry_bad;
-		if (r != kIOReturnSuccess && (status & 0xff) == 0x58) {
-			uint32_t st2 = 0;
-			uint64_t us2 = 0;
-			IOReturn r2 = gpu_run(jc, req, &st2, &us2);     /* g_lock is held here */
-			if (r2 == kIOReturnSuccess) {
-				g_retry_ok++;
-			} else {
-				g_retry_bad++;
-			}
-			if (g_retry_ok + g_retry_bad <= 20 || (g_retry_ok + g_retry_bad) % 100 == 0) {
-				IOLog("SWEET MALI: retry of job 0x%llx js%u after 0x%x: %s (retries ok %u, failed %u)\n",
-				    jc, (req & 1) ? 0u : 1u, status & 0xff, r2 == kIOReturnSuccess ? "ok" : "failed again",
-				    g_retry_ok, g_retry_bad);
-			}
-			if (r2 == kIOReturnSuccess) {
-				r = r2;
-				status = st2;
-				us += us2;
-			}
-		}
 		if (r != kIOReturnSuccess && g_q_dumps < 12) {
 			g_q_dumps++;
 			mali_fault_dump(jc, g_fault_head, age_ns / 1000, depth);
-			static uint32_t now_[256];
+			static uint32_t now_[2048];
 			uint64_t base = jc & ~0xffffull;
 			bool ok = fbd_ok;
-			for (int k = 0; k < 32 && ok; k++) {
+			for (int k = 0; k < 256 && ok; k++) {
 				ok = mali_peek(base + 32 * k, &now_[8 * k]);
 			}
-			int first = -1, ndiff = 0;
-			for (int k = 0; ok && k < 256; k++) {
+			int ndiff = 0, shown = 0;
+			char where[220];
+			where[0] = 0;
+			for (int k = 0; ok && k < 2048; k++) {
 				if (now_[k] != fbd_at_submit[k]) {
 					ndiff++;
-					if (first < 0) {
-						first = k;
+					if (shown < 6) {
+						shown++;
+						char one[40];
+						snprintf(one, sizeof(one), " +0x%x %x->%x", k * 4, fbd_at_submit[k], now_[k]);
+						strlcat(where, one, sizeof(where));
 					}
 				}
 			}
-			if (ok && first >= 0) {
-				IOLog("SWEET MALI: pool 0x%llx: %d of 256 words CHANGED since submit, first at +0x%x: %08x -> %08x\n",
-				    base, ndiff, first * 4, fbd_at_submit[first], now_[first]);
-			} else if (ok) {
-				IOLog("SWEET MALI: pool 0x%llx: first 1 KB unchanged since submit\n", base);
+			if (ok) {
+				IOLog("SWEET MALI: pool 0x%llx (jc +0x%llx): %d of 2048 words changed since submit:%s\n",
+				    base, jc - base, ndiff, ndiff ? where : " none");
 			}
 			if (ok) {
 				bool same = memcmp(now_, fbd_at_submit, 64) == 0;
@@ -819,7 +801,7 @@ mali_queue_submit(uint64_t jc, uint32_t req)
 	{
 		uint64_t base = jc & ~0xffffull;
 		bool ok = true;
-		for (int k = 0; k < 32 && ok; k++) {          /* 1 KB */
+		for (int k = 0; k < 256 && ok; k++) {         /* 8 KB: the job descriptors too */
 			ok = mali_peek(base + 32 * k, &g_q[seq % MALI_QLEN].fbd[8 * k]);
 		}
 		g_q[seq % MALI_QLEN].fbd_ok = ok;

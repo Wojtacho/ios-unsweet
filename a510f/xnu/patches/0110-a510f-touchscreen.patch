@@ -1334,7 +1334,7 @@ index 0000000..7b39184
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..b60cd50 100644
+index 6f8dba3..ec62675 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
 @@ -33,6 +33,7 @@
@@ -1782,7 +1782,7 @@ index 6f8dba3..b60cd50 100644
  	if (error) {
  		return error;
  	}
-@@ -986,9 +1336,916 @@ sweet_mmc_init(void)
+@@ -986,9 +1336,940 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
@@ -2046,6 +2046,7 @@ index 6f8dba3..b60cd50 100644
 +	uint64_t last_hash;
 +	volatile uint64_t input_at;     /* abs time of the last touch/key */
 +	volatile int req;               /* 1: script wants a shot */
++	uint32_t req_div;               /* 0: 1/4 size; else sweet_fb_shot's div (full-res rows) */
 +	char req_tag[32];
 +	volatile bool stop;             /* rebooting: no more writes */
 +	volatile bool scripted;         /* a script runs: its own shots only */
@@ -2217,7 +2218,9 @@ index 6f8dba3..b60cd50 100644
 +{
 +	uint32_t w = 0, h = 0, flags = 0;
 +	uint16_t *pix = (uint16_t *)(au.slot + MMC_SECTOR);
-+	int error = sweet_fb_shot(pix, AUTO_PIX_MAX, 4, &w, &h, &flags);
++	uint32_t div = au.req_div ? au.req_div : 4;
++	au.req_div = 0;
++	int error = sweet_fb_shot(pix, AUTO_PIX_MAX, div, &w, &h, &flags);
 +	if (error == 22) {
 +		error = sweet_fb_shot(pix, AUTO_PIX_MAX, 5, &w, &h, &flags);
 +	}
@@ -2552,6 +2555,27 @@ index 6f8dba3..b60cd50 100644
 +			auto_key(key, 1);
 +			IOSleep(120);
 +			auto_key(key, 0);
++		}
++	} else if (auto_word(&p, "shotrow")) {
++		/* shotrow TAG Y: full-resolution panel rows from Y (as many as a slot holds) */
++		char tag[32];
++		const char *q = auto_skip(p);
++		size_t k = 0;
++		while (q[k] && q[k] != ' ' && k < sizeof(tag) - 1) {
++			tag[k] = q[k];
++			k++;
++		}
++		tag[k] = 0;
++		p = q + k;
++		if (k > 0 && auto_int(&p, &a) && a >= 0) {
++			strlcpy(au.req_tag, tag, sizeof(au.req_tag));
++			au.req_div = ((uint32_t)a + 1) << 16;
++			au.req = 1;
++			for (int i = 0; i < 100 && au.req; i++) {
++				IOSleep(50);
++			}
++		} else {
++			printf("SWEET AUTO: shotrow TAG Y\n");
 +		}
 +	} else if (auto_word(&p, "shot")) {
 +		strlcpy(au.req_tag, *auto_skip(p) ? auto_skip(p) : "script", sizeof(au.req_tag));
