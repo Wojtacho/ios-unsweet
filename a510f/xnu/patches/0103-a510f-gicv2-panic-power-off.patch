@@ -85,7 +85,7 @@ diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
 index 6089db9..4c64e5c 100644
 --- a/pexpert/arm/pe_fiq.c
 +++ b/pexpert/arm/pe_fiq.c
-@@ -50,6 +50,105 @@ _gic_write32(vm_offset_t addr, uint32_t value)
+@@ -50,6 +50,122 @@ _gic_write32(vm_offset_t addr, uint32_t value)
  #define gicr_write32(offset, data) (_gic_write32(gicr_pe_base + (offset), (data)))
  #define gicr_read64(offset) (_gic_read64(gicr_pe_base + (offset)))
  
@@ -141,7 +141,7 @@ index 6089db9..4c64e5c 100644
 +	ctlr &= ~GICC_CTLR_EOIMODE_NS;
 +	ctlr |= GICC_CTLR_ENABLEGRP1_NS;
 +	_gic_write32(gicc_base + GICC_CTLR_V2, ctlr);
-+	__builtin_arm_dsb(DSB_SY);
++	__builtin_arm_dsb(0xf);                                /* dsb sy */
 +	kprintf("SWEET GIC: GICv2 cpu %u ctlr 0x%x en0 0x%x\n", (unsigned)(__builtin_arm_rsr64("MPIDR_EL1") & 0xffff),
 +	    _gic_read32(gicc_base + GICC_CTLR_V2), _gic_read32(gicd_base + GICD_ISENABLER0_V2));
 +}
@@ -172,6 +172,23 @@ index 6089db9..4c64e5c 100644
 +				break;
 +			}
 +		}
++#if defined(SWEET_GIC_V2)
++		/*
++		 * A510F autopilot (bsd/dev/sweet_mmc.c sweet_auto): a test script is
++		 * running, so reboot into recovery (TWRP) the way Samsung's
++		 * sec_reboot("recovery") does, instead of switching off.
++		 */
++		extern volatile int sweet_auto_active;
++		if (sweet_auto_active && sweet_pmu_base) {
++			_gic_write32(sweet_pmu_base + 0x808, 0x12345678u);     /* INFORM2: no LPM boot */
++			_gic_write32(sweet_pmu_base + 0x80c, 0x12345674u);     /* INFORM3: recovery */
++			__builtin_arm_dsb(0xf);                                /* dsb sy */
++			_gic_write32(sweet_pmu_base + 0x400, 1u);               /* SWRESET */
++			for (;;) {
++				__builtin_arm_wfe();
++			}
++		}
++#endif
 +		register uint64_t x0 __asm__("x0") = 0x84000008; /* PSCI SYSTEM_OFF */
 +		__asm__ volatile ("smc #0" : "+r"(x0) : : "x1", "x2", "x3", "x4", "x5", "x6", "x7",
 +		    "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
@@ -191,7 +208,7 @@ index 6089db9..4c64e5c 100644
  static vm_offset_t
  find_gicr_pe_base()
  {
-@@ -141,8 +240,16 @@ pe_init_fiq()
+@@ -141,8 +257,16 @@ pe_init_fiq()
  		}
  
  		gicr_size = gicr_size_prop;

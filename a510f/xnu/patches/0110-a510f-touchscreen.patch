@@ -1334,7 +1334,7 @@ index 0000000..7b39184
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..2561ec3 100644
+index 6f8dba3..9ac56b9 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
 @@ -33,6 +33,7 @@
@@ -1705,7 +1705,7 @@ index 6f8dba3..2561ec3 100644
  	lck_mtx_unlock(&sweet_mmc_lock);
  	if (error) {
  		return error;
-@@ -986,9 +1322,675 @@ sweet_mmc_init(void)
+@@ -986,9 +1322,699 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
@@ -1912,6 +1912,9 @@ index 6f8dba3..2561ec3 100644
 +extern void sweet_hid_key(int key, int down);
 +extern int sweet_fb_shot(uint16_t *out, uint32_t maxpix, uint32_t div, uint32_t *w, uint32_t *h, uint32_t *flags);
 +void sweet_input_note(void);
++/* pexpert/arm/pe_fiq.c sweet_panic_power_off(): a panic while set reboots into recovery */
++extern volatile int sweet_auto_active;
++volatile int sweet_auto_active;
 +
 +#define AUTO_SCRIPT_SECT        64u
 +#define AUTO_STATE_LBA          64u
@@ -1938,6 +1941,7 @@ index 6f8dba3..2561ec3 100644
 +	char req_tag[32];
 +	volatile bool stop;             /* rebooting: no more writes */
 +	volatile bool scripted;         /* a script runs: its own shots only */
++	uint32_t running;               /* state: a script started and has not finished */
 +} au;
 +
 +void
@@ -2035,6 +2039,7 @@ index 6f8dba3..2561ec3 100644
 +	memcpy(au.state + 28, &au.slots, 4);
 +	memcpy(au.state + 32, &slot_sect, 4);
 +	memcpy(au.state + 36, &ring, 4);
++	memcpy(au.state + 40, &au.running, 4);
 +	(void)auto_write(AUTO_STATE_LBA, 1, au.state);
 +}
 +
@@ -2213,6 +2218,15 @@ index 6f8dba3..2561ec3 100644
 +	}
 +}
 +
++/* The last boot's script never finished (hang, reset): back to TWRP for the PC. */
++static void
++auto_failsafe_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	printf("SWEET AUTO: the last script did not finish; back to recovery in 60 s\n");
++	IOSleep(60000);
++	auto_recovery();
++}
++
 +static void
 +auto_run_line(const char *p)
 +{
@@ -2308,6 +2322,9 @@ index 6f8dba3..2561ec3 100644
 +		auto_run_line(line);
 +	}
 +	au.scripted = false;
++	au.running = 0;
++	sweet_auto_active = 0;
++	auto_put_state();
 +	printf("SWEET AUTO: script done\n");
 +}
 +
@@ -2339,6 +2356,7 @@ index 6f8dba3..2561ec3 100644
 +		memcpy(&au.boot, au.state + 12, 4);
 +		memcpy(&au.seq, au.state + 16, 8);
 +		memcpy(&au.script_done, au.state + 24, 4);
++		memcpy(&au.running, au.state + 40, 4);
 +	}
 +	if (!error) {
 +		script = (char *)mmc_alloc(AUTO_SCRIPT_SECT * MMC_SECTOR + 1);
@@ -2363,9 +2381,12 @@ index 6f8dba3..2561ec3 100644
 +		}
 +	}
 +	bool run = id > 0 && (uint32_t)id != au.script_done;
++	bool interrupted = !run && au.running != 0;
 +	if (run) {
 +		au.script_done = (uint32_t)id;
++		sweet_auto_active = 1;          /* from now on a panic goes back to TWRP */
 +	}
++	au.running = run ? 1 : 0;
 +	auto_put_state();
 +	printf("SWEET AUTO: OTA at LBA %llu, %u shot slots, boot %u, %llu shots so far, script %ld %s\n",
 +	    au.lba, au.slots, au.boot, au.seq, id, run ? "runs now" : (id > 0 ? "already run" : "none"));
@@ -2374,6 +2395,9 @@ index 6f8dba3..2561ec3 100644
 +		thread_deallocate(th);
 +	}
 +	if (run && kernel_thread_start(auto_script_thread, script, &th) == KERN_SUCCESS) {
++		thread_deallocate(th);
++	}
++	if (interrupted && kernel_thread_start(auto_failsafe_thread, NULL, &th) == KERN_SUCCESS) {
 +		thread_deallocate(th);
 +	}
 +}
