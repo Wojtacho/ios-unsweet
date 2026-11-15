@@ -519,7 +519,7 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 		glGetIntegerv(GL_ACTIVE_TEXTURE, &act0);
 		glActiveTexture(GL_TEXTURE0);
 		glGetIntegerv(GL_TEXTURE_BINDING_2D, &t);
-		if (t > 0 && t < 8192 && copy_src_of[t] > 0) {
+		if (0 && t > 0 && t < 8192 && copy_src_of[t] > 0) {      /* not needed since the held clears keep S */
 			glBindTexture(GL_TEXTURE_2D, (GLuint)copy_src_of[t]);
 			static int told;
 			if (told++ < 3) {
@@ -780,15 +780,53 @@ pend_clear_apply(void)
 				    copy_src_of[t], t);
 			}
 		}
-		/* a real mip chain for the level-based blur; the filter goes back at the next draw */
+		/*
+		 * The level-based blur needs a mip chain. Not on CA's own texture:
+		 * mips on an imported IOSurface texture made Mesa reallocate it
+		 * (round 29: black screen and a white rounded shape mid-animation).
+		 * Copy the source into a private mipmapped texture and blur that.
+		 */
 		GLint st = 0;
 		glGetIntegerv(GL_TEXTURE_BINDING_2D, &st);
-		if (st > 0) {
-			glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &vb_restore_min);
-			vb_restore_tex = st;
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000);
-			glGenerateMipmap(GL_TEXTURE_2D);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+		GLint vw = r->vw, vh = r->vh;
+		static GLuint priv, rfb;
+		static GLint pw, ph;
+		if (st > 0 && vw > 0 && vh > 0) {
+			if (priv == 0 || pw != vw || ph != vh) {
+				if (priv != 0) {
+					glDeleteTextures(1, &priv);
+				}
+				GLint levels = 1;
+				for (GLint m = vw > vh ? vw : vh; m > 1; m >>= 1) {
+					levels++;
+				}
+				glGenTextures(1, &priv);
+				glBindTexture(GL_TEXTURE_2D, priv);
+				glTexStorage2D(GL_TEXTURE_2D, levels, GL_RGBA8, vw, vh);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+				pw = vw;
+				ph = vh;
+			}
+			if (rfb == 0) {
+				glGenFramebuffers(1, &rfb);
+			}
+			GLint keep_read = 0;
+			glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &keep_read);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, rfb);
+			glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, (GLuint)st, 0);
+			if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+				glBindTexture(GL_TEXTURE_2D, priv);
+				glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, vw, vh);
+				glGenerateMipmap(GL_TEXTURE_2D);
+			} else {
+				glBindTexture(GL_TEXTURE_2D, (GLuint)st);
+			}
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)keep_read);
+			while (glGetError() != GL_NO_ERROR) {
+			}
 		}'''),
     ('''	glClear(mask);
 	SGL_POST(10);''', '''	/* a variable blur source: hold the clear (see pend_clear) */
