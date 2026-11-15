@@ -85,7 +85,7 @@ diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
 index 6089db9..4c64e5c 100644
 --- a/pexpert/arm/pe_fiq.c
 +++ b/pexpert/arm/pe_fiq.c
-@@ -50,6 +50,122 @@ _gic_write32(vm_offset_t addr, uint32_t value)
+@@ -50,6 +50,126 @@ _gic_write32(vm_offset_t addr, uint32_t value)
  #define gicr_write32(offset, data) (_gic_write32(gicr_pe_base + (offset), (data)))
  #define gicr_read64(offset) (_gic_read64(gicr_pe_base + (offset)))
  
@@ -160,6 +160,10 @@ index 6089db9..4c64e5c 100644
 +	static volatile int entered;
 +	if (!entered) {
 +		entered = 1;
++#if defined(SWEET_GIC_V2)
++		extern void sweet_mmc_panic_flush(void);
++		sweet_mmc_panic_flush();        /* the panic text into the eMMC log (TOMBSTONES) */
++#endif
 +		uint64_t freq = __builtin_arm_rsr64("CNTFRQ_EL0") & 0xffffffff;
 +		if (freq == 0) {
 +			freq = 26000000;
@@ -208,7 +212,7 @@ index 6089db9..4c64e5c 100644
  static vm_offset_t
  find_gicr_pe_base()
  {
-@@ -141,8 +257,16 @@ pe_init_fiq()
+@@ -141,8 +261,16 @@ pe_init_fiq()
  		}
  
  		gicr_size = gicr_size_prop;
