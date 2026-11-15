@@ -358,10 +358,11 @@ get_param(struct drm_panfrost_get_param *p)
 static int
 submit_async(struct drm_panfrost_submit *s)
 {
-	uint64_t in[2] = {s->jc, s->requirements}, seq = 0;
-	uint32_t n = 1;
+	uint64_t in[2] = {s->jc, s->requirements}, out[2] = {0, 0};
+	uint32_t n = 2;
 	uint64_t c0 = now_ns();
-	kern_return_t kr = IOConnectCallScalarMethod(conn, SEL_SUBMIT_ASYNC, in, 2, &seq, &n);
+	kern_return_t kr = IOConnectCallScalarMethod(conn, SEL_SUBMIT_ASYNC, in, 2, out, &n);
+	uint64_t seq = out[0];
 	uint64_t c1 = now_ns();
 	pthread_mutex_lock(&lock);
 	if (kr != KERN_SUCCESS) {
@@ -385,7 +386,23 @@ submit_async(struct drm_panfrost_submit *s)
 	sync_set(s->out_sync, seq);
 	++submits;
 	win_account(s->requirements, 0, c1 - c0);
+	/*
+	 * The kernel counts failed queued jobs (out[1]): when it grows, a job of
+	 * ours (an earlier one: the queue runs behind) failed; log the recent
+	 * draws and their shaders, as for a failed synchronous submit.
+	 */
+	static uint64_t failed_seen;
+	int dump = n >= 2 && out[1] > failed_seen;
+	if (n >= 2) {
+		failed_seen = out[1];
+	}
 	pthread_mutex_unlock(&lock);
+	if (dump) {
+		extern void sweetgl_draw_ring_dump(void) __attribute__((weak));
+		if (sweetgl_draw_ring_dump) {
+			sweetgl_draw_ring_dump();
+		}
+	}
 	return 0;
 }
 

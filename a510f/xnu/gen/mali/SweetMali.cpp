@@ -606,6 +606,9 @@ static struct { uint64_t jc; uint32_t req; uint64_t t; } g_q[MALI_QLEN];
 static uint32_t g_q_delay_us;                   /* sweetmali_qdelay: wait before each job (test) */
 static uint32_t g_q_dumps;
 
+extern "C" uint64_t phystokv(uint64_t pa);       /* osfmk/arm/pmap.c */
+static uint32_t g_q_failed_total;               /* failed queued jobs since boot (SUBMIT_ASYNC out[1]) */
+
 /* The 32-byte job header at GPU VA va as memory holds it now (0 if unmapped). */
 static bool
 mali_peek(uint64_t va, uint32_t w[8])
@@ -614,10 +617,16 @@ mali_peek(uint64_t va, uint32_t w[8])
 	if (e == NULL || (*e & 1) == 0) {
 		return false;
 	}
-	vm_offset_t m = ml_io_map((vm_offset_t)(*e & 0xfffffffff000ull), 0x1000);
+	/*
+	 * Through the kernel's physical aperture: no new mapping. (ml_io_map
+	 * left one behind, and freeing the bo later panicked in
+	 * pmap_assert_free: "a Kernel CPU mapping".)
+	 */
+	vm_offset_t m = (vm_offset_t)phystokv((uint64_t)(*e & 0xfffffffff000ull));
 	if (m == 0) {
 		return false;
 	}
+	dc_civac((const void *)(m + (va & 0xfe0)), 32);
 	for (int i = 0; i < 8; i++) {
 		w[i] = *(volatile uint32_t *)(m + ((va & 0xfe0) + 4 * i));
 	}
@@ -692,6 +701,7 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 		g_q_frag += req & 1;
 		g_q_busy_us += us;
 		g_q_failed += r != kIOReturnSuccess;
+		g_q_failed_total += r != kIOReturnSuccess;
 		if (us > g_q_max_us) {
 			g_q_max_us = us;
 		}
@@ -1196,6 +1206,9 @@ SweetMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
 			return kIOReturnUnsupported;
 		}
 		args->scalarOutput[0] = seq;
+		if (args->scalarOutputCount >= 2) {
+			args->scalarOutput[1] = g_q_failed_total;   /* the caller logs its last draws when this grows */
+		}
 		return kIOReturnSuccess;
 	}
 	case 18: {                                      /* WAIT_SEQ: in [seq, block] out [done] */

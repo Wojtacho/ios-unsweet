@@ -500,6 +500,49 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 		while (glGetError() != GL_NO_ERROR) {
 		}
 		vb_logged++;
+		/* the first few blur passes: what S (tex0) and the mask (tex1) hold, and the draws before */
+		static int vb_read;
+		if (vb == 2 && vb_read < 6) {
+			vb_read++;
+			for (int k = 6; k >= 1; k--) {
+				struct ring_draw *q = &ring[(ring_seq - (uint32_t)k) % RING_N];
+				sweet_drm_log("sweetgl:   before: draw %u prog %d kind %d fbo %d viewport %dx%d mode %#x count %d",
+				    q->seq, q->prog, prog_texfn_kind(q->prog), q->fbo, q->vw, q->vh, q->mode, q->count);
+			}
+			GLint keep_draw = 0, keep_read = 0;
+			glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &keep_draw);
+			glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &keep_read);
+			GLuint tmp = 0;
+			glGenFramebuffers(1, &tmp);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, tmp);
+			GLint tex[2] = {t0, t1};
+			for (int u = 0; u < 2; u++) {
+				if (tex[u] == 0) {
+					continue;
+				}
+				glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, (GLuint)tex[u], 0);
+				GLenum st = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
+				uint8_t px[5][4];
+				memset(px, 0, sizeof(px));
+				if (st == GL_FRAMEBUFFER_COMPLETE) {
+					GLint w = r->vw, h = r->vh;
+					GLint pts[5][2] = {{w / 2, h / 2}, {w / 4, h / 4}, {3 * w / 4, h / 4}, {w / 2, h - 8}, {w / 2, 8}};
+					for (int i = 0; i < 5; i++) {
+						glReadPixels(pts[i][0], pts[i][1], 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[i]);
+					}
+				}
+				sweet_drm_log("sweetgl:   tex%d %d (status %#x) rgba: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+				    "%02x%02x%02x%02x %02x%02x%02x%02x", u, tex[u], st,
+				    px[0][0], px[0][1], px[0][2], px[0][3], px[1][0], px[1][1], px[1][2], px[1][3],
+				    px[2][0], px[2][1], px[2][2], px[2][3], px[3][0], px[3][1], px[3][2], px[3][3],
+				    px[4][0], px[4][1], px[4][2], px[4][3]);
+			}
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)keep_read);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)keep_draw);
+			glDeleteFramebuffers(1, &tmp);
+			while (glGetError() != GL_NO_ERROR) {
+			}
+		}
 		sweet_drm_log("sweetgl: draw %u %s: fbo %d color0 %s %d, viewport %dx%d, tex0 %d tex1 %d, min filters %#x/%#x%s",
 		    r->seq, vb == 1 ? "0x26 mip pass" : "0x27 vblur", r->fbo,
 		    at == GL_TEXTURE ? "tex" : at == GL_RENDERBUFFER ? "rb" : "none", name, r->vw, r->vh, t0, t1,
