@@ -387,3 +387,100 @@ sgl_qc_delta(const void *cache)
      """		img.res = screen->resource_from_handle(screen, &templ, &wh, PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
 		sweet_drm_close_fd((int)wh.handle);"""),
 ])
+
+# Variable blur (CAFilter variableBlur: the App Library header, bars over
+# scrolled content). eagl.c draws nothing for the 0x26 mip passes (sgl_nop)
+# and blurs surface S in one 0x27 pass; the App Library header comes out
+# black. Log where each 0x26/0x27 pass draws and what it samples, and with
+# SWEETGL_VBLUR_COPY=1 let the 0x26 passes copy texture0 instead (test).
+edit('eagl.c', [
+    ('''static char *
+texfn_rewrite(char *src)
+{''', '''static const char nop_copy_func[] =
+    "lowp vec4 sgl_nop() {\\n"
+    "  return texture2D(texture0, texcoord0_0);\\n"
+    "}\\n";
+
+static const char *
+sgl_nop_src(void)
+{
+	static int copy = -1;
+	if (copy < 0) {
+		const char *e = getenv("SWEETGL_VBLUR_COPY");
+		copy = e != NULL && e[0] == '1';
+	}
+	return copy ? nop_copy_func : nop_func;
+}
+
+static char *
+texfn_rewrite(char *src)
+{'''),
+    ('''strstr(src, "sgl_nop(") ? nop_func : ""''', '''strstr(src, "sgl_nop(") ? sgl_nop_src() : ""'''),
+    ('''static void
+ring_note(GLint prog, GLenum mode, GLsizei count)
+{''', '''/* 1: the program's fragment shader uses sgl_nop (0x26), 2: sgl_vblur (0x27), 0: neither */
+static int
+prog_texfn_kind(GLint prog)
+{
+	static int8_t kind[8192];
+	if (prog <= 0 || prog >= 8192) {
+		return 0;
+	}
+	if (kind[prog] == 0) {
+		int k = 3;
+		GLuint sh[4];
+		GLsizei n = 0;
+		glGetAttachedShaders((GLuint)prog, 4, &n, sh);
+		for (GLsizei i = 0; i < n; i++) {
+			GLint type = 0, len = 0;
+			glGetShaderiv(sh[i], GL_SHADER_TYPE, &type);
+			if (type != GL_FRAGMENT_SHADER) {
+				continue;
+			}
+			glGetShaderiv(sh[i], GL_SHADER_SOURCE_LENGTH, &len);
+			char *s = len > 0 ? malloc((size_t)len + 1) : NULL;
+			if (s != NULL) {
+				glGetShaderSource(sh[i], len + 1, NULL, s);
+				k = strstr(s, "sgl_nop(") ? 1 : strstr(s, "sgl_vblur(") ? 2 : 3;
+				free(s);
+			}
+		}
+		kind[prog] = (int8_t)k;
+	}
+	return kind[prog] == 3 ? 0 : kind[prog];
+}
+
+static void
+ring_note(GLint prog, GLenum mode, GLsizei count)
+{'''),
+    ('''	r->seq = ++ring_seq;
+''', '''	r->seq = ++ring_seq;
+	/* variable blur passes: where they draw, what they sample */
+	static int vb_logged;
+	int vb = vb_logged < 120 ? prog_texfn_kind(prog) : 0;
+	if (vb) {
+		GLint at = 0, name = 0, t0 = 0, t1 = 0, act = 0;
+		if (r->fbo != 0) {
+			glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &at);
+			if (at == GL_TEXTURE) {
+				glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+				    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+			}
+		}
+		glGetIntegerv(GL_ACTIVE_TEXTURE, &act);
+		glActiveTexture(GL_TEXTURE0);
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &t0);
+		glActiveTexture(GL_TEXTURE1);
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &t1);
+		glActiveTexture((GLenum)act);
+		while (glGetError() != GL_NO_ERROR) {
+		}
+		vb_logged++;
+		sweet_drm_log("sweetgl: draw %u %s: fbo %d color0 %s %d, viewport %dx%d, tex0 %d tex1 %d%s",
+		    r->seq, vb == 1 ? "0x26 mip pass" : "0x27 vblur", r->fbo,
+		    at == GL_TEXTURE ? "tex" : at == GL_RENDERBUFFER ? "rb" : "none", name, r->vw, r->vh, t0, t1,
+		    name != 0 && (name == t0 || name == t1) ? " (samples its own target)" : "");
+	}
+'''),
+])
