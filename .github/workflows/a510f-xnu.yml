@@ -58,13 +58,44 @@ jobs:
 
       - name: Deps
         run: |
-          brew install jq gum bash cmake ninja
+          brew install jq gum bash cmake ninja ccache
           printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
           sudo chmod +x /usr/local/bin/xcodes
           XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
           echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
           sudo xcode-select -s "$XC"
           echo "::notice title=toolchain::$(sw_vers -productVersion) / available: $(ls -d /Applications/Xcode_*.app | xargs -n1 basename | tr '\n' ' ') / using $(basename "$XC") / $(xcodebuild -version | tr '\n' ' ')"
+
+      # Compiler cache: every build used to compile all of xnu from scratch
+      # (~14 min); with ccache only the files our patches change are
+      # compiled again. xnu takes clang from `xcrun -find clang`, so Xcode's
+      # clang itself becomes a wrapper that runs ccache on the real one.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: a510f-ccache-${{ github.sha }}
+          restore-keys: a510f-ccache-
+
+      - name: ccache wrapper around Xcode's clang
+        run: |
+          TC=$(dirname "$(xcrun -find clang)")
+          sudo mv "$TC/clang" "$TC/clang.real"
+          sudo tee "$TC/clang" >/dev/null <<EOF
+          #!/bin/sh
+          case "\$0" in *clang++) exec ccache "$TC/clang.real" --driver-mode=g++ "\$@";; esac
+          exec ccache "$TC/clang.real" "\$@"
+          EOF
+          sudo chmod +x "$TC/clang"
+          cat "$TC/clang"
+          # settings in ccache's own config file: make's sub-makes may not pass env on
+          ccache --set-config cache_dir=/Users/runner/.ccache
+          ccache --set-config max_size=3G
+          ccache --set-config base_dir="$GITHUB_WORKSPACE"
+          ccache --set-config hash_dir=false
+          ccache --set-config compiler_type=clang
+          ccache --set-config sloppiness=time_macros,include_file_mtime,include_file_ctime,pch_defines
+          ccache -z
+          echo "::notice title=ccache before::$(ccache -s | paste -sd' ' - | cut -c1-250)"
 
       - name: Build
         working-directory: dxb
@@ -73,6 +104,7 @@ jobs:
         run: |
           set -o pipefail
           bash build.sh 2>&1 | tee ../build.log
+          echo "::notice title=ccache after build::$(ccache -s | paste -sd' ' - | cut -c1-300)"
 
       - name: Report
         if: always()
