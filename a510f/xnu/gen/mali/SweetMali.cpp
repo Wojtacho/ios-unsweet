@@ -846,8 +846,9 @@ public:
 	IOMemoryMap        *userMap;
 	SweetSurface       *surface;
 	uint64_t            gpuVA, size;
+	uint64_t            vaSize;         /* VA reserved: size, plus an unmapped guard after ordinary bos */
 	bool                owned;          /* allocated by bo_new (counted in g_bo_bytes) */
-	bool init() APPLE_KEXT_OVERRIDE { md = NULL; userMap = NULL; surface = NULL; gpuVA = 0; size = 0; owned = false; return OSObject::init(); }
+	bool init() APPLE_KEXT_OVERRIDE { md = NULL; userMap = NULL; surface = NULL; gpuVA = 0; size = 0; vaSize = 0; owned = false; return OSObject::init(); }
 	void free() APPLE_KEXT_OVERRIDE;
 };
 
@@ -860,7 +861,7 @@ SweetMaliBO::free()
 		mali_queue_idle();                      /* no queued job still reads it */
 		IOLockLock(g_lock);
 		gpu_unmap(gpuVA, size);
-		va_free(gpuVA, size);
+		va_free(gpuVA, vaSize ? vaSize : size);
 		IOLockUnlock(g_lock);
 	}
 	if (owned) {
@@ -894,15 +895,23 @@ bo_make(IOMemoryDescriptor *md, uint64_t size, task_t task, IOOptionBits cache, 
 			    g_exec_used * EXEC_GRAN >> 10, bo->size);
 		}
 	}
+	bo->vaSize = bo->size;
 	if (va == 0) {
-		va = va_alloc(bo->size);
+		/*
+		 * A510F: an unmapped 64 KB guard after each ordinary bo. Queued jobs
+		 * found their framebuffer descriptor (offset 0 of a pool bo) zeroed:
+		 * a job writing past the end of the bo before it would now take an
+		 * MMU fault at the guard (logged with the address) instead.
+		 */
+		bo->vaSize = bo->size + VA_GRAN;
+		va = va_alloc(bo->vaSize);
 	}
 	bool ok = va != 0 && gpu_map(va, md, bo->size);
 	if (ok) {
 		bo->gpuVA = va;
 	} else if (va != 0) {
 		gpu_unmap(va, bo->size);        /* the pages mapped before it failed */
-		va_free(va, bo->size);
+		va_free(va, bo->vaSize);
 	}
 	if (!ok) {
 		static unsigned logged;

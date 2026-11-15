@@ -1334,7 +1334,7 @@ index 0000000..7b39184
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..f44efb3 100644
+index 6f8dba3..b60cd50 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
 @@ -33,6 +33,7 @@
@@ -1782,7 +1782,7 @@ index 6f8dba3..f44efb3 100644
  	if (error) {
  		return error;
  	}
-@@ -986,9 +1336,841 @@ sweet_mmc_init(void)
+@@ -986,9 +1336,916 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
@@ -2152,6 +2152,66 @@ index 6f8dba3..f44efb3 100644
 +}
 +
 +/* Take one screenshot; force: write it even if nothing changed. */
++/*
++ * burst TAG N MS: N frames of the panel MS ms apart at 1/8 size (135x240),
++ * held in memory and written as ordinary shots afterwards ("TAG_00".."TAG_NN",
++ * each with its own capture time), to see fades, flashes and glitches that
++ * fall between ordinary shots. Each frame takes one slot.
++ */
++#define AUTO_BURST_MAX          30u
++#define AUTO_BURST_PIX          (135u * 240u)
++#define AUTO_BURST_BYTES        (MMC_SECTOR + AUTO_BURST_PIX * 2u)
++
++static void
++auto_burst(const char *tag, long n, long ms)
++{
++	n = MIN(MAX(n, 1), (long)MIN(AUTO_BURST_MAX, au.slots));
++	ms = MAX(ms, 10);
++	uint8_t *buf = (uint8_t *)kalloc_data((vm_size_t)n * AUTO_BURST_BYTES, Z_WAITOK | Z_ZERO);
++	if (buf == NULL) {
++		printf("SWEET AUTO: burst: no memory\n");
++		return;
++	}
++	uint32_t w[AUTO_BURST_MAX], h[AUTO_BURST_MAX], fl[AUTO_BURST_MAX];
++	uint64_t at[AUTO_BURST_MAX];
++	uint64_t t0 = mach_absolute_time(), step = 0;
++	nanoseconds_to_absolutetime((uint64_t)ms * 1000000ull, &step);
++	long got = 0;
++	for (long i = 0; i < n; i++) {
++		uint64_t due = t0 + step * (uint64_t)i;
++		while (mach_absolute_time() < due) {
++			IOSleep(2);
++		}
++		at[i] = auto_ms();
++		uint16_t *pix = (uint16_t *)(buf + (size_t)i * AUTO_BURST_BYTES + MMC_SECTOR);
++		w[i] = h[i] = fl[i] = 0;
++		if (sweet_fb_shot(pix, AUTO_BURST_PIX, 8, &w[i], &h[i], &fl[i]) == 0) {
++			got++;
++		}
++	}
++	for (long i = 0; i < n; i++) {
++		if (w[i] == 0) {
++			continue;
++		}
++		uint8_t *hd = buf + (size_t)i * AUTO_BURST_BYTES;
++		uint64_t seq = ++au.seq;
++		memcpy(hd, "SWEETSHT", 8);
++		memcpy(hd + 8, &seq, 8);
++		memcpy(hd + 16, &at[i], 8);
++		memcpy(hd + 24, &w[i], 4);
++		memcpy(hd + 28, &h[i], 4);
++		memcpy(hd + 32, &fl[i], 4);
++		memcpy(hd + 36, &au.boot, 4);
++		snprintf((char *)hd + 64, 64, "%s_%02ld", tag, i);
++		uint32_t sect = (MMC_SECTOR + w[i] * h[i] * 2 + MMC_SECTOR - 1) / MMC_SECTOR;
++		uint64_t rel = AUTO_RING_LBA + (uint64_t)((seq - 1) % au.slots) * AUTO_SLOT_SECT;
++		(void)auto_write(rel, sect, hd);
++	}
++	auto_put_state();
++	printf("SWEET AUTO: burst %s: %ld of %ld frames, %ld ms apart\n", tag, got, n, ms);
++	kfree_data(buf, (vm_size_t)n * AUTO_BURST_BYTES);
++}
++
 +static void
 +auto_shot(const char *why, bool force)
 +{
@@ -2498,6 +2558,21 @@ index 6f8dba3..f44efb3 100644
 +		au.req = 1;
 +		for (int i = 0; i < 100 && au.req; i++) {
 +			IOSleep(50);
++		}
++	} else if (auto_word(&p, "burst")) {
++		char tag[32];
++		const char *q = auto_skip(p);
++		size_t k = 0;
++		while (q[k] && q[k] != ' ' && k < sizeof(tag) - 1) {
++			tag[k] = q[k];
++			k++;
++		}
++		tag[k] = 0;
++		p = q + k;
++		if (k > 0 && auto_int(&p, &a) && auto_int(&p, &b)) {
++			auto_burst(tag, a, b);
++		} else {
++			printf("SWEET AUTO: burst TAG N MS\n");
 +		}
 +	} else if (auto_word(&p, "log")) {
 +		printf("SWEET AUTO: note: %s\n", auto_skip(p));
