@@ -429,7 +429,11 @@ texfn_rewrite(char *src)
     ('''strstr(src, "sgl_nop(") ? nop_func : ""''', '''strstr(src, "sgl_nop(") ? sgl_nop_src() : ""'''),
     ('''static void
 ring_note(GLint prog, GLenum mode, GLsizei count)
-{''', '''/* 1: the program's fragment shader uses sgl_nop (0x26), 2: sgl_vblur (0x27), 0: neither */
+{''', '''/* the last draw that rendered into each texture name, and through which fbo */
+static uint32_t tex_last_draw[8192];
+static GLint tex_last_fbo[8192];
+
+/* 1: the program's fragment shader uses sgl_nop (0x26), 2: sgl_vblur (0x27), 0: neither */
 static int
 prog_texfn_kind(GLint prog)
 {
@@ -466,6 +470,27 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 {'''),
     ('''	r->seq = ++ring_seq;
 ''', '''	r->seq = ++ring_seq;
+	/* which texture each draw renders into (re-read when the fbo binding changes) */
+	{
+		static GLint att_fbo = -1, att_tex;
+		if (r->fbo != att_fbo) {
+			GLint t = 0, nm = 0;
+			att_fbo = r->fbo;
+			if (r->fbo != 0) {
+				glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+				    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &t);
+				if (t == GL_TEXTURE) {
+					glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+					    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &nm);
+				}
+			}
+			att_tex = nm;
+		}
+		if (att_tex > 0 && att_tex < 8192) {
+			tex_last_draw[att_tex] = r->seq;
+			tex_last_fbo[att_tex] = r->fbo;
+		}
+	}
 	/*
 	 * Variable blur passes (0x26 mip passes, 0x27 blur): CA samples surface
 	 * S with a mipmap filter, but GLES surfaces here have level 0 only, so S
@@ -556,6 +581,15 @@ ring_note(GLint prog, GLenum mode, GLsizei count)
 				    px[0][0], px[0][1], px[0][2], px[0][3], px[1][0], px[1][1], px[1][2], px[1][3],
 				    px[2][0], px[2][1], px[2][2], px[2][3], px[3][0], px[3][1], px[3][2], px[3][3],
 				    px[4][0], px[4][1], px[4][2], px[4][3]);
+			}
+			if (copy_src > 0 && copy_src < 8192) {
+				if (tex_last_draw[copy_src]) {
+					sweet_drm_log("sweetgl:   copy source %d last rendered by draw %u (%u draws ago) into fbo %d",
+					    copy_src, tex_last_draw[copy_src], ring_seq - tex_last_draw[copy_src], tex_last_fbo[copy_src]);
+				} else {
+					sweet_drm_log("sweetgl:   copy source %d never rendered by GL (uploaded or imported surface)",
+					    copy_src);
+				}
 			}
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)keep_read);
 			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)keep_draw);
