@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 0f8e61a..2ebbbe5 100644
+index 0f8e61a..4ec8771 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -82,6 +82,25 @@ enum {
@@ -430,7 +430,7 @@ index 0f8e61a..2ebbbe5 100644
 +			absolutetime_to_nanoseconds(mach_absolute_time() - fb->fOffAt, &ns);
 +			IOLog("SWEET FB: fade step %u at off +%llu ms%s\n", fstep, ns / 1000000,
 +			    fb->fHaveLast ? "" : " (no last frame)");
-+		}
+ 		}
 +		if (fstep >= 1 && fstep <= 3 && fb->fHaveLast) {
 +			fb->fDim = fstep;               /* 1/2, 1/4, 1/8 */
 +			fb->present(fb->fLastRec);
@@ -442,7 +442,7 @@ index 0f8e61a..2ebbbe5 100644
 +			bzero((void *)back, (size_t)fb->fRowBytes * fb->fHeight);
 +			fb->flipTo(fb->fShown ^ 1);
 +			IOLockUnlock(fb->fPresentLock);
- 		}
++		}
 +		IOLockLock(fb->fLock);
 +		fb->fPresentBusy = false;
 +		IOLockWakeup(fb->fLock, &fb->fPresentBusy, false);
@@ -611,7 +611,7 @@ index 0f8e61a..2ebbbe5 100644
  
  
  	if (!fConsolePaused) {
-@@ -448,8 +952,30 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -448,8 +952,35 @@ AppleCLCD::present(const uint8_t *rec)
  		if (!(mask & (1u << layer)) || id == 0) {
  			continue;
  		}
@@ -621,7 +621,12 @@ index 0f8e61a..2ebbbe5 100644
 +		if (fDim != 0 && fFadeSurf[layer] != NULL) {
 +			s = fFadeSurf[layer];   /* CA may have dropped it at display off */
 +			s->retain();
++			IOLog("SWEET FB: fade dim %u layer %u id %u: kept surface %ux%u fmt 0x%x mem %p\n", fDim, layer, id,
++			    s->width, s->height, s->pixelFormat, s->memory);
 +		} else {
++			if (fDim != 0) {
++				IOLog("SWEET FB: fade dim %u layer %u id %u: no kept surface\n", fDim, layer, id);
++			}
 +			s = sweet_surface_copy(id);
 +			if (s != NULL && fFadeSurf[layer] != s) {
 +				OSSafeReleaseNULL(fFadeSurf[layer]);
@@ -644,7 +649,7 @@ index 0f8e61a..2ebbbe5 100644
  			sweet_fb_swaps_logged++;
  			IOLog("SWEET FB: swap %u layer %u surface %u %ux%u fmt 0x%x bpr %u a %d,%d %ux%u b %d,%d %dx%d\n",
  			    get32(rec, 0x50), layer, id, s ? s->width : 0, s ? s->height : 0,
-@@ -460,7 +986,16 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -460,7 +991,16 @@ AppleCLCD::present(const uint8_t *rec)
  			OSSafeReleaseNULL(s);
  			continue;
  		}
@@ -662,7 +667,7 @@ index 0f8e61a..2ebbbe5 100644
  		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
  		sweet_fb_note_format(s->pixelFormat, bpe, s->width, s->height);
  		if (w <= 0 || h <= 0) {
-@@ -473,8 +1008,18 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -473,8 +1013,18 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -681,7 +686,7 @@ index 0f8e61a..2ebbbe5 100644
  			s->release();
  			continue;
  		}
-@@ -511,13 +1056,41 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -511,13 +1061,41 @@ AppleCLCD::present(const uint8_t *rec)
  		}
  		if (src != 0 && bpe == 4) {
  			for (int32_t y = 0; y < h; y++) {
@@ -724,7 +729,7 @@ index 0f8e61a..2ebbbe5 100644
  }
  
  /*
-@@ -547,7 +1120,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -547,7 +1125,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	if (!fFitCleared) {
  		/* Black pillarbox (the console text was there). */
  		for (uint32_t y = 0; y < fHeight; y++) {
@@ -733,10 +738,14 @@ index 0f8e61a..2ebbbe5 100644
  		}
  		fFitCleared = true;
  	}
-@@ -570,19 +1143,48 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -570,19 +1148,52 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	const uint8_t *base = (const uint8_t *)(src + s->offset);
  	const uint32_t fmt = s->pixelFormat;
  	const bool convert = fmt == SWEET_FMT_L10R || fmt == SWEET_FMT_W30R;
++	if (fDim != 0) {
++		IOLog("SWEET FB: fade copy dim %u: fit rows %d..%d cols %d..%d into %p\n", fDim, py0, py1, px0, px1,
++		    (void *)fDraw);
++	}
 +	if (!convert) {
 +		/* the fade too: dimmed in the same fast copy (the slow path did not dim without fRowBuf) */
 +		struct sweet_fit_job j = {
@@ -784,7 +793,7 @@ index 0f8e61a..2ebbbe5 100644
  	}
  }
  
-@@ -737,7 +1339,34 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -737,7 +1348,34 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			if (off != fFB->fPowerOff) {
  				fFB->fPowerOff = off;
  				fFB->fFadeStep = 0;

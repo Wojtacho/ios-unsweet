@@ -705,6 +705,33 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 		uint64_t age_ns = 0;
 		absolutetime_to_nanoseconds(mach_absolute_time() - queued_at, &age_ns);
 		IOReturn r = gpu_run(jc, req, &status, &us);
+		/*
+		 * DATA_INVALID (0x58) on a queued job whose descriptors did not change
+		 * since submit (round 22 fingerprints): transient GPU state, not bad
+		 * data. The GPU was reset; run the chain once more (as Linux panfrost
+		 * resubmits jobs after a reset).
+		 */
+		static uint32_t g_retry_ok, g_retry_bad;
+		if (r != kIOReturnSuccess && (status & 0xff) == 0x58) {
+			uint32_t st2 = 0;
+			uint64_t us2 = 0;
+			IOReturn r2 = gpu_run(jc, req, &st2, &us2);     /* g_lock is held here */
+			if (r2 == kIOReturnSuccess) {
+				g_retry_ok++;
+			} else {
+				g_retry_bad++;
+			}
+			if (g_retry_ok + g_retry_bad <= 20 || (g_retry_ok + g_retry_bad) % 100 == 0) {
+				IOLog("SWEET MALI: retry of job 0x%llx js%u after 0x%x: %s (retries ok %u, failed %u)\n",
+				    jc, (req & 1) ? 0u : 1u, status & 0xff, r2 == kIOReturnSuccess ? "ok" : "failed again",
+				    g_retry_ok, g_retry_bad);
+			}
+			if (r2 == kIOReturnSuccess) {
+				r = r2;
+				status = st2;
+				us += us2;
+			}
+		}
 		if (r != kIOReturnSuccess && g_q_dumps < 12) {
 			g_q_dumps++;
 			mali_fault_dump(jc, g_fault_head, age_ns / 1000, depth);

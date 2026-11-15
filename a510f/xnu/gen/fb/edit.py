@@ -947,3 +947,27 @@ rep("""		SweetSurface *s = sweet_surface_copy(id);""", """		SweetSurface *s = NU
 		}""")
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
 print('ok fade surfaces')
+
+# Fade debug (round 22: dim steps ran and flipped but frames stayed bright):
+# what each dim redraw finds per layer, and whether the fast copy ran.
+rep("""		if (fDim != 0 && fFadeSurf[layer] != NULL) {
+			s = fFadeSurf[layer];   /* CA may have dropped it at display off */
+			s->retain();
+		} else {""", """		if (fDim != 0 && fFadeSurf[layer] != NULL) {
+			s = fFadeSurf[layer];   /* CA may have dropped it at display off */
+			s->retain();
+			IOLog("SWEET FB: fade dim %u layer %u id %u: kept surface %ux%u fmt 0x%x mem %p@NL@", fDim, layer, id,
+			    s->width, s->height, s->pixelFormat, s->memory);
+		} else {
+			if (fDim != 0) {
+				IOLog("SWEET FB: fade dim %u layer %u id %u: no kept surface@NL@", fDim, layer, id);
+			}""")
+rep("""	if (!convert) {
+		/* the fade too: dimmed in the same fast copy (the slow path did not dim without fRowBuf) */""", """	if (fDim != 0) {
+		IOLog("SWEET FB: fade copy dim %u: fit rows %d..%d cols %d..%d into %p@NL@", fDim, py0, py1, px0, px1,
+		    (void *)fDraw);
+	}
+	if (!convert) {
+		/* the fade too: dimmed in the same fast copy (the slow path did not dim without fRowBuf) */""")
+open(p, 'w', encoding='utf-8', newline='\n').write(s)
+print('ok fade debug')
