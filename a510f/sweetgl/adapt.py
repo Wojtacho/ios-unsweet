@@ -1074,3 +1074,37 @@ sgl_all_highp(char *src)
 static char *
 texfn_rewrite(char *src)'''),
 ])
+
+
+# Round 44: with tracing on from the start, SpringBoard missed every home
+# double press (rounds 42-43c: no app switcher). SWEETGL_TRACE=N (N > 1) now
+# leaves tracing off entirely until N s after the start, then traces windows.
+edit('eagl.c', [
+    ('''	if (t && atoi(t) > 1) {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		win_next = ts.tv_sec + atoi(t);
+	}''', '''	if (t && atoi(t) > 1) {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		win_next = ts.tv_sec + atoi(t);
+		trace_left = 0;                 /* switched on at win_next (window_draw) */
+		trace_late = true;
+	}'''),
+    ('''	if (trace_left <= 0) {
+		return false;
+	}
+	if (win_left > 0 && --win_left > 0) {''', '''	if (trace_late && trace_left <= 0) {
+		clock_gettime(CLOCK_MONOTONIC, &t);
+		if (t.tv_sec >= win_next) {
+			trace_late = false;
+			trace_left = 20000;
+		}
+	}
+	if (trace_left <= 0) {
+		return false;
+	}
+	if (win_left > 0 && --win_left > 0) {'''),
+    ('''static time_t win_next;''', '''static time_t win_next;
+static bool trace_late;         /* SWEETGL_TRACE=N: tracing waits for win_next */'''),
+])
