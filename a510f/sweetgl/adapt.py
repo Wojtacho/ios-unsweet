@@ -1021,3 +1021,56 @@ edit('eagl.c', [
     ('''#define WIN_TRIGGER(w, h) ((w) == 1194 && (h) == 1164)''',
      '''#define WIN_TRIGGER(w, h) (((w) == 1194 && (h) == 1164) || ((w) == 1242 && (h) == 2208))'''),
 ])
+
+
+# Round 43: the weather widget's gradient goes through CA's color-matching
+# shader (uniform colorP0): a 32x32x32 LUT flattened into a 32x1024 RGBA16F
+# texture, looked up with mediump (fp16 on Mali) coordinates. In a 1024-row
+# texture fp16 resolves only about half a row near 1.0, so neighbouring
+# shades collapse onto the same LUT position: ~9 visible bands. Shaders with
+# colorP0 now run at highp (fp32) throughout.
+edit('eagl.c', [
+    ('''	const GLchar *one = src;
+	glShaderSource(H(shader), 1, &one, NULL);
+	free(src);
+}''', '''	if (strstr(src, "colorP0") != NULL) {
+		src = sgl_all_highp(src);
+	}
+	const GLchar *one = src;
+	glShaderSource(H(shader), 1, &one, NULL);
+	free(src);
+}'''),
+    ('''static char *
+texfn_rewrite(char *src)''', '''/* every lowp / mediump qualifier of src becomes highp (frees src) */
+static char *
+sgl_all_highp(char *src)
+{
+	size_t n = strlen(src), extra = 0;
+	for (const char *p = src; (p = strstr(p, "lowp")) != NULL; p += 4) {
+		extra += 1;
+	}
+	char *out = malloc(n + extra + 1), *o = out;
+	if (out == NULL) {
+		return src;
+	}
+	for (const char *p = src; *p;) {
+		if (strncmp(p, "mediump", 7) == 0) {
+			memcpy(o, "highp", 5);
+			o += 5;
+			p += 7;
+		} else if (strncmp(p, "lowp", 4) == 0) {
+			memcpy(o, "highp", 5);
+			o += 5;
+			p += 4;
+		} else {
+			*o++ = *p++;
+		}
+	}
+	*o = 0;
+	free(src);
+	return out;
+}
+
+static char *
+texfn_rewrite(char *src)'''),
+])
