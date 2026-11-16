@@ -1108,3 +1108,83 @@ edit('eagl.c', [
     ('''static time_t win_next;''', '''static time_t win_next;
 static bool trace_late;         /* SWEETGL_TRACE=N: tracing waits for win_next */'''),
 ])
+
+
+# Round 45: the app switcher draws its background from one texture, opaque
+# over the whole screen (round 44c trace: prog 17, then a 25% black dim), and
+# that texture is black. It is made before any trace can run (tracing earlier
+# loses the home double press). Every large texture upload (>= 600k pixels:
+# a few per boot) is now logged always: source (IOSurface id/format, copy or
+# TexImage2D), size, GL texture, and the mean of an 8x8 grid of its pixels.
+edit('eagl.c', [
+    ('''static char *
+sgl_all_highp(char *src)''', '''/* mean of an 8x8 grid of 4-byte pixels, as "b0 b1 b2 b3" (memory order) */
+static void
+sgl_grid_mean(const uint8_t *base, size_t w, size_t h, size_t pitch, char *out, size_t outlen)
+{
+	unsigned sum[4] = {0, 0, 0, 0};
+	if (base == NULL || w < 8 || h < 8) {
+		snprintf(out, outlen, "no data");
+		return;
+	}
+	for (int gy = 0; gy < 8; gy++) {
+		for (int gx = 0; gx < 8; gx++) {
+			const uint8_t *p = base + (h * (2 * (size_t)gy + 1) / 16) * pitch + (w * (2 * (size_t)gx + 1) / 16) * 4;
+			for (int c = 0; c < 4; c++) {
+				sum[c] += p[c];
+			}
+		}
+	}
+	snprintf(out, outlen, "%02x %02x %02x %02x", sum[0] / 64, sum[1] / 64, sum[2] / 64, sum[3] / 64);
+}
+
+static char *
+sgl_all_highp(char *src)'''),
+    ('''	glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
+	SGL_POST(301);''', '''	if ((size_t)width * (size_t)height >= 600000) {
+		static int biglog;
+		if (biglog++ < 60) {
+			char mean[32];
+			GLint row = unpack_row();
+			sgl_grid_mean(pixels != NULL && type == GL_UNSIGNED_BYTE ? pixels : NULL, (size_t)width, (size_t)height,
+			    (size_t)(row > 0 ? row : width) * 4, mean, sizeof(mean));
+			sweet_drm_log("sweetgl: BIG TexImage2D tex %u level %d ifmt %#x %dx%d fmt %#x type %#x data %s mean %s",
+			    unit_held[active_unit()], level, internalformat, width, height, format, type,
+			    pixels ? "yes" : "none", mean);
+		}
+	}
+	glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
+	SGL_POST(301);'''),
+    ('''	if (trace_left > 0) {
+		const uint8_t *base = IOSurfaceGetBaseAddress(s);
+		const uint8_t *c = base ? base + (h / 2) * pitch + (w / 2) * IOSurfaceGetBytesPerElement(s) : NULL;''', '''	if (w * h >= 600000) {
+		static int biglog;
+		if (biglog++ < 60) {
+			char mean[32];
+			GLint btex = 0;
+			glGetIntegerv(GL_TEXTURE_BINDING_2D, &btex);
+			sgl_grid_mean(IOSurfaceGetBytesPerElement(s) == 4 ? IOSurfaceGetBaseAddress(s) : NULL, w, h, pitch, mean, sizeof(mean));
+			sweet_drm_log("sweetgl: BIG %s surf %u %c%c%c%c %zux%zu pitch %zu fmt %#x/%#x -> tex %d mean %s",
+			    why, IOSurfaceGetID(s), FCC(fourcc), w, h, pitch, format, type, btex, mean);
+		}
+	}
+	if (trace_left > 0) {
+		const uint8_t *base = IOSurfaceGetBaseAddress(s);
+		const uint8_t *c = base ? base + (h / 2) * pitch + (w / 2) * IOSurfaceGetBytesPerElement(s) : NULL;'''),
+    ('''	size_t bpe = IOSurfaceGetBytesPerElement(s);
+	const void *base = IOSurfaceGetBaseAddress(s);
+	if (base == NULL || bpe == 0 || pitch % bpe != 0) {''', '''	size_t bpe = IOSurfaceGetBytesPerElement(s);
+	const void *base = IOSurfaceGetBaseAddress(s);
+	if (w * h >= 600000) {
+		static int biglog;
+		if (biglog++ < 60) {
+			char mean[32];
+			GLint btex = 0;
+			glGetIntegerv(GL_TEXTURE_BINDING_2D, &btex);
+			sgl_grid_mean(bpe == 4 ? base : NULL, w, h, pitch, mean, sizeof(mean));
+			sweet_drm_log("sweetgl: BIG %s (copy) surf %u %zux%zu pitch %zu fmt %#x/%#x tex %d mean %s",
+			    why, IOSurfaceGetID(s), w, h, pitch, format, type, btex, mean);
+		}
+	}
+	if (base == NULL || bpe == 0 || pitch % bpe != 0) {'''),
+])
