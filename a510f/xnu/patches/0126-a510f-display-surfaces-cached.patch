@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
-index 19e7e00..5196f44 100644
+index 19e7e00..d39162f 100644
 --- a/iokit/Kernel/arm/SweetSurface.cpp
 +++ b/iokit/Kernel/arm/SweetSurface.cpp
 @@ -120,6 +120,14 @@ sweet_surface_new_kind(const char *name, uint32_t fmt, uint32_t bpe)
@@ -34,7 +34,7 @@ index 19e7e00..5196f44 100644
  	}
  	IOLockUnlock(sweet_surface_lock);
  	return kernelMap != NULL ? (uintptr_t)kernelMap->getVirtualAddress() : 0;
-@@ -341,6 +350,23 @@ sweet_surface_layout(SweetSurface *s, OSDictionary *props)
+@@ -341,6 +350,27 @@ sweet_surface_layout(SweetSurface *s, OSDictionary *props)
  	s->elementWidth = (uint8_t)sweet_dict_u32(props, "IOSurfaceElementWidth", 1);
  	s->elementHeight = (uint8_t)sweet_dict_u32(props, "IOSurfaceElementHeight", 1);
  	s->pixelFormat = sweet_dict_u32(props, "IOSurfacePixelFormat", 0);
@@ -47,7 +47,11 @@ index 19e7e00..5196f44 100644
 +		}
 +		char who[32];
 +		proc_selfname(who, sizeof(who));
-+		if (!allow && (strstr(who, "Poster") != NULL)) {
++		bool poster = false;
++		for (const char *c = who; *c && !poster; c++) {
++			poster = strncmp(c, "Poster", 6) == 0;
++		}
++		if (!allow && poster) {
 +			static unsigned told;
 +			if (told++ < 20) {
 +				IOLog("SWEET SURF: %s: 420f/420v refused (wallpaper picture: RGB instead)\n", who);
@@ -58,7 +62,7 @@ index 19e7e00..5196f44 100644
  	s->cacheMode = sweet_dict_u32(props, "IOSurfaceCacheMode", 0);
  	s->offset = sweet_dict_u32(props, "IOSurfaceOffset", 0);
  	if (s->width > SWEET_SURFACE_MAX_DIM || s->height > SWEET_SURFACE_MAX_DIM ||
-@@ -805,8 +831,22 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+@@ -805,8 +835,22 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
  			ret = kIOReturnNoMemory;
  		} else {
  			bzero(mem->getBytesNoCopy(), s->allocSize);
@@ -81,7 +85,7 @@ index 19e7e00..5196f44 100644
  			if (!sweet_surface_publish(s)) {
  				ret = kIOReturnNoResources;
  			}
-@@ -817,9 +857,10 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+@@ -817,9 +861,10 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
  	if (ret != kIOReturnSuccess || sweet_surface_creates_logged < 64 ||
  	    sweet_surface_new_kind(name, s->pixelFormat, s->bytesPerElement)) {
  		sweet_surface_creates_logged++;
@@ -94,7 +98,7 @@ index 19e7e00..5196f44 100644
  	}
  	props->release();
  	if (ret != kIOReturnSuccess) {
-@@ -1307,10 +1348,14 @@ sweet_surface_held(IOLock *lock, OSArray *refs, uint32_t id)
+@@ -1307,10 +1352,14 @@ sweet_surface_held(IOLock *lock, OSArray *refs, uint32_t id)
  	return s;
  }
  
@@ -109,7 +113,7 @@ index 19e7e00..5196f44 100644
  	SweetSurface *s = sweet_surface_held(fLock, fRefs, (uint32_t)(uintptr_t)id);
  	if (s == NULL) {
  		return kIOReturnNotFound;
-@@ -1680,11 +1725,120 @@ AppleM2ScalerCSCDriver::newUserClient(task_t owningTask, void *securityID, UInt3
+@@ -1680,11 +1729,120 @@ AppleM2ScalerCSCDriver::newUserClient(task_t owningTask, void *securityID, UInt3
  	return kIOReturnSuccess;
  }
  

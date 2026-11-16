@@ -1060,9 +1060,9 @@ rep("""	if (!fConsolePaused) {
 		fConsolePaused = true;""", """	if (!fConsolePaused) {
 		int quiet = 0;
 		fConsolePaused = true;
-		{
-			extern "C" void a510f_bootscreen_done(void);   /* bsd/dev/a510f_touch.c */
-			a510f_bootscreen_done();
-		}""")
+		a510f_bootscreen_done();""")
+rep("""extern "C" void sweet_surface_stats(uint64_t *bytes, uint32_t *count);     /* SweetSurface.cpp */""",
+    """extern "C" void sweet_surface_stats(uint64_t *bytes, uint32_t *count);     /* SweetSurface.cpp */
+extern "C" void a510f_bootscreen_done(void);                               /* bsd/dev/a510f_touch.c */""")
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
 print('ok bootscreen done')

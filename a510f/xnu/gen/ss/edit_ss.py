@@ -262,7 +262,11 @@ edit(cpp, [
 		}
 		char who[32];
 		proc_selfname(who, sizeof(who));
-		if (!allow && (strstr(who, "Poster") != NULL)) {
+		bool poster = false;
+		for (const char *c = who; *c && !poster; c++) {
+			poster = strncmp(c, "Poster", 6) == 0;
+		}
+		if (!allow && poster) {
 			static unsigned told;
 			if (told++ < 20) {
 				IOLog("SWEET SURF: %s: 420f/420v refused (wallpaper picture: RGB instead)\\n", who);
