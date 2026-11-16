@@ -1146,7 +1146,8 @@ sgl_all_highp(char *src)'''),
 		if (biglog++ < 60) {
 			char mean[32];
 			GLint row = unpack_row();
-			sgl_grid_mean(pixels != NULL && type == GL_UNSIGNED_BYTE ? pixels : NULL, (size_t)width, (size_t)height,
+			sgl_grid_mean(pixels != NULL && type == GL_UNSIGNED_BYTE && (format == GL_RGBA || format == GL_BGRA_EXT) ?
+			    pixels : NULL, (size_t)width, (size_t)height,
 			    (size_t)(row > 0 ? row : width) * 4, mean, sizeof(mean));
 			sweet_drm_log("sweetgl: BIG TexImage2D tex %u level %d ifmt %#x %dx%d fmt %#x type %#x data %s mean %s",
 			    unit_held[active_unit()], level, internalformat, width, height, format, type,
@@ -1273,8 +1274,10 @@ sgl_DrawArrays(void *rctx, GLenum mode, GLint first, GLsizei count)'''),
 	SGL_POST(301);''', '''	glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
 	if (level == 0) {
 		GLint row2 = unpack_row();
+		/* 4-byte pixels only: A8/L8 uploads are 1 byte a pixel (round 46-48: backboardd read past them) */
+		bool four = type == GL_UNSIGNED_BYTE && (format == GL_RGBA || format == GL_BGRA_EXT);
 		sgl_tex_note((GLint)unit_held[active_unit()], 't', 0, 0, (size_t)width, (size_t)height,
-		    pixels != NULL && type == GL_UNSIGNED_BYTE ? pixels : NULL, (size_t)(row2 > 0 ? row2 : width) * 4, 4);
+		    four ? pixels : NULL, (size_t)(row2 > 0 ? row2 : width) * 4, 4);
 	}
 	SGL_POST(301);'''),
     ('''	if (w * h >= 600000) {
