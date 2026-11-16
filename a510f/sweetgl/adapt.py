@@ -1310,3 +1310,71 @@ sgl_DrawArrays(void *rctx, GLenum mode, GLint first, GLsizei count)'''),
 	}
 	if (w * h >= 600000) {'''),
 ])
+
+
+# Round 50 (speed): the round 49 CPU profile shows backboardd's draws
+# (CA::OGL::GLContext::draw_elements) going into the kernel for new GPU
+# buffers (bo_new/bo_make, zeroing, cache flushes): IOSurface imports. The home
+# screen alone binds more than 32 surfaces a frame (icons, widgets, dock,
+# wallpaper, layers), so the 32-entry cache dropped and re-imported surfaces
+# every frame. Now 192 entries, at most 48 MB of surfaces kept imported by the
+# cache (memory is tight), least recently used dropped first.
+edit('eagl.c', [
+    ('''struct surf_res {
+	uint32_t id, w, h, pitch;
+	enum pipe_format format;
+	uintptr_t base;
+	struct pipe_resource *res;
+	uint64_t used;
+};
+#define SURF_RES_MAX 32''', '''struct surf_res {
+	uint32_t id, w, h, pitch;
+	enum pipe_format format;
+	uintptr_t base;
+	struct pipe_resource *res;
+	uint64_t used;
+};
+#define SURF_RES_MAX 192
+#define SURF_RES_BYTES (48u << 20)
+static uint64_t surf_res_bytes;'''),
+    ('''	int victim = 0;
+	for (int i = 1; i < SURF_RES_MAX; i++) {
+		if (surf_res[i].used < surf_res[victim].used) {
+			victim = i;
+		}
+	}
+	pipe_resource_reference(&surf_res[victim].res, NULL);
+	surf_res[victim] = *key;
+	surf_res[victim].used = ++surf_res_clock;
+	pipe_resource_reference(&surf_res[victim].res, res);''', '''	uint64_t need = (uint64_t)key->pitch * key->h;
+	int victim;
+	for (;;) {
+		/* a free slot, else the least recently used; drop more while over budget */
+		victim = 0;
+		int empty = -1;
+		for (int i = 0; i < SURF_RES_MAX; i++) {
+			if (surf_res[i].res == NULL) {
+				empty = empty < 0 ? i : empty;
+			} else if (surf_res[victim].res == NULL || surf_res[i].used < surf_res[victim].used) {
+				victim = i;
+			}
+		}
+		if (empty >= 0 && surf_res_bytes + need <= SURF_RES_BYTES) {
+			victim = empty;
+			break;
+		}
+		if (surf_res[victim].res == NULL) {
+			break;          /* nothing cached at all */
+		}
+		surf_res_bytes -= (uint64_t)surf_res[victim].pitch * surf_res[victim].h;
+		pipe_resource_reference(&surf_res[victim].res, NULL);
+		if (empty < 0 && surf_res_bytes + need <= SURF_RES_BYTES) {
+			break;          /* reuse the slot just dropped */
+		}
+	}
+	pipe_resource_reference(&surf_res[victim].res, NULL);
+	surf_res[victim] = *key;
+	surf_res[victim].used = ++surf_res_clock;
+	surf_res_bytes += need;
+	pipe_resource_reference(&surf_res[victim].res, res);'''),
+])

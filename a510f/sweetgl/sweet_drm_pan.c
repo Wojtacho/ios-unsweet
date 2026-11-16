@@ -91,6 +91,7 @@ static uint32_t submits, failed_submits;
  */
 static uint64_t win_t0, win_job_us, win_call_ns, win_max_us;
 static uint32_t win_n, win_frag;
+static uint32_t win_bo_new, win_bo_close, win_imports;  /* round 50: kernel buffer churn */
 static struct rusage win_ru;
 
 static uint64_t
@@ -134,10 +135,11 @@ win_account(uint32_t req, uint64_t job_us, uint64_t call_ns)
 	uint64_t sys = tv_us(ru.ru_stime) - tv_us(win_ru.ru_stime);
 	uint64_t span_ms = span / 1000000u;
 	sweet_drm_log("sweetgl: time %llu ms: %u jobs (%u fragment), GPU %llu ms (max job %llu ms), "
-	    "in submit %llu ms, CPU user %llu ms sys %llu ms",
+	    "in submit %llu ms, CPU user %llu ms sys %llu ms, bo new %u close %u, surface imports %u",
 	    (unsigned long long)span_ms, win_n, win_frag, (unsigned long long)(win_job_us / 1000),
 	    (unsigned long long)(win_max_us / 1000), (unsigned long long)(win_call_ns / 1000000u),
-	    (unsigned long long)(usr / 1000), (unsigned long long)(sys / 1000));
+	    (unsigned long long)(usr / 1000), (unsigned long long)(sys / 1000), win_bo_new, win_bo_close, win_imports);
+	win_bo_new = win_bo_close = win_imports = 0;
 	win_t0 = 0;
 	win_n = win_frag = 0;
 	win_job_us = win_call_ns = win_max_us = 0;
@@ -305,6 +307,7 @@ create_bo(struct drm_panfrost_create_bo *r)
 	uint64_t in[2] = {r->size, r->flags}, out[4] = {0};
 	uint32_t n = 4;
 	pthread_mutex_lock(&lock);
+	win_bo_new++;
 	kern_return_t kr = IOConnectCallScalarMethod(conn, SEL_BO_NEW, in, 2, out, &n);
 	int err = bo_reply(kr, out, &r->handle);
 	if (err == 0) {
@@ -532,6 +535,7 @@ drmIoctl(int fd, unsigned long request, void *arg)
 	if (nr >= DRM_COMMAND_BASE && nr < DRM_COMMAND_END) {
 		err = command(nr - DRM_COMMAND_BASE, arg);
 	} else if (request == DRM_IOCTL_GEM_CLOSE) {
+		win_bo_close++;
 		err = close_bo(((struct drm_gem_close *)arg)->handle);
 	} else {
 		err = -ENOSYS;
@@ -576,6 +580,7 @@ sweet_drm_import_iosurface(uint32_t surface_id, uint64_t map, uint32_t *handle, 
 	if (!conn) {
 		return -ENODEV;
 	}
+	win_imports++;
 	uint64_t in = surface_id, out[4] = {0};
 	uint32_t n = 4;
 	pthread_mutex_lock(&lock);
