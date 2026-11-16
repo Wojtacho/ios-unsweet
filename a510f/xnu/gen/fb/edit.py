@@ -1066,3 +1066,33 @@ rep("""extern "C" void sweet_surface_stats(uint64_t *bytes, uint32_t *count);   
 extern "C" void a510f_bootscreen_done(void);                               /* bsd/dev/a510f_touch.c */""")
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
 print('ok bootscreen done')
+
+# Round 51b: the boot screen mapped the framebuffer itself (ml_io_map) and
+# kmem_alloc panicked (no space in the io map, user photo). It now draws
+# through this driver's own mapping of the shown buffer.
+s = open(p, encoding='utf-8').read()
+rep("""extern "C" int sweet_fb_shot(uint16_t *out, uint32_t maxpix, uint32_t div, uint32_t *w, uint32_t *h, uint32_t *flags);""",
+    """extern "C" int sweet_fb_shot(uint16_t *out, uint32_t maxpix, uint32_t div, uint32_t *w, uint32_t *h, uint32_t *flags);
+extern "C" uintptr_t sweet_fb_boot_canvas(uint32_t *w, uint32_t *h, uint32_t *rowbytes);""")
+rep("""extern "C" int
+sweet_fb_shot(uint16_t *out, uint32_t maxpix, uint32_t div, uint32_t *w, uint32_t *h, uint32_t *flags)
+{
+	AppleCLCD *fb = sweet_fb_instance;""", """extern "C" uintptr_t
+sweet_fb_boot_canvas(uint32_t *w, uint32_t *h, uint32_t *rowbytes)
+{
+	AppleCLCD *fb = sweet_fb_instance;
+	if (fb == NULL) {
+		return 0;
+	}
+	*w = fb->fWidth;
+	*h = fb->fHeight;
+	*rowbytes = fb->fRowBytes;
+	return fb->frontVA();
+}
+
+extern "C" int
+sweet_fb_shot(uint16_t *out, uint32_t maxpix, uint32_t div, uint32_t *w, uint32_t *h, uint32_t *flags)
+{
+	AppleCLCD *fb = sweet_fb_instance;""")
+open(p, 'w', encoding='utf-8', newline='\n').write(s)
+print('ok boot canvas')

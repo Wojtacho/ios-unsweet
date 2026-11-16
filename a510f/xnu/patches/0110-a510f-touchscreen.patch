@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..61f81fc
+index 0000000..6e2272d
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,1534 @@
+@@ -0,0 +1,1543 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -1225,19 +1225,28 @@ index 0000000..61f81fc
 +{
 +	(void)arg;
 +	(void)wr;
-+	PE_Video v;
-+	PE_current_console(&v);
-+	if (v.v_baseAddr == 0 || v.v_width == 0 || v.v_height == 0 || v.v_rowBytes < v.v_width * 4) {
-+		printf("A510F BOOT: no boot framebuffer\n");
++	/*
++	 * The framebuffer driver's own mapping of the shown buffer (round 51:
++	 * ml_io_map of the whole framebuffer here panicked in kmem_alloc). Wait
++	 * up to 30 s for the driver; without it there is no boot screen.
++	 */
++	extern uintptr_t sweet_fb_boot_canvas(uint32_t *w, uint32_t *h, uint32_t *rowbytes);
++	uintptr_t va = 0;
++	uint32_t w = 0, h = 0, rb = 0;
++	for (int i = 0; i < 200 && va == 0 && !bs.done; i++) {
++		va = sweet_fb_boot_canvas(&w, &h, &rb);
++		if (va == 0) {
++			IOSleep(150);
++		}
++	}
++	if (va == 0 || w == 0 || h == 0 || rb < w * 4) {
++		printf("A510F BOOT: no framebuffer, no boot screen\n");
 +		return;
 +	}
-+	bs.w = (uint32_t)v.v_width;
-+	bs.h = (uint32_t)v.v_height;
-+	bs.stride = (uint32_t)v.v_rowBytes / 4;
-+	bs.fb = (volatile uint32_t *)ml_io_map(v.v_baseAddr, (vm_size_t)v.v_rowBytes * v.v_height);
-+	if (bs.fb == NULL) {
-+		return;
-+	}
++	bs.w = w;
++	bs.h = h;
++	bs.stride = rb / 4;
++	bs.fb = (volatile uint32_t *)va;
 +	for (uint32_t y = 0; y < bs.h; y++) {
 +		for (uint32_t x = 0; x < bs.w; x++) {
 +			bs.fb[(uint64_t)y * bs.stride + x] = 0xff000000u;
