@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
-index 19e7e00..d39162f 100644
+index 19e7e00..c3c27ef 100644
 --- a/iokit/Kernel/arm/SweetSurface.cpp
 +++ b/iokit/Kernel/arm/SweetSurface.cpp
 @@ -120,6 +120,14 @@ sweet_surface_new_kind(const char *name, uint32_t fmt, uint32_t bpe)
@@ -51,7 +51,7 @@ index 19e7e00..d39162f 100644
 +		for (const char *c = who; *c && !poster; c++) {
 +			poster = strncmp(c, "Poster", 6) == 0;
 +		}
-+		if (!allow && poster) {
++		if (allow == 0 && poster && false) {     /* round 51: did not help (CollectionsPoster was killed, no RGB fallback): off */
 +			static unsigned told;
 +			if (told++ < 20) {
 +				IOLog("SWEET SURF: %s: 420f/420v refused (wallpaper picture: RGB instead)\n", who);

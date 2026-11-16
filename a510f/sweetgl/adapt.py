@@ -1395,7 +1395,7 @@ edit('eagl.c', [
 	static int finish = -1;
 	if (finish < 0) {
 		const char *e = getenv("SWEETGL_FINISH");
-		finish = e != NULL && e[0] == '1';
+		finish = !(e != NULL && e[0] == '0');      /* round 51: glFlush did not raise the frame rate (the kernel present waits) and brought back failed jobs: wait again; SWEETGL_FINISH=0 flushes */
 	}
 	if (finish) {
 		glFinish();

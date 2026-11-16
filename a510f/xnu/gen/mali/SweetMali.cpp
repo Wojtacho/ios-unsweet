@@ -820,6 +820,62 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 			}
 		}
 		IOLockUnlock(g_lock);
+		/*
+		 * Round 52: GPU time per render target. Word 11 of the job's pool
+		 * (the FBD: (height-1) << 16 | (width-1)) keys the job; every 10 s
+		 * the 8 targets that took the most GPU time are logged.
+		 */
+		{
+			static struct { uint32_t key, n, frag; uint64_t us; } tgt[24];
+			static uint64_t tgt_t0;
+			uint32_t w8[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+			uint32_t key = mali_peek((jc & ~0xffffull) + 32, w8) ? w8[3] : 0;
+			int slot = -1;
+			for (int i = 0; i < 24; i++) {
+				if (tgt[i].n != 0 && tgt[i].key == key) {
+					slot = i;
+					break;
+				}
+				if (slot < 0 && tgt[i].n == 0) {
+					slot = i;
+				}
+			}
+			if (slot >= 0) {
+				tgt[slot].key = key;
+				tgt[slot].n++;
+				tgt[slot].frag += req & 1;
+				tgt[slot].us += us;
+			}
+			uint64_t tnow = mach_absolute_time(), tns = 0;
+			if (tgt_t0 == 0) {
+				tgt_t0 = tnow;
+			}
+			absolutetime_to_nanoseconds(tnow - tgt_t0, &tns);
+			if (tns >= 10000000000ull) {
+				char line[400];
+				line[0] = 0;
+				for (int r2 = 0; r2 < 8; r2++) {
+					int best = -1;
+					for (int i = 0; i < 24; i++) {
+						if (tgt[i].n != 0 && (best < 0 || tgt[i].us > tgt[best].us)) {
+							best = i;
+						}
+					}
+					if (best < 0) {
+						break;
+					}
+					char one[64];
+					snprintf(one, sizeof(one), " %ux%u: %u jobs (%u frag) %llu ms;",
+					    (tgt[best].key & 0xffff) + 1, (tgt[best].key >> 16) + 1, tgt[best].n, tgt[best].frag,
+					    tgt[best].us / 1000);
+					strlcat(line, one, sizeof(line));
+					tgt[best].n = 0;
+				}
+				IOLog("SWEET MALI: GPU time by target (10 s):%s\n", line);
+				bzero(tgt, sizeof(tgt));
+				tgt_t0 = 0;
+			}
+		}
 		IOLockLock(g_qlock);
 		g_q_done = seq;
 		IOLockWakeup(g_qlock, &g_q_done, false);

@@ -1560,7 +1560,7 @@ index 0000000..6e2272d
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..a27616d 100644
+index 6f8dba3..81e64de 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
 @@ -33,6 +33,7 @@
@@ -2009,7 +2009,7 @@ index 6f8dba3..a27616d 100644
  	if (error) {
  		return error;
  	}
-@@ -986,9 +1337,980 @@ sweet_mmc_init(void)
+@@ -986,9 +1337,981 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
@@ -2893,8 +2893,9 @@ index 6f8dba3..a27616d 100644
 +	mmc_lock();
 +	int error = mmc_part_find("OTA", &lba, &n);
 +	uint8_t *b = error || n < 2 * BOOTLOGO_SECT ? NULL : mmc_alloc(BOOTLOGO_SECT * MMC_SECTOR);
-+	if (b != NULL) {
-+		error = mmc_read(lba + n - BOOTLOGO_SECT, BOOTLOGO_SECT, b);
++	for (uint32_t k = 0; b != NULL && !error && k < BOOTLOGO_SECT; k += 64) {
++		/* 64 sectors a read (round 51: one 384-sector read failed with EINVAL) */
++		error = mmc_read(lba + n - BOOTLOGO_SECT + k, 64, b + (uint64_t)k * MMC_SECTOR);
 +	}
 +	mmc_unlock();
 +	uint32_t w = 0, h = 0;

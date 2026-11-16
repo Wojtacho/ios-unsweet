@@ -266,7 +266,7 @@ edit(cpp, [
 		for (const char *c = who; *c && !poster; c++) {
 			poster = strncmp(c, "Poster", 6) == 0;
 		}
-		if (!allow && poster) {
+		if (allow == 0 && poster && false) {     /* round 51: did not help (CollectionsPoster was killed, no RGB fallback): off */
 			static unsigned told;
 			if (told++ < 20) {
 				IOLog("SWEET SURF: %s: 420f/420v refused (wallpaper picture: RGB instead)\\n", who);
