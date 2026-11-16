@@ -243,3 +243,32 @@ sweet_scaler_publish(IOService *provider)
 		OSSafeReleaseNULL(jd);
 	}"""),
 ])
+
+# A510F round 51: the pre-blurred wallpaper picture (folder icon background,
+# open folder panel, app switcher background) comes from CollectionsPoster as
+# 420f (YUV) surfaces, which CoreAnimation never draws through sweetgl (no
+# multi-plane binds ever logged): an empty picture. Wallpaper processes are
+# refused 420f/420v surfaces, so they fall back to RGB ones (or fail visibly
+# in the log). Boot-arg sweetyuv=1: allow again.
+edit(cpp, [
+    ("""	s->pixelFormat = sweet_dict_u32(props, "IOSurfacePixelFormat", 0);
+	s->cacheMode = sweet_dict_u32(props, "IOSurfaceCacheMode", 0);""", """	s->pixelFormat = sweet_dict_u32(props, "IOSurfacePixelFormat", 0);
+	if (s->pixelFormat == 0x34323066u || s->pixelFormat == 0x34323076u) {    /* '420f', '420v' */
+		static int allow = -1;
+		if (allow < 0) {
+			int v = 0;
+			(void)PE_parse_boot_argn("sweetyuv", &v, sizeof(v));
+			allow = v;
+		}
+		char who[32];
+		proc_selfname(who, sizeof(who));
+		if (!allow && (strstr(who, "Poster") != NULL)) {
+			static unsigned told;
+			if (told++ < 20) {
+				IOLog("SWEET SURF: %s: 420f/420v refused (wallpaper picture: RGB instead)\\n", who);
+			}
+			return kIOReturnUnsupported;
+		}
+	}
+	s->cacheMode = sweet_dict_u32(props, "IOSurfaceCacheMode", 0);"""),
+])
