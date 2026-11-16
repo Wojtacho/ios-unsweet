@@ -964,3 +964,51 @@ edit('eagl.c', [
     ('''    "  return acc / 6.;\\n"''', '''    "  acc /= 6.;\\n"
     "  return acc.a > .02 ? vec4(acc.rgb / acc.a, 1.) : acc;\\n"'''),
 ])
+
+
+# Round 41: YUV (multi-plane) IOSurfaces as textures. The app switcher's
+# background (wallpaper poster snapshots, 420f) is black and app card previews
+# (snapshots, 420f) are blank: bind_surface refused every multi-plane surface.
+# A plane is now a texture of its own: the GL format CA asks for (LUMINANCE /
+# LUMINANCE_ALPHA / RED / RG), else R8 for 1-byte and RG8 for 2-byte elements,
+# at the plane's offset inside the surface's buffer. Logged: the GL extension
+# string once, and the first 40 multi-plane binds. SWEETGL_DUMPSH=1: shader
+# sources (the weather widget's gradient banding: find its shader).
+edit('eagl.c', [
+    ('''		if (ext == NULL && asprintf(&ext, "%s GL_EXT_shader_framebuffer_fetch", s) < 0) {''',
+     '''		if (ext == NULL) {
+			sweet_drm_log("sweetgl: GL_EXTENSIONS (%zu bytes): %.380s", strlen((const char *)s), (const char *)s);
+			if (strlen((const char *)s) > 380) {
+				sweet_drm_log("sweetgl: GL_EXTENSIONS ...%.400s", (const char *)s + 380);
+			}
+		}
+		if (ext == NULL && asprintf(&ext, "%s GL_EXT_shader_framebuffer_fetch%s", s,
+		    strstr((const char *)s, "GL_EXT_texture_rg") ? "" : " GL_EXT_texture_rg") < 0) {'''),
+    ('''	bool multi = IOSurfaceGetPlaneCount(s) > 1 || plane != 0;   /* ponytail: YUV surfaces not yet */
+	img.format = format && !multi ? gl_format(format, type, &img.internalformat) : PIPE_FORMAT_NONE;
+	if (img.format == PIPE_FORMAT_NONE && !multi) {
+		img.format = surface_format(fourcc, IOSurfaceGetBytesPerElementOfPlane(s, plane), &img.internalformat);
+	}''', '''	bool multi = IOSurfaceGetPlaneCount(s) > 1 || plane != 0;   /* YUV: one plane per texture */
+	img.format = format ? gl_format(format, type, &img.internalformat) : PIPE_FORMAT_NONE;
+	if (img.format == PIPE_FORMAT_NONE && !multi) {
+		img.format = surface_format(fourcc, IOSurfaceGetBytesPerElementOfPlane(s, plane), &img.internalformat);
+	} else if (img.format == PIPE_FORMAT_NONE) {
+		size_t pbpe = IOSurfaceGetBytesPerElementOfPlane(s, plane);
+		img.format = pbpe == 1 ? gl_format(GL_RED, GL_UNSIGNED_BYTE, &img.internalformat) :
+		    pbpe == 2 ? gl_format(GL_RG, GL_UNSIGNED_BYTE, &img.internalformat) : PIPE_FORMAT_NONE;
+	}
+	if (multi) {
+		static int ylog;
+		if (ylog++ < 40) {
+			sweet_drm_log("sweetgl: %s: YUV surface %u %c%c%c%c plane %u/%zu %zux%zu pitch %zu bpe %zu at +%#lx, GL fmt %#x type %#x -> pipe %d",
+			    why, IOSurfaceGetID(s), FCC(fourcc), plane, IOSurfaceGetPlaneCount(s), w, h, pitch,
+			    IOSurfaceGetBytesPerElementOfPlane(s, plane),
+			    (unsigned long)((uintptr_t)IOSurfaceGetBaseAddressOfPlane(s, plane) - (uintptr_t)IOSurfaceGetBaseAddress(s)),
+			    format, type, img.format);
+		}
+	}'''),
+    ('''			.offset = (unsigned)((uintptr_t)IOSurfaceGetBaseAddressOfPlane(s, plane) & vm_page_mask),''',
+     '''			.offset = (unsigned)(((uintptr_t)IOSurfaceGetBaseAddressOfPlane(s, plane) -
+			    (uintptr_t)IOSurfaceGetBaseAddress(s)) + ((uintptr_t)IOSurfaceGetBaseAddress(s) & vm_page_mask)),'''),
+    ('''	dump_shaders = trace_left > 0;''', '''	dump_shaders = trace_left > 0 || getenv("SWEETGL_DUMPSH") != NULL;'''),
+])
