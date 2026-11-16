@@ -1392,3 +1392,33 @@ User's list for tomorrow (2026-11-16):
   gradient. Suspects: a low-precision path (gradient texture in a 4/5-bit
   format, lowp shader math, nearest filtering of a small gradient LUT, or no
   dithering where CA expects it). Capture full-res strips of the widget first.
+
+## 2026-11-16: rounds 40-47 (switcher, gradient, speed profiling)
+
+- Weather widget banding: CA's color-matching shader (colorP0, 32x1024
+  RGBA16F LUT) looked up at mediump; shaders with colorP0 now highp (b571894).
+  Not verifiable from 16-bit screenshots: user to check by eye.
+- Shots/strips are RGB565 (sweet_mmc): cannot measure 8-bit banding.
+- App switcher: double home press is lost while sweetgl traces (TRACE on every
+  draw); SWEETGL_TRACE=N now leaves tracing off until N s (db9359e), boot-args
+  SWEETGL_TRACE=140. Background: black fill, one opaque full-screen texture
+  (black), 25% black dim. Cards of apps not opened since boot are blank: the
+  snapshot JPEG path needs AppleJPEGDriver (missing). Stand-in published in
+  0126 (logs calls): SpringBoard opens it but makes no call (round 45).
+- Folder icon (page 2 Utilities) has no frosted square; the open folder has
+  no panel either. Guess: the folder material, the switcher background and
+  the missing panel all use the pre-blurred wallpaper image (PosterBoard /
+  CollectionsPoster), the dock's live backdrop works.
+- CPU profiler (0131, autopilot 'prof SECONDS'; twrp-write/dsc_sym.py names
+  shared-cache PCs from the phone's cache over TWRP): CPUs ~95% busy during
+  swipes; SpringBoard ~150% of a core, CalendarWidgetExtension ~70%,
+  WeatherWidget ~70%, vmd ~35%, CollectionsPoster ~25%, backboardd ~25%.
+  Leafs mostly objc_msgSend; ba0c5f8 adds user call stacks (frame pointers).
+- backboardd's top kernel cost was SweetMali's per-job 8 KB fingerprint
+  (mali_peek): now off unless sweetmali_fp=1 (f900742).
+- Calendar was the epoch every boot (status bar 4:02 PM Dec 31 1969): kernel
+  sets it to the patch time if earlier (88d85e2). Did not stop the CPU hogs.
+- GitHub macOS runners (arm64 and Intel) were often unavailable (jobs
+  cancelled after 15 min "not acquired"); re-run via the API.
+- SD card idea (user): storage is not the bottleneck (RAM ~35 MB free, CPU);
+  possible later as extra file storage (same dw_mmc controller family).
