@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..6e1213a
+index 0000000..e70521d
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,1322 @@
+@@ -0,0 +1,1349 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -1121,6 +1121,32 @@ index 0000000..6e1213a
 +	}
 +}
 +
++/*
++ * A510F round 47: every boot started at the epoch (status bar: 4:02 PM,
++ * Wednesday, December 31: 1969 in Cupertino). Nothing sets the calendar (no
++ * RTC driver, no network time), and with a 1969 date SpringBoard,
++ * CalendarWidgetExtension, PosterBoard and vmd spun (round 46 CPU profile:
++ * SpringBoard ~150% of a core). The calendar is set to this kernel's build
++ * time (UTC, from __DATE__/__TIME__) when it is earlier. The PMIC RTC
++ * (S2MPU03, register map unknown here) would give the real time.
++ */
++static void
++a510f_clock_floor(void)
++{
++	/* the time these patches were made (UTC epoch); __DATE__ trips -Wdate-time */
++	const char *date = "patch", *tm = "time";
++	long build = 1794851832L;
++	clock_sec_t now = 0;
++	clock_usec_t us = 0;
++	clock_get_calendar_microtime(&now, &us);
++	if ((long)now < build) {
++		clock_set_calendar_microtime((clock_sec_t)build, 0);
++		printf("A510F CLOCK: calendar %ld -> %ld (kernel build %s %s UTC)\n", (long)now, build, date, tm);
++	} else {
++		printf("A510F CLOCK: calendar %ld kept (build %ld)\n", (long)now, build);
++	}
++}
++
 +void
 +a510f_touch_start(void)
 +{
@@ -1129,6 +1155,7 @@ index 0000000..6e1213a
 +		return;
 +	}
 +	started = true;
++	a510f_clock_floor();
 +	t.mode = 0;
 +	PE_parse_boot_argn("a510ftouch", &t.mode, sizeof(t.mode));
 +	PE_parse_boot_argn("a510fcpufreq", &a510f_cpufreq, sizeof(a510f_cpufreq));
