@@ -1339,7 +1339,7 @@ index 0000000..6e1213a
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..ec62675 100644
+index 6f8dba3..e29642e 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
 @@ -33,6 +33,7 @@
@@ -1787,7 +1787,7 @@ index 6f8dba3..ec62675 100644
  	if (error) {
  		return error;
  	}
-@@ -986,9 +1336,940 @@ sweet_mmc_init(void)
+@@ -986,9 +1336,948 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
@@ -2602,6 +2602,14 @@ index 6f8dba3..ec62675 100644
 +			auto_burst(tag, a, b);
 +		} else {
 +			printf("SWEET AUTO: burst TAG N MS\n");
++		}
++	} else if (auto_word(&p, "prof")) {
++		/* A510F round 46: CPU sampling profile of backboardd for SECONDS (osfmk/arm64/a510f_prof.c) */
++		extern void a510f_prof_start(int seconds);
++		if (auto_int(&p, &a)) {
++			a510f_prof_start(a);
++		} else {
++			printf("SWEET AUTO: prof SECONDS\n");
 +		}
 +	} else if (auto_word(&p, "log")) {
 +		printf("SWEET AUTO: note: %s\n", auto_skip(p));
