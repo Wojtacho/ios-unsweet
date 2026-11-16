@@ -1422,3 +1422,40 @@ User's list for tomorrow (2026-11-16):
   cancelled after 15 min "not acquired"); re-run via the API.
 - SD card idea (user): storage is not the bottleneck (RAM ~35 MB free, CPU);
   possible later as extra file storage (same dw_mmc controller family).
+
+## 2026-11-16 (evening): rounds 48-52, pause
+
+On the phone (TWRP, boot 66): boot a510f-ios-boot-r51b.tar (44deecc) +
+sweetgl 3aec108 (glFlush) — boots fine, boot screen works (bar, no logo yet).
+Pushed, NOT built/tested: edff59d (round 52).
+
+- Round 48: my round 46 texture note read 4 bytes/pixel of A8 uploads:
+  backboardd SIGSEGV at boot -> SpringBoard restart churn. Fixed d196b32.
+- Round 49: vmd (visual voicemail; loops on CoreTelephony) not started;
+  WeatherWidget/CalendarWidget/MusicWidgets/Collections+Weather+Photos
+  posters at darwin background (kernel thread, a510f_prof.c, sweetbg=0 off).
+  CPUs idle 4% -> 37%, SpringBoard 150% -> 59% of a core. Swipes still ~10 fps.
+- Profiler symbols: twrp-write/dsc_sym.py (exported), dsc_localsyms.py
+  (QuartzCore/IOKit local names from .symbols over TWRP). backboardd time:
+  CA::OGL draws -> io_connect -> bo_new/bo_make (imports), CA updater.
+- Round 50/51: IOSurface resource cache 32 -> 192 entries (48 MB cap).
+  Boot screen (sweetboot=1, 0132 + a510f_touch.c + fb done hook): first
+  version panicked (ml_io_map of the framebuffer, kmem_alloc no space; user
+  photo); now draws via sweet_fb_boot_canvas. Logo: auto.py logo FONT
+  (U+F8FF of the phone's Helvetica.ttc) -> OTA last 384 sectors; the kernel's
+  single 384-sector read failed (EINVAL > MAX_XFER_BLOCKS? no: 256 max) ->
+  edff59d reads 64 at a time.
+- glFlush instead of glFinish: finish wait 20 ms -> 0.1 ms but still ~10 fps
+  (the kernel present waits for all queued jobs) and failed jobs came back
+  (~14/2 s): reverted in edff59d (SWEETGL_FINISH=0 to flush).
+- Refusing 420f surfaces to *Poster processes did not bring folder/switcher
+  backgrounds (CollectionsPoster got killed, no RGB fallback): off in edff59d.
+- The GPU is the frame limit: busy ~70%, ~65 ms of GPU work per frame,
+  ~7 fragment jobs (render passes) per frame. edff59d logs GPU time per
+  render target every 10 s ("GPU time by target"). Suspect: full-screen
+  render passes from fbfetch emulation flushes and blur passes.
+- Folder icon / open folder panel / switcher background: still missing.
+
+Next (morning): build+flash edff59d, read "GPU time by target", cut render
+passes (fbfetch blend modes with real GL blending where possible), folder
+background trace, check the logo appears.
