@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 0f8e61a..0ef69e8 100644
+index 0f8e61a..94e49d1 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -82,6 +82,25 @@ enum {
@@ -643,7 +643,7 @@ index 0f8e61a..0ef69e8 100644
  		int quiet = 0;
  		fConsolePaused = true;
 +		{
-+			extern void a510f_bootscreen_done(void);       /* bsd/dev/a510f_touch.c */
++			extern "C" void a510f_bootscreen_done(void);   /* bsd/dev/a510f_touch.c */
 +			a510f_bootscreen_done();
 +		}
  		if (PE_parse_boot_argn("sweetfb_noconsole", &quiet, sizeof(quiet)) && quiet != 0) {

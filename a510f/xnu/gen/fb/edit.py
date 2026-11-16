@@ -1061,7 +1061,7 @@ rep("""	if (!fConsolePaused) {
 		int quiet = 0;
 		fConsolePaused = true;
 		{
-			extern void a510f_bootscreen_done(void);       /* bsd/dev/a510f_touch.c */
+			extern "C" void a510f_bootscreen_done(void);   /* bsd/dev/a510f_touch.c */
 			a510f_bootscreen_done();
 		}""")
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
