@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
-index 19e7e00..b3ec97a 100644
+index 19e7e00..43f5651 100644
 --- a/iokit/Kernel/arm/SweetSurface.cpp
 +++ b/iokit/Kernel/arm/SweetSurface.cpp
 @@ -120,6 +120,14 @@ sweet_surface_new_kind(const char *name, uint32_t fmt, uint32_t bpe)
@@ -85,6 +85,132 @@ index 19e7e00..b3ec97a 100644
  	SweetSurface *s = sweet_surface_held(fLock, fRefs, (uint32_t)(uintptr_t)id);
  	if (s == NULL) {
  		return kIOReturnNotFound;
+@@ -1680,11 +1708,125 @@ AppleM2ScalerCSCDriver::newUserClient(task_t owningTask, void *securityID, UInt3
+ 	return kIOReturnSuccess;
+ }
+ 
++static void
++sweet_jpeg_surf(const char *what, uint32_t id)
++{
++	SweetSurface *s = id ? sweet_surface_copy(id) : NULL;
++	if (s != NULL) {
++		IOLog("SWEET JPEG:   %s surface %u %ux%u fmt 0x%x bpr %u planes %u size %u
++", what, id, s->width, s->height,
++		    s->pixelFormat, s->bytesPerRow, s->planeCount, s->allocSize);
++		OSSafeReleaseNULL(s);
++	}
++}
++
++class AppleJPEGUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(AppleJPEGUserClient);
++
++public:
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(AppleJPEGUserClient, IOUserClient);
++
++IOReturn
++AppleJPEGUserClient::clientClose(void)
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++AppleJPEGUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++    IOExternalMethodDispatch *, OSObject *, void *)
++{
++	static uint32_t told;
++	IOReturn ret = (selector == 1 || selector == 3) ? kIOReturnUnsupported : kIOReturnSuccess;
++	if (told++ < 40) {
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		IOLog("SWEET JPEG: %s selector %u scalars in %u out %u struct in %u out %u -> 0x%x
++", name, selector,
++		    args->scalarInputCount, args->scalarOutputCount, args->structureInputSize, args->structureOutputSize, ret);
++		uint32_t len = 0;
++		uint8_t *req = sweet_struct_in(args, &len);
++		if (req != NULL) {
++			for (uint32_t o = 0; o < len && o < 0x80; o += 32) {
++				uint32_t w[8] = {0, 0, 0, 0, 0, 0, 0, 0};
++				memcpy(w, req + o, MIN(32u, len - o));
++				IOLog("SWEET JPEG:   +0x%02x %08x %08x %08x %08x %08x %08x %08x %08x
++", o,
++				    w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
++			}
++			if (len >= 12) {
++				uint32_t a, b, c;
++				memcpy(&a, req, 4);
++				memcpy(&b, req + 4, 4);
++				memcpy(&c, req + 8, 4);
++				sweet_jpeg_surf("+0x0", a);
++				sweet_jpeg_surf("+0x4", b);
++				sweet_jpeg_surf("+0x8", c);
++			}
++			IOFreeData(req, len);
++		}
++	}
++	if (args->scalarOutput != NULL) {
++		for (uint32_t i = 0; i < args->scalarOutputCount; i++) {
++			args->scalarOutput[i] = 0;
++		}
++	}
++	return ret;
++}
++
++class AppleJPEGDriver : public IOService {
++	OSDeclareDefaultStructors(AppleJPEGDriver);
++
++public:
++	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(AppleJPEGDriver, IOService);
++
++IOReturn
++AppleJPEGDriver::newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler)
++{
++	AppleJPEGUserClient *uc = OSTypeAlloc(AppleJPEGUserClient);
++	if (uc == NULL) {
++		return kIOReturnNoMemory;
++	}
++	if (!uc->initWithTask(owningTask, securityID, type) || !uc->attach(this)) {
++		uc->release();
++		return kIOReturnError;
++	}
++	if (!uc->start(this)) {
++		uc->detach(this);
++		uc->release();
++		return kIOReturnError;
++	}
++	char name[32];
++	proc_selfname(name, sizeof(name));
++	IOLog("SWEET JPEG: %s opened AppleJPEGDriver type %u
++", name, (unsigned)type);
++	*handler = uc;
++	return kIOReturnSuccess;
++}
++
+ void sweet_scaler_publish(IOService *provider);
+ 
+ void
+ sweet_scaler_publish(IOService *provider)
+ {
++	{
++		AppleJPEGDriver *jd = OSTypeAlloc(AppleJPEGDriver);
++		if (jd != NULL && jd->init() && jd->attach(provider)) {
++			jd->registerService();
++			IOLog("SWEET JPEG: stand-in AppleJPEGDriver published (logs calls, no codec yet)
++");
++		}
++		OSSafeReleaseNULL(jd);
++	}
+ 	AppleM2ScalerCSCDriver *sc = OSTypeAlloc(AppleM2ScalerCSCDriver);
+ 	if (sc != NULL && sc->init() && sc->attach(provider)) {
+ 		sc->registerService();
 diff --git a/iokit/Kernel/arm/SweetSurface.h b/iokit/Kernel/arm/SweetSurface.h
 index e5d2df5..f4d0746 100644
 --- a/iokit/Kernel/arm/SweetSurface.h
