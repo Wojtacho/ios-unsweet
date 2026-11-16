@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..e70521d
+index 0000000..3035a49
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,1349 @@
+@@ -0,0 +1,1353 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -1156,6 +1156,10 @@ index 0000000..e70521d
 +	}
 +	started = true;
 +	a510f_clock_floor();
++	{
++		extern void a510f_bg_start(void);     /* osfmk/arm64/a510f_prof.c */
++		a510f_bg_start();
++	}
 +	t.mode = 0;
 +	PE_parse_boot_argn("a510ftouch", &t.mode, sizeof(t.mode));
 +	PE_parse_boot_argn("a510fcpufreq", &a510f_cpufreq, sizeof(a510f_cpufreq));

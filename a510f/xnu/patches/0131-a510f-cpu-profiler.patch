@@ -2,7 +2,7 @@ diff --git a/osfmk/arm64/a510f_prof.c b/osfmk/arm64/a510f_prof.c
 new file mode 100644
 --- /dev/null
 +++ b/osfmk/arm64/a510f_prof.c
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,466 @@
 +/*
 + * A510F: sampling CPU profiler (autopilot "prof SECONDS", round 46).
 + *
@@ -30,6 +30,7 @@ new file mode 100644
 +#include <arm/machine_routines.h>
 +#include <mach/vm_param.h>
 +#include <string.h>
++#include <pexpert/pexpert.h>
 +
 +extern char *proc_name_address(void *p);
 +extern pmap_paddr_t pmap_find_pa_nofault(pmap_t pmap, addr64_t va);
@@ -383,6 +384,88 @@ new file mode 100644
 +	prof_seconds = seconds;
 +	thread_t th;
 +	if (kernel_thread_start(prof_thread, NULL, &th) == KERN_SUCCESS) {
++		thread_deallocate(th);
++	}
++}
++
++/*
++ * A510F round 49: the CPU profile (round 48) showed WeatherWidget and
++ * CalendarWidgetExtension re-rendering and re-encoding their timelines without
++ * end (SwiftUI/AttributeGraph/Swift encoders, ~70% of a core each) and the
++ * wallpaper extension CollectionsPoster busy, beside SpringBoard and
++ * backboardd. They get the darwin background policy (what setpriority
++ * PRIO_DARWIN_PROCESS sets: lowest CPU/IO priority): they keep running and
++ * rendering, but no longer compete with the UI. A kernel thread applies it
++ * every 3 s to matching processes (p_comm, 16 chars). Boot-arg sweetbg=0: off.
++ */
++#include <kern/policy_internal.h>
++
++static const char *const a510f_bg_names[] = {
++	"WeatherWidget", "CalendarWidgetEx", "CollectionsPoste", "MusicWidgets", "ScreenTimeWidget",
++	"WeatherPoster", "PhotosPosterProv",
++};
++
++static void
++a510f_bg_thread(void *arg, wait_result_t wr)
++{
++	(void)arg;
++	(void)wr;
++	static task_t done[64];
++	int ndone = 0;
++	for (;;) {
++		task_t t;
++		task_t todo[16];
++		int ntodo = 0;
++		lck_mtx_lock(&tasks_threads_lock);
++		queue_iterate(&tasks, t, task_t, tasks) {
++			void *bp = get_bsdtask_info(t);
++			const char *n = bp ? proc_name_address(bp) : NULL;
++			if (n == NULL || ntodo >= 16) {
++				continue;
++			}
++			bool want = false;
++			for (unsigned i = 0; i < sizeof(a510f_bg_names) / sizeof(a510f_bg_names[0]); i++) {
++				want |= strncmp(n, a510f_bg_names[i], 16) == 0;
++			}
++			bool seen = false;
++			for (int i = 0; i < ndone; i++) {
++				seen |= done[i] == t;
++			}
++			if (want && !seen) {
++				task_reference(t);
++				todo[ntodo++] = t;
++			}
++		}
++		lck_mtx_unlock(&tasks_threads_lock);
++		for (int i = 0; i < ntodo; i++) {
++			void *bp = get_bsdtask_info(todo[i]);
++			proc_set_task_policy(todo[i], TASK_POLICY_EXTERNAL, TASK_POLICY_DARWIN_BG, TASK_POLICY_ENABLE);
++			printf("A510F BG: %s -> darwin background\n", bp ? proc_name_address(bp) : "?");
++			if (ndone < 64) {
++				done[ndone++] = todo[i];   /* pointer only: a new task may reuse it, harmless */
++			} else {
++				ndone = 0;
++			}
++			task_deallocate(todo[i]);
++		}
++		assert_wait_timeout((event_t)&a510f_bg_names, THREAD_UNINT, 3, NSEC_PER_SEC);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++}
++
++void a510f_bg_start(void);
++
++void
++a510f_bg_start(void)
++{
++	static int started;
++	int on = 1;
++	(void)PE_parse_boot_argn("sweetbg", &on, sizeof(on));
++	if (started++ || !on) {
++		return;
++	}
++	thread_t th;
++	if (kernel_thread_start(a510f_bg_thread, NULL, &th) == KERN_SUCCESS) {
 +		thread_deallocate(th);
 +	}
 +}
