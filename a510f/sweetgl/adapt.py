@@ -1378,3 +1378,29 @@ static uint64_t surf_res_bytes;'''),
 	surf_res_bytes += need;
 	pipe_resource_reference(&surf_res[victim].res, res);'''),
 ])
+
+
+# Round 51 (speed): sgl_Flush was glFinish: backboardd waited ~20 ms a frame
+# for the GPU before building the next one. The kernel already waits for the
+# queued GPU jobs where it matters: the panel copy of a presented surface and
+# IOSurface CPU locks (SweetMali queue + trapLock). glFlush hands the batch to
+# the GPU queue and returns, so the CPU builds frame N+1 while the GPU draws
+# frame N. SWEETGL_FINISH=1: the old wait.
+edit('eagl.c', [
+    ('''	pend_clear_apply();
+	uint64_t t0 = mach_absolute_time();
+	glFinish();
+	flush_stats(t0, mach_absolute_time());''', '''	pend_clear_apply();
+	uint64_t t0 = mach_absolute_time();
+	static int finish = -1;
+	if (finish < 0) {
+		const char *e = getenv("SWEETGL_FINISH");
+		finish = e != NULL && e[0] == '1';
+	}
+	if (finish) {
+		glFinish();
+	} else {
+		glFlush();
+	}
+	flush_stats(t0, mach_absolute_time());'''),
+])
