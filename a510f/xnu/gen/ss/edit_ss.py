@@ -133,7 +133,7 @@ sweet_jpeg_surf(const char *what, uint32_t id)
 {
 	SweetSurface *s = id ? sweet_surface_copy(id) : NULL;
 	if (s != NULL) {
-		IOLog("SWEET JPEG:   %s surface %u %ux%u fmt 0x%x bpr %u planes %u size %u\n", what, id, s->width, s->height,
+		IOLog("SWEET JPEG:   %s surface %u %ux%u fmt 0x%x bpr %u planes %u size %u\\n", what, id, s->width, s->height,
 		    s->pixelFormat, s->bytesPerRow, s->planeCount, s->allocSize);
 		OSSafeReleaseNULL(s);
 	}
@@ -166,7 +166,7 @@ AppleJPEGUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
 	if (told++ < 40) {
 		char name[32];
 		proc_selfname(name, sizeof(name));
-		IOLog("SWEET JPEG: %s selector %u scalars in %u out %u struct in %u out %u -> 0x%x\n", name, selector,
+		IOLog("SWEET JPEG: %s selector %u scalars in %u out %u struct in %u out %u -> 0x%x\\n", name, selector,
 		    args->scalarInputCount, args->scalarOutputCount, args->structureInputSize, args->structureOutputSize, ret);
 		uint32_t len = 0;
 		uint8_t *req = sweet_struct_in(args, &len);
@@ -174,7 +174,7 @@ AppleJPEGUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
 			for (uint32_t o = 0; o < len && o < 0x80; o += 32) {
 				uint32_t w[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 				memcpy(w, req + o, MIN(32u, len - o));
-				IOLog("SWEET JPEG:   +0x%02x %08x %08x %08x %08x %08x %08x %08x %08x\n", o,
+				IOLog("SWEET JPEG:   +0x%02x %08x %08x %08x %08x %08x %08x %08x %08x\\n", o,
 				    w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
 			}
 			if (len >= 12) {
@@ -224,7 +224,7 @@ AppleJPEGDriver::newUserClient(task_t owningTask, void *securityID, UInt32 type,
 	}
 	char name[32];
 	proc_selfname(name, sizeof(name));
-	IOLog("SWEET JPEG: %s opened AppleJPEGDriver type %u\n", name, (unsigned)type);
+	IOLog("SWEET JPEG: %s opened AppleJPEGDriver type %u\\n", name, (unsigned)type);
 	*handler = uc;
 	return kIOReturnSuccess;
 }
@@ -238,7 +238,7 @@ sweet_scaler_publish(IOService *provider)
 		AppleJPEGDriver *jd = OSTypeAlloc(AppleJPEGDriver);
 		if (jd != NULL && jd->init() && jd->attach(provider)) {
 			jd->registerService();
-			IOLog("SWEET JPEG: stand-in AppleJPEGDriver published (logs calls, no codec yet)\n");
+			IOLog("SWEET JPEG: stand-in AppleJPEGDriver published (logs calls, no codec yet)\\n");
 		}
 		OSSafeReleaseNULL(jd);
 	}"""),

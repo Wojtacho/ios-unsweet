@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
-index 19e7e00..43f5651 100644
+index 19e7e00..b88aff9 100644
 --- a/iokit/Kernel/arm/SweetSurface.cpp
 +++ b/iokit/Kernel/arm/SweetSurface.cpp
 @@ -120,6 +120,14 @@ sweet_surface_new_kind(const char *name, uint32_t fmt, uint32_t bpe)
@@ -85,7 +85,7 @@ index 19e7e00..43f5651 100644
  	SweetSurface *s = sweet_surface_held(fLock, fRefs, (uint32_t)(uintptr_t)id);
  	if (s == NULL) {
  		return kIOReturnNotFound;
-@@ -1680,11 +1708,125 @@ AppleM2ScalerCSCDriver::newUserClient(task_t owningTask, void *securityID, UInt3
+@@ -1680,11 +1708,120 @@ AppleM2ScalerCSCDriver::newUserClient(task_t owningTask, void *securityID, UInt3
  	return kIOReturnSuccess;
  }
  
@@ -94,8 +94,7 @@ index 19e7e00..43f5651 100644
 +{
 +	SweetSurface *s = id ? sweet_surface_copy(id) : NULL;
 +	if (s != NULL) {
-+		IOLog("SWEET JPEG:   %s surface %u %ux%u fmt 0x%x bpr %u planes %u size %u
-+", what, id, s->width, s->height,
++		IOLog("SWEET JPEG:   %s surface %u %ux%u fmt 0x%x bpr %u planes %u size %u\n", what, id, s->width, s->height,
 +		    s->pixelFormat, s->bytesPerRow, s->planeCount, s->allocSize);
 +		OSSafeReleaseNULL(s);
 +	}
@@ -128,8 +127,7 @@ index 19e7e00..43f5651 100644
 +	if (told++ < 40) {
 +		char name[32];
 +		proc_selfname(name, sizeof(name));
-+		IOLog("SWEET JPEG: %s selector %u scalars in %u out %u struct in %u out %u -> 0x%x
-+", name, selector,
++		IOLog("SWEET JPEG: %s selector %u scalars in %u out %u struct in %u out %u -> 0x%x\n", name, selector,
 +		    args->scalarInputCount, args->scalarOutputCount, args->structureInputSize, args->structureOutputSize, ret);
 +		uint32_t len = 0;
 +		uint8_t *req = sweet_struct_in(args, &len);
@@ -137,8 +135,7 @@ index 19e7e00..43f5651 100644
 +			for (uint32_t o = 0; o < len && o < 0x80; o += 32) {
 +				uint32_t w[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 +				memcpy(w, req + o, MIN(32u, len - o));
-+				IOLog("SWEET JPEG:   +0x%02x %08x %08x %08x %08x %08x %08x %08x %08x
-+", o,
++				IOLog("SWEET JPEG:   +0x%02x %08x %08x %08x %08x %08x %08x %08x %08x\n", o,
 +				    w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
 +			}
 +			if (len >= 12) {
@@ -188,8 +185,7 @@ index 19e7e00..43f5651 100644
 +	}
 +	char name[32];
 +	proc_selfname(name, sizeof(name));
-+	IOLog("SWEET JPEG: %s opened AppleJPEGDriver type %u
-+", name, (unsigned)type);
++	IOLog("SWEET JPEG: %s opened AppleJPEGDriver type %u\n", name, (unsigned)type);
 +	*handler = uc;
 +	return kIOReturnSuccess;
 +}
@@ -203,8 +199,7 @@ index 19e7e00..43f5651 100644
 +		AppleJPEGDriver *jd = OSTypeAlloc(AppleJPEGDriver);
 +		if (jd != NULL && jd->init() && jd->attach(provider)) {
 +			jd->registerService();
-+			IOLog("SWEET JPEG: stand-in AppleJPEGDriver published (logs calls, no codec yet)
-+");
++			IOLog("SWEET JPEG: stand-in AppleJPEGDriver published (logs calls, no codec yet)\n");
 +		}
 +		OSSafeReleaseNULL(jd);
 +	}
