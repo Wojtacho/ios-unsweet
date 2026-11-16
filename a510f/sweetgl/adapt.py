@@ -1012,3 +1012,12 @@ edit('eagl.c', [
 			    (uintptr_t)IOSurfaceGetBaseAddress(s)) + ((uintptr_t)IOSurfaceGetBaseAddress(s) & vm_page_mask)),'''),
     ('''	dump_shaders = trace_left > 0;''', '''	dump_shaders = trace_left > 0 || getenv("SWEETGL_DUMPSH") != NULL;'''),
 ])
+
+
+# Round 42 trace: windows also on full-screen draws (1242x2208), for the
+# weather widget gradient (CA dithers with a 32x32 noise texture and
+# noise_scale: values?) and the app switcher's black background.
+edit('eagl.c', [
+    ('''#define WIN_TRIGGER(w, h) ((w) == 1194 && (h) == 1164)''',
+     '''#define WIN_TRIGGER(w, h) (((w) == 1194 && (h) == 1164) || ((w) == 1242 && (h) == 2208))'''),
+])
