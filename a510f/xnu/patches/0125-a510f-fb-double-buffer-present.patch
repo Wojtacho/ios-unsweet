@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 0f8e61a..2fbd1cc 100644
+index 0f8e61a..0ef69e8 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -82,6 +82,25 @@ enum {
@@ -446,7 +446,7 @@ index 0f8e61a..2fbd1cc 100644
 +			absolutetime_to_nanoseconds(mach_absolute_time() - fb->fOffAt, &ns);
 +			IOLog("SWEET FB: fade step %u at off +%llu ms%s\n", fstep, ns / 1000000,
 +			    fb->fHaveLast ? "" : " (no last frame)");
- 		}
++		}
 +		if (fstep >= 1 && fstep <= 7 && fb->fHaveLast) {
 +			/* eased brightness out of 256: 80%, 62%, 46%, 32%, 20%, 11%, 5% */
 +			static const uint16_t bright[8] = { 256, 205, 159, 118, 82, 51, 28, 13 };
@@ -460,7 +460,7 @@ index 0f8e61a..2fbd1cc 100644
 +			bzero((void *)back, (size_t)fb->fRowBytes * fb->fHeight);
 +			fb->flipTo(fb->fShown ^ 1);
 +			IOLockUnlock(fb->fPresentLock);
-+		}
+ 		}
 +		IOLockLock(fb->fLock);
 +		fb->fPresentBusy = false;
 +		IOLockWakeup(fb->fLock, &fb->fPresentBusy, false);
@@ -495,7 +495,7 @@ index 0f8e61a..2fbd1cc 100644
  
  /*
   * A510F: layer pixel formats. Every 4-byte format used to be copied as if it
-@@ -412,19 +822,142 @@ static uint64_t sweet_fb_swap_count;
+@@ -412,24 +822,151 @@ static uint64_t sweet_fb_swap_count;
  void
  AppleCLCD::swap(const uint8_t *rec)
  {
@@ -640,7 +640,16 @@ index 0f8e61a..2fbd1cc 100644
  
  
  	if (!fConsolePaused) {
-@@ -448,8 +981,35 @@ AppleCLCD::present(const uint8_t *rec)
+ 		int quiet = 0;
+ 		fConsolePaused = true;
++		{
++			extern void a510f_bootscreen_done(void);       /* bsd/dev/a510f_touch.c */
++			a510f_bootscreen_done();
++		}
+ 		if (PE_parse_boot_argn("sweetfb_noconsole", &quiet, sizeof(quiet)) && quiet != 0) {
+ 			/* Not PE_initialize_console(kPEDisableScreen): its console switch
+ 			 * writes the read-only-late cons_ops_index and panics. */
+@@ -448,8 +985,35 @@ AppleCLCD::present(const uint8_t *rec)
  		if (!(mask & (1u << layer)) || id == 0) {
  			continue;
  		}
@@ -678,7 +687,7 @@ index 0f8e61a..2fbd1cc 100644
  			sweet_fb_swaps_logged++;
  			IOLog("SWEET FB: swap %u layer %u surface %u %ux%u fmt 0x%x bpr %u a %d,%d %ux%u b %d,%d %dx%d\n",
  			    get32(rec, 0x50), layer, id, s ? s->width : 0, s ? s->height : 0,
-@@ -460,7 +1020,16 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -460,7 +1024,16 @@ AppleCLCD::present(const uint8_t *rec)
  			OSSafeReleaseNULL(s);
  			continue;
  		}
@@ -696,7 +705,7 @@ index 0f8e61a..2fbd1cc 100644
  		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
  		sweet_fb_note_format(s->pixelFormat, bpe, s->width, s->height);
  		if (w <= 0 || h <= 0) {
-@@ -473,8 +1042,18 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -473,8 +1046,18 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -715,7 +724,7 @@ index 0f8e61a..2fbd1cc 100644
  			s->release();
  			continue;
  		}
-@@ -511,13 +1090,41 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -511,13 +1094,41 @@ AppleCLCD::present(const uint8_t *rec)
  		}
  		if (src != 0 && bpe == 4) {
  			for (int32_t y = 0; y < h; y++) {
@@ -758,7 +767,7 @@ index 0f8e61a..2fbd1cc 100644
  }
  
  /*
-@@ -547,7 +1154,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -547,7 +1158,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	if (!fFitCleared) {
  		/* Black pillarbox (the console text was there). */
  		for (uint32_t y = 0; y < fHeight; y++) {
@@ -767,7 +776,7 @@ index 0f8e61a..2fbd1cc 100644
  		}
  		fFitCleared = true;
  	}
-@@ -570,19 +1177,53 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -570,19 +1181,53 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	const uint8_t *base = (const uint8_t *)(src + s->offset);
  	const uint32_t fmt = s->pixelFormat;
  	const bool convert = fmt == SWEET_FMT_L10R || fmt == SWEET_FMT_W30R;
@@ -823,7 +832,7 @@ index 0f8e61a..2fbd1cc 100644
  	}
  }
  
-@@ -737,7 +1378,34 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -737,7 +1382,34 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			if (off != fFB->fPowerOff) {
  				fFB->fPowerOff = off;
  				fFB->fFadeStep = 0;

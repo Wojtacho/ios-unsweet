@@ -2,7 +2,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index 68612db..281011b 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -445,6 +445,121 @@ exec_add_user_string(struct image_params *imgp, user_addr_t str, int seg, boolea
+@@ -445,6 +445,124 @@ exec_add_user_string(struct image_params *imgp, user_addr_t str, int seg, boolea
  	return error;
  }
  
@@ -117,6 +117,9 @@ index 68612db..281011b 100644
 +			e++;
 +		}
 +	}
++	/* A510F boot screen progress (bsd/dev/a510f_touch.c) */
++	extern void a510f_bootscreen_exec(const char *name);
++	a510f_bootscreen_exec(base);
 +	return 0;
 +}
 +#endif

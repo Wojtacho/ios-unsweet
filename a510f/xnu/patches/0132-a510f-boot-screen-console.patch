@@ -1,0 +1,20 @@
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -284,6 +284,18 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	sweet_log_append(c, size);
++	{
++		/* A510F boot screen: boot-arg sweetboot=1 keeps console text off the screen from the first line */
++		static int sweet_boot_checked;
++		if (!sweet_boot_checked && PE_state.bootArgs != NULL) {
++			int v = 0;
++			sweet_boot_checked = 1;
++			if (PE_parse_boot_argn("sweetboot", &v, sizeof(v)) && v) {
++				sweet_console_muted = 1;
++			}
++		}
++	}
+ 	if (sweet_console_muted && !panic_active()) {
+ 		return;
+ 	}
+ #endif

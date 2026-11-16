@@ -1051,3 +1051,18 @@ rep("""				fRowBuf[px] = fDim ? (v >> fDim) & (0x01010101u * (0xffu >> fDim)) : 
 				    ((((v >> 8) & 0x00ff00ffu) * (256 - fDim)) & 0xff00ff00u)) : v;""")
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
 print('ok smooth fade')
+
+# Round 50: the boot screen (bsd/dev/a510f_touch.c, sweetboot=1) draws into
+# the boot framebuffer until the GUI's first frame: stop it here.
+s = open(p, encoding='utf-8').read()
+rep("""	if (!fConsolePaused) {
+		int quiet = 0;
+		fConsolePaused = true;""", """	if (!fConsolePaused) {
+		int quiet = 0;
+		fConsolePaused = true;
+		{
+			extern void a510f_bootscreen_done(void);       /* bsd/dev/a510f_touch.c */
+			a510f_bootscreen_done();
+		}""")
+open(p, 'w', encoding='utf-8', newline='\n').write(s)
+print('ok bootscreen done')

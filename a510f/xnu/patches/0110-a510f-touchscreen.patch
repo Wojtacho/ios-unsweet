@@ -12,10 +12,10 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..3035a49
+index 0000000..61f81fc
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,1353 @@
+@@ -0,0 +1,1534 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -1147,6 +1147,186 @@ index 0000000..3035a49
 +	}
 +}
 +
++
++/*
++ * A510F boot screen (boot-arg sweetboot=1, round 50): no console text, the
++ * Apple logo and a progress bar on the boot framebuffer until the GUI's
++ * first frame (SweetFramebuffer calls a510f_bootscreen_done).
++ *   logo: 8-bit coverage bitmap at the end of the OTA partition (sweet_mmc.c,
++ *         written from the PC by twrp-write/auto.py logo: the glyph U+F8FF of
++ *         the phone's own Helvetica, never in git), drawn white on black
++ *   bar:  rises to a floor set by milestones (storage, launchd, each program
++ *         started, SpringBoard) and creeps toward the next one meanwhile
++ */
++static struct {
++	int on;
++	int done;
++	uint32_t floor_pm, shown_pm;       /* permille */
++	uint32_t execs;
++	const uint8_t *logo;
++	uint32_t lw, lh;
++	volatile uint32_t *fb;
++	uint32_t w, h, stride;             /* stride in pixels */
++	uint64_t last_floor_at;
++	bool drawn_logo;
++} bs;
++
++#define BS_BAR_W        420u
++#define BS_BAR_H        8u
++#define BS_BAR_TRACK    0xff3a3a3au
++#define BS_BAR_FILL     0xffffffffu
++
++static void
++bs_bar(uint32_t pm)
++{
++	if (bs.fb == NULL) {
++		return;
++	}
++	uint32_t x0 = (bs.w - BS_BAR_W) / 2, y0 = bs.h / 2 + 330;
++	uint32_t fill = BS_BAR_W * (pm > 1000 ? 1000 : pm) / 1000;
++	for (uint32_t y = 0; y < BS_BAR_H; y++) {
++		/* rounded ends: radius BS_BAR_H / 2 */
++		int dy = (int)(2 * y + 1) - (int)BS_BAR_H;
++		uint32_t inset = 0;
++		while (inset < BS_BAR_H / 2) {
++			int dx = (int)BS_BAR_H - (int)(2 * inset + 1);
++			if (dx * dx + dy * dy <= (int)(BS_BAR_H * BS_BAR_H)) {
++				break;
++			}
++			inset++;
++		}
++		volatile uint32_t *row = bs.fb + (uint64_t)(y0 + y) * bs.stride + x0;
++		for (uint32_t x = inset; x < BS_BAR_W - inset; x++) {
++			row[x] = x < fill ? BS_BAR_FILL : BS_BAR_TRACK;
++		}
++	}
++}
++
++static void
++bs_logo(void)
++{
++	if (bs.fb == NULL || bs.logo == NULL || bs.drawn_logo) {
++		return;
++	}
++	bs.drawn_logo = true;
++	uint32_t x0 = (bs.w - bs.lw) / 2, y0 = bs.h / 2 - 40 - bs.lh / 2;
++	for (uint32_t y = 0; y < bs.lh && y0 + y < bs.h; y++) {
++		volatile uint32_t *row = bs.fb + (uint64_t)(y0 + y) * bs.stride + x0;
++		const uint8_t *a = bs.logo + (uint64_t)y * bs.lw;
++		for (uint32_t x = 0; x < bs.lw && x0 + x < bs.w; x++) {
++			uint32_t v = a[x];
++			row[x] = 0xff000000u | (v << 16) | (v << 8) | v;
++		}
++	}
++}
++
++static void
++bs_thread(void *arg, wait_result_t wr)
++{
++	(void)arg;
++	(void)wr;
++	PE_Video v;
++	PE_current_console(&v);
++	if (v.v_baseAddr == 0 || v.v_width == 0 || v.v_height == 0 || v.v_rowBytes < v.v_width * 4) {
++		printf("A510F BOOT: no boot framebuffer\n");
++		return;
++	}
++	bs.w = (uint32_t)v.v_width;
++	bs.h = (uint32_t)v.v_height;
++	bs.stride = (uint32_t)v.v_rowBytes / 4;
++	bs.fb = (volatile uint32_t *)ml_io_map(v.v_baseAddr, (vm_size_t)v.v_rowBytes * v.v_height);
++	if (bs.fb == NULL) {
++		return;
++	}
++	for (uint32_t y = 0; y < bs.h; y++) {
++		for (uint32_t x = 0; x < bs.w; x++) {
++			bs.fb[(uint64_t)y * bs.stride + x] = 0xff000000u;
++		}
++	}
++	printf("A510F BOOT: boot screen %ux%u\n", bs.w, bs.h);
++	while (!bs.done) {
++		bs_logo();
++		/* toward the floor quickly, then creep: +1 permille per 150 ms, at most 60 past the floor */
++		uint32_t target = bs.floor_pm;
++		if (bs.shown_pm < target) {
++			bs.shown_pm += (target - bs.shown_pm + 7) / 8;
++		} else if (bs.shown_pm < target + 60 && bs.shown_pm < 980) {
++			bs.shown_pm++;
++		}
++		if (!bs.done) {
++			bs_bar(bs.shown_pm);
++		}
++		IOSleep(150);
++	}
++	printf("A510F BOOT: done at %u permille, %u programs\n", bs.shown_pm, bs.execs);
++}
++
++static void
++bs_floor(uint32_t pm)
++{
++	if (pm > bs.floor_pm) {
++		bs.floor_pm = pm;
++	}
++}
++
++void a510f_bootscreen_logo(const uint8_t *alpha, uint32_t w, uint32_t h);
++void a510f_bootscreen_exec(const char *name);
++void a510f_bootscreen_done(void);
++
++static void
++a510f_bootscreen_start(void)
++{
++	static bool started;
++	int on = 0;
++	if (started) {
++		return;
++	}
++	started = true;
++	if (!PE_parse_boot_argn("sweetboot", &on, sizeof(on)) || !on) {
++		return;
++	}
++	bs.on = 1;
++	bs_floor(80);
++	thread_t th;
++	if (kernel_thread_start(bs_thread, NULL, &th) == KERN_SUCCESS) {
++		thread_deallocate(th);
++	}
++}
++
++void
++a510f_bootscreen_logo(const uint8_t *alpha, uint32_t w, uint32_t h)
++{
++	if (w == 0 || h == 0 || w > 1000 || h > 1000) {
++		return;
++	}
++	bs.lw = w;
++	bs.lh = h;
++	bs.logo = alpha;
++	printf("A510F BOOT: logo %ux%u\n", w, h);
++}
++
++void
++a510f_bootscreen_exec(const char *name)
++{
++	if (!bs.on || bs.done) {
++		return;
++	}
++	bs.execs++;
++	if (strcmp(name, "launchd") == 0) {
++		bs_floor(150);
++	} else if (strcmp(name, "SpringBoard") == 0) {
++		bs_floor(900);
++	} else {
++		bs_floor(150 + 25 * (bs.execs < 30 ? bs.execs : 30));
++	}
++}
++
++void
++a510f_bootscreen_done(void)
++{
++	bs.done = 1;
++}
++
 +void
 +a510f_touch_start(void)
 +{
@@ -1156,6 +1336,7 @@ index 0000000..3035a49
 +	}
 +	started = true;
 +	a510f_clock_floor();
++	a510f_bootscreen_start();
 +	{
 +		extern void a510f_bg_start(void);     /* osfmk/arm64/a510f_prof.c */
 +		a510f_bg_start();
@@ -1370,7 +1551,7 @@ index 0000000..3035a49
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..e29642e 100644
+index 6f8dba3..a27616d 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
 @@ -33,6 +33,7 @@
@@ -1402,7 +1583,7 @@ index 6f8dba3..e29642e 100644
  
  static inline uint32_t
  mmc_rd(uint32_t off)
-@@ -316,6 +331,302 @@ mmc_rdata(uint32_t op, uint32_t arg, uint32_t blksz, uint32_t nblk, uint8_t *dst
+@@ -316,6 +331,303 @@ mmc_rdata(uint32_t op, uint32_t arg, uint32_t blksz, uint32_t nblk, uint8_t *dst
  	return got == total ? 0 : EIO;
  }
  
@@ -1443,6 +1624,7 @@ index 6f8dba3..e29642e 100644
 +static uint8_t *mmc_alloc(size_t size);
 +static void mmc_log_start(void);
 +static void sweet_auto_start(void);
++static void sweet_bootlogo_load(void);
 +
 +static struct {
 +	bool on;                                /* passed the self-test */
@@ -1705,7 +1887,7 @@ index 6f8dba3..e29642e 100644
  /* Read nblk 512-byte sectors at lba (card address) into dst. */
  static int
  mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
-@@ -326,8 +637,44 @@ mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
+@@ -326,8 +638,44 @@ mmc_read(uint64_t lba, uint32_t nblk, uint8_t *dst)
  	if (nblk > MAX_XFER_BLOCKS || lba + nblk > UINT32_MAX) {
  		return EINVAL;
  	}
@@ -1752,7 +1934,7 @@ index 6f8dba3..e29642e 100644
  }
  
  /* Copy up to want bytes from src into the FIFO's free entries. */
-@@ -667,7 +1014,7 @@ void sweet_mmc_probe(void);
+@@ -667,7 +1015,7 @@ void sweet_mmc_probe(void);
  void
  sweet_mmc_probe(void)
  {
@@ -1761,7 +1943,7 @@ index 6f8dba3..e29642e 100644
  	int error = mmc_take_over_host(true);
  	if (!error) {
  		error = mmc_gpt(NULL);
-@@ -772,7 +1119,7 @@ sweet_mmc_probe(void)
+@@ -772,7 +1120,7 @@ sweet_mmc_probe(void)
  			kfree_data(back, MMC_SECTOR);
  		}
  	}
@@ -1770,7 +1952,7 @@ index 6f8dba3..e29642e 100644
  	printf("SWEET MMC: probe %s (%d)\n", error ? "FAILED" : "done", error);
  }
  
-@@ -819,7 +1166,7 @@ sweet_mmc_strategy(buf_t bp)
+@@ -819,7 +1167,7 @@ sweet_mmc_strategy(buf_t bp)
  		goto done;
  	}
  
@@ -1779,7 +1961,7 @@ index 6f8dba3..e29642e 100644
  	for (uint32_t done = 0; done < count;) {
  		uint32_t nblk = MIN((count - done) / MMC_SECTOR, MAX_XFER_BLOCKS);
  		uint64_t lba = sm.first_lba + (off + done) / MMC_SECTOR;
-@@ -831,7 +1178,7 @@ sweet_mmc_strategy(buf_t bp)
+@@ -831,7 +1179,7 @@ sweet_mmc_strategy(buf_t bp)
  		done += nblk * MMC_SECTOR;
  		buf_setresid(bp, count - done);
  	}
@@ -1788,7 +1970,7 @@ index 6f8dba3..e29642e 100644
  	buf_unmap(bp);
  
  done:
-@@ -871,9 +1218,9 @@ sweet_mmc_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag,
+@@ -871,9 +1219,9 @@ sweet_mmc_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag,
  		*f = sm.writable ? 1 : 0;
  		return 0;
  	case DKIOCSYNCHRONIZE: {
@@ -1800,7 +1982,7 @@ index 6f8dba3..e29642e 100644
  		return error;
  	}
  	case DKIOCGETMAXBLOCKCOUNTREAD:
-@@ -960,12 +1307,15 @@ sweet_mmc_init(void)
+@@ -960,12 +1308,15 @@ sweet_mmc_init(void)
  	PE_parse_boot_argn("mmcrw", &rw, sizeof(rw));
  	sm.secsize = DEV_BSIZE;
  
@@ -1818,15 +2000,16 @@ index 6f8dba3..e29642e 100644
  	if (error) {
  		return error;
  	}
-@@ -986,9 +1336,948 @@ sweet_mmc_init(void)
+@@ -986,9 +1337,980 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
 +	mmc_log_start();
-+	sweet_auto_start();
-+	/* A510F touchscreen (boot-arg a510ftouch, bsd/dev/a510f_touch.c). */
++	/* A510F touchscreen (boot-arg a510ftouch, bsd/dev/a510f_touch.c); also the boot screen */
 +	extern void a510f_touch_start(void);
 +	a510f_touch_start();
++	sweet_bootlogo_load();
++	sweet_auto_start();
  	return 0;
  }
  
@@ -2685,6 +2868,37 @@ index 6f8dba3..e29642e 100644
 +		auto_guard_disarm();
 +	}
 +	printf("SWEET AUTO: script done\n");
++}
++
++/*
++ * A510F boot logo: the last 384 sectors of the OTA partition (after the
++ * screenshot ring), "SWLOGO01", width, height, then width x height coverage
++ * bytes from sector 1 on. Written by twrp-write/auto.py logo.
++ */
++#define BOOTLOGO_SECT   384u
++
++static void
++sweet_bootlogo_load(void)
++{
++	uint64_t lba = 0, n = 0;
++	mmc_lock();
++	int error = mmc_part_find("OTA", &lba, &n);
++	uint8_t *b = error || n < 2 * BOOTLOGO_SECT ? NULL : mmc_alloc(BOOTLOGO_SECT * MMC_SECTOR);
++	if (b != NULL) {
++		error = mmc_read(lba + n - BOOTLOGO_SECT, BOOTLOGO_SECT, b);
++	}
++	mmc_unlock();
++	uint32_t w = 0, h = 0;
++	if (b != NULL && !error && memcmp(b, "SWLOGO01", 8) == 0) {
++		memcpy(&w, b + 8, 4);
++		memcpy(&h, b + 12, 4);
++		if ((uint64_t)w * h <= (BOOTLOGO_SECT - 1) * MMC_SECTOR) {
++			extern void a510f_bootscreen_logo(const uint8_t *alpha, uint32_t w, uint32_t h);
++			a510f_bootscreen_logo(b + MMC_SECTOR, w, h);
++			return;         /* b stays: the boot screen draws from it */
++		}
++	}
++	printf("SWEET MMC: no boot logo (error %d)\n", error);
 +}
 +
 +static void
