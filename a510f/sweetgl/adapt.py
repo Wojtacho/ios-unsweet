@@ -1188,3 +1188,122 @@ sgl_all_highp(char *src)'''),
 	}
 	if (base == NULL || bpe == 0 || pitch % bpe != 0) {'''),
 ])
+
+
+# Round 46: where each texture came from (IOSurface id/format/size, copy or
+# CPU upload, pixel mean at the time), and the first draw of a texture over
+# at least half the screen logs it: the app switcher's background (texture
+# 194 in round 45, smaller than the BIG threshold) and the home screen folder
+# icon's missing frosted background.
+edit('eagl.c', [
+    ('''void
+sgl_DrawArrays(void *rctx, GLenum mode, GLint first, GLsizei count)''', '''#define FCC_C(c) ((c) >= 0x20 && (c) < 0x7f ? (c) : '.')
+#define FCC(f) FCC_C((f) >> 24), FCC_C(((f) >> 16) & 0xff), FCC_C(((f) >> 8) & 0xff), FCC_C((f) & 0xff)
+
+static struct {
+	uint32_t surf, fourcc;
+	uint16_t w, h;
+	char mean[16];
+	char kind;              /* s: IOSurface import, c: IOSurface copy, t: TexImage2D */
+	uint8_t checks, logged;
+} tex_src[8192];
+
+static void
+sgl_tex_note(GLint tex, char kind, uint32_t surf, uint32_t fourcc, size_t w, size_t h, const void *base, size_t pitch,
+    size_t bpe)
+{
+	if (tex <= 0 || tex >= 8192) {
+		return;
+	}
+	tex_src[tex].surf = surf;
+	tex_src[tex].fourcc = fourcc;
+	tex_src[tex].w = (uint16_t)w;
+	tex_src[tex].h = (uint16_t)h;
+	tex_src[tex].kind = kind;
+	tex_src[tex].checks = 0;
+	tex_src[tex].logged = 0;
+	sgl_grid_mean(bpe == 4 ? base : NULL, w, h, pitch, tex_src[tex].mean, sizeof(tex_src[tex].mean));
+}
+
+/* before a draw: unit 0's texture drawn over half the screen or more, first time */
+static void
+sgl_big_draw_check(void)
+{
+	GLint tex = (GLint)unit_held[0];
+	if (tex <= 0 || tex >= 8192 || tex_src[tex].logged || tex_src[tex].checks >= 16) {
+		return;
+	}
+	tex_src[tex].checks++;
+	GLint vp[4] = {0}, sc[4] = {0}, fb = 0;
+	glGetIntegerv(GL_VIEWPORT, vp);
+	GLboolean scon = glIsEnabled(GL_SCISSOR_TEST);
+	glGetIntegerv(GL_SCISSOR_BOX, sc);
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb);
+	long area = scon ? (long)sc[2] * sc[3] : (long)vp[2] * vp[3];
+	if (area * 2 < 1242L * 2208L) {
+		return;
+	}
+	tex_src[tex].logged = 1;
+	static int n;
+	if (n++ < 80) {
+		GLint prog = 0;
+		glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+		sweet_drm_log("sweetgl: LARGE DRAW tex %d (%c surf %u %c%c%c%c %ux%u mean %s) prog %d fb %d vp %dx%d scissor %d %d,%d %dx%d blend %d",
+		    tex, tex_src[tex].kind ? tex_src[tex].kind : '?', tex_src[tex].surf, FCC(tex_src[tex].fourcc),
+		    tex_src[tex].w, tex_src[tex].h, tex_src[tex].mean, prog, fb, vp[2], vp[3], scon, sc[0], sc[1], sc[2], sc[3],
+		    glIsEnabled(GL_BLEND));
+	}
+}
+
+void
+sgl_DrawArrays(void *rctx, GLenum mode, GLint first, GLsizei count)'''),
+    ('''	if (sgl_skip_draw) {
+		sgl_skip_draw = false;
+		SGL_POST(65);''', '''	sgl_big_draw_check();
+	if (sgl_skip_draw) {
+		sgl_skip_draw = false;
+		SGL_POST(65);'''),
+    ('''	if (sgl_skip_draw) {
+		sgl_skip_draw = false;
+		SGL_POST(67);''', '''	sgl_big_draw_check();
+	if (sgl_skip_draw) {
+		sgl_skip_draw = false;
+		SGL_POST(67);'''),
+    ('''	glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
+	SGL_POST(301);''', '''	glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
+	if (level == 0) {
+		GLint row2 = unpack_row();
+		sgl_tex_note((GLint)unit_held[active_unit()], 't', 0, 0, (size_t)width, (size_t)height,
+		    pixels != NULL && type == GL_UNSIGNED_BYTE ? pixels : NULL, (size_t)(row2 > 0 ? row2 : width) * 4, 4);
+	}
+	SGL_POST(301);'''),
+    ('''	if (w * h >= 600000) {
+		static int biglog;
+		if (biglog++ < 60) {
+			char mean[32];
+			GLint btex = 0;
+			glGetIntegerv(GL_TEXTURE_BINDING_2D, &btex);
+			sgl_grid_mean(IOSurfaceGetBytesPerElement(s) == 4''', '''	{
+		GLint ntex = 0;
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &ntex);
+		sgl_tex_note(ntex, 's', IOSurfaceGetID(s), fourcc, w, h, IOSurfaceGetBaseAddressOfPlane(s, plane), pitch,
+		    IOSurfaceGetBytesPerElementOfPlane(s, plane));
+	}
+	if (w * h >= 600000) {
+		static int biglog;
+		if (biglog++ < 60) {
+			char mean[32];
+			GLint btex = 0;
+			glGetIntegerv(GL_TEXTURE_BINDING_2D, &btex);
+			sgl_grid_mean(IOSurfaceGetBytesPerElement(s) == 4'''),
+    ('''	size_t bpe = IOSurfaceGetBytesPerElement(s);
+	const void *base = IOSurfaceGetBaseAddress(s);
+	if (w * h >= 600000) {''', '''	size_t bpe = IOSurfaceGetBytesPerElement(s);
+	const void *base = IOSurfaceGetBaseAddress(s);
+	{
+		GLint ntex = 0;
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &ntex);
+		sgl_tex_note(ntex, 'c', IOSurfaceGetID(s), IOSurfaceGetPixelFormat(s), w, h, base, pitch, bpe);
+	}
+	if (w * h >= 600000) {'''),
+])

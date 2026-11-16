@@ -2,7 +2,7 @@ diff --git a/osfmk/arm64/a510f_prof.c b/osfmk/arm64/a510f_prof.c
 new file mode 100644
 --- /dev/null
 +++ b/osfmk/arm64/a510f_prof.c
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,315 @@
 +/*
 + * A510F: sampling CPU profiler (autopilot "prof SECONDS", round 46).
 + *
@@ -47,6 +47,9 @@ new file mode 100644
 +	uint32_t n;
 +} prof_names[PROF_NAMES];
 +static uint32_t prof_ticks, prof_bbd, prof_lost;
++/* round 46: every process: key = name index << 56 | kernel << 55 | pc & 2^47-1 */
++#define PROF2_SLOTS     8192
++static struct prof_slot prof_tab2[PROF2_SLOTS];
 +static volatile int prof_on;
 +static int prof_seconds;
 +
@@ -74,6 +77,25 @@ new file mode 100644
 +}
 +
 +static void
++prof_add2(uint64_t key)
++{
++	uint32_t h = (uint32_t)((key >> 2) * 2654435761u) % PROF2_SLOTS;
++	for (int i = 0; i < 64; i++, h = (h + 1) % PROF2_SLOTS) {
++		uint64_t cur = __atomic_load_n(&prof_tab2[h].key, __ATOMIC_RELAXED);
++		if (cur == 0) {
++			uint64_t zero = 0;
++			cur = __atomic_compare_exchange_n(&prof_tab2[h].key, &zero, key, false, __ATOMIC_RELAXED,
++			    __ATOMIC_RELAXED) ? key : zero;
++		}
++		if (cur == key) {
++			__atomic_fetch_add(&prof_tab2[h].n, 1, __ATOMIC_RELAXED);
++			return;
++		}
++	}
++	__atomic_fetch_add(&prof_lost, 1, __ATOMIC_RELAXED);
++}
++
++static int
 +prof_name_tick(const char *name)
 +{
 +	for (int i = 0; i < PROF_NAMES; i++) {
@@ -83,9 +105,10 @@ new file mode 100644
 +		}
 +		if (strncmp(prof_names[i].name, name, sizeof(prof_names[i].name) - 1) == 0) {
 +			__atomic_fetch_add(&prof_names[i].n, 1, __ATOMIC_RELAXED);
-+			return;
++			return i;
 +		}
 +	}
++	return -1;
 +}
 +
 +/* on the interrupted CPU, in the IPI handler */
@@ -105,7 +128,12 @@ new file mode 100644
 +	if (th != THREAD_NULL && (th->state & TH_IDLE)) {
 +		name = "(idle)";
 +	}
-+	prof_name_tick(name ? name : "?");
++	int ni = prof_name_tick(name ? name : "?");
++	if (st != NULL && ni >= 0 && !(th != THREAD_NULL && (th->state & TH_IDLE))) {
++		uint64_t pc2 = get_saved_state_pc(st);
++		bool k = !PSR64_IS_USER(get_saved_state_cpsr(st));
++		prof_add2(((uint64_t)ni << 56) | ((uint64_t)k << 55) | (pc2 & 0x7fffffffffffull));
++	}
 +	if (st == NULL || name == NULL || strcmp(name, "backboardd") != 0) {
 +		return;
 +	}
@@ -202,6 +230,46 @@ new file mode 100644
 +	}
 +	if (bt != TASK_NULL) {
 +		task_deallocate(bt);
++	}
++	/* the 6 busiest processes: their top 14 PCs each */
++	static uint8_t done_n[PROF_NAMES];
++	bzero(done_n, sizeof(done_n));
++	for (int r = 0; r < 6; r++) {
++		int bi = -1;
++		for (int i = 0; i < PROF_NAMES && prof_names[i].name[0]; i++) {
++			if (!done_n[i] && strcmp(prof_names[i].name, "(idle)") != 0 &&
++			    (bi < 0 || prof_names[i].n > prof_names[bi].n)) {
++				bi = i;
++			}
++		}
++		if (bi < 0) {
++			break;
++		}
++		done_n[bi] = 1;
++		static uint8_t used2[PROF2_SLOTS];
++		bzero(used2, sizeof(used2));
++		for (int q = 0; q < 14; q++) {
++			int best = -1;
++			for (int i = 0; i < PROF2_SLOTS; i++) {
++				if (!used2[i] && prof_tab2[i].key != 0 && (int)(prof_tab2[i].key >> 56) == bi &&
++				    (best < 0 || prof_tab2[i].n > prof_tab2[best].n)) {
++					best = i;
++				}
++			}
++			if (best < 0) {
++				break;
++			}
++			used2[best] = 1;
++			uint64_t key = prof_tab2[best].key, pc = key & 0x7fffffffffffull;
++			if (key & (1ull << 55)) {
++				printf("A510F PROF: %s %5u K 0x%llx\n", prof_names[bi].name, prof_tab2[best].n,
++				    pc | 0xffff800000000000ull);
++			} else if (pc >= sc_base && pc < sc_base + sc_size) {
++				printf("A510F PROF: %s %5u U cache+0x%llx\n", prof_names[bi].name, prof_tab2[best].n, pc - sc_base);
++			} else {
++				printf("A510F PROF: %s %5u U 0x%llx\n", prof_names[bi].name, prof_tab2[best].n, pc);
++			}
++		}
 +	}
 +	printf("A510F PROF: end\n");
 +}

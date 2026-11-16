@@ -692,7 +692,9 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 		uint64_t queued_at = g_q[seq % MALI_QLEN].t;
 		static uint32_t fbd_at_submit[2048];         /* worker only */
 		bool fbd_ok = g_q[seq % MALI_QLEN].fbd_ok;
-		memcpy(fbd_at_submit, g_q[seq % MALI_QLEN].fbd, sizeof(fbd_at_submit));
+		if (fbd_ok) {
+			memcpy(fbd_at_submit, g_q[seq % MALI_QLEN].fbd, sizeof(fbd_at_submit));
+		}
 		uint32_t req = g_q[seq % MALI_QLEN].req;
 		uint32_t depth = (uint32_t)(g_q_submitted - g_q_done);
 		IOLockUnlock(g_qlock);
@@ -869,7 +871,20 @@ mali_queue_submit(uint64_t jc, uint32_t req)
 	 * jobs found their framebuffer descriptor bad) as they are at submit, to
 	 * compare when the job fails: changed in the queue, or bad from the start.
 	 */
-	{
+	/*
+	 * Round 46: off unless boot-arg sweetmali_fp=1. The CPU profile showed
+	 * these 256 page-table walks + cache flushes per job (under g_qlock, in
+	 * backboardd's submit call) as backboardd's biggest kernel cost, and the
+	 * DATA_INVALID failures they were for are gone (rounds 36-45).
+	 */
+	static int fp = -1;
+	if (fp < 0) {
+		int v = 0;
+		(void)PE_parse_boot_argn("sweetmali_fp", &v, sizeof(v));
+		fp = v;
+	}
+	g_q[seq % MALI_QLEN].fbd_ok = false;
+	if (fp) {
 		uint64_t base = jc & ~0xffffull;
 		bool ok = true;
 		for (int k = 0; k < 256 && ok; k++) {         /* 8 KB: the job descriptors too */
