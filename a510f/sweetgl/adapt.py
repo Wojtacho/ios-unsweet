@@ -1239,7 +1239,7 @@ sgl_big_draw_check(void)
 	GLboolean scon = glIsEnabled(GL_SCISSOR_TEST);
 	glGetIntegerv(GL_SCISSOR_BOX, sc);
 	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb);
-	long area = scon ? (long)sc[2] * sc[3] : (long)vp[2] * vp[3];
+	long area = scon ? (long)sc[2] * sc[3] : 0;   /* unscissored: quads of any size, not counted */
 	if (area * 2 < 1242L * 2208L) {
 		return;
 	}
