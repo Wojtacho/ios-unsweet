@@ -1520,3 +1520,34 @@ On the phone (TWRP): boot a510f-ios-boot-r64.tar (2c87f43, kernel run
 
 Next: Wi-Fi (see ideas.md); folder materials need a probe of the open folder
 (budget per target, from 163 s).
+
+## 2026-11-17 (late): paused, resume here
+
+On the phone (TWRP): boot r66 repack (8016390, round-64 kernel) + sweetgl
+f488b4b (round 65 probe). Building when paused (check, then flash both):
+- kernel 5377e2e, run 44173157958: Wi-Fi step 1 (0135, a510f_wifi.c).
+- sweetgl 568cbe2, run 44173625224: os_log interposer (round 67) + the
+  -not_for_dyld_shared_cache link fix (7cdca6d failed to link without it).
+Boot-args now: SWEETGL_CADBG=160, CA_PRINT_BACKDROPS=1, a510fwifi=200;
+keepsyms, sweetfb_wake_ms and SGLP removed for room (restore later).
+
+Folder findings (rounds 65-66):
+- Open folder (160-200 s): no small render targets at all; the panel's
+  material never reaches the GPU. SBFolderBackgroundView: effect = blur unless
+  UIAccessibilityIsReduceTransparencyEnabled (then tint); the open folder's
+  full-screen blur shows, so RT is off. Blur view = MTMaterialView
+  (materialViewWithRecipeNamesByTraitCollection:..., group name
+  SBFolderBackgroundViewBlurGroupName).
+- CA_PRINT_* output goes to os_log, not stderr (rounds 60 and 66: nothing).
+  Round 67 interposes _os_log_impl in backboardd and forwards QuartzCore's
+  lines as "SWEETGL backboardd: ca: ..." from 160 s.
+
+Wi-Fi: BCM43454 on DW-MMC 1 (0x13550000, SPI 246), WL_REG_ON gpd1-0 (TOP
+pinctrl 0x139C0000 +0xe0), SDIO pins gpr2-0/1, gpr3-0..3 (FSYS pinctrl
+0x13750000), clocks CMU_TOP 0x224/0x624/0xa00 bit 1, CMU_FSYS 0x800 bit 8,
+0xa00 bit 6. Firmware bcmdhd_sta.bin + nvram_net.txt (a5xelte LineageOS
+vendor repo, lineage-15.1) in E:/Claude/ref/wifi-fw (not in git). Step 1
+logs "A510F WIFI:" at ~205 s: CMD5/3/7, CCCR, F1, ALP, chip id (expect
+0x4345). Next: firmware download (step 2).
+
+Round script: twrp-write/scripts/round66.txt (copy as round67 with a new header).
