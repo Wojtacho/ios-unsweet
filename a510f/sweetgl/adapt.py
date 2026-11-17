@@ -1592,10 +1592,10 @@ sgl_probe(GLenum mode, GLsizei count, GLenum itype, const void *indices, GLint f
 	if (probe.on < 0) {
 		const char *e = getenv("SGLP");                 /* SWEETGL_PROBE, short: boot-args are full */
 		probe.on = e != NULL && sscanf(e, "%dx%dx%dx%d", &probe.x, &probe.y, &probe.w, &probe.h) == 4;   /* x: sweetenv splits at commas */
-		probe.left = 400;
+		probe.left = 1000;
 		struct timespec ts;
 		clock_gettime(CLOCK_MONOTONIC, &ts);
-		probe.from = 145;      /* CLOCK_MONOTONIC = time since boot: page 2 is up at ~150 s */
+		probe.from = 154;      /* CLOCK_MONOTONIC = time since boot: page 2 at ~155 s, the folder opens at ~165 s */
 	}
 	if (!probe.on || probe.left <= 0) {
 		return;
@@ -1607,33 +1607,44 @@ sgl_probe(GLenum mode, GLsizei count, GLenum itype, const void *indices, GLint f
 	}
 	GLint vp[4] = {0}, sc[4] = {0}, fb = 0, prog = 0;
 	glGetIntegerv(GL_VIEWPORT, vp);
-	if (vp[2] != 1242 || vp[3] != 2208) {
+	/*
+	 * Round 63: every draw counts. Small targets (<= 400x400: the backdrop
+	 * blur chains) are logged whole (their own budget of 200); on the screen
+	 * target the bounds are the auto scissor's box, else the scissor, else
+	 * the whole viewport (unscissored draws were skipped before, and the
+	 * folder material was never seen).
+	 */
+	static int small_left = 300;
+	bool small = vp[2] != 1242 || vp[3] != 2208;
+	if (small && (vp[2] > 400 || vp[3] > 400 || small_left <= 0)) {
 		return;
 	}
-	/* bounds: the auto scissor's box (set just before), else a small scissor; big draws are skipped */
 	GLboolean scon = glIsEnabled(GL_SCISSOR_TEST);
 	glGetIntegerv(GL_SCISSOR_BOX, sc);
 	if (as_bbox_ok) {
 		memcpy(sc, as_bbox, sizeof(sc));
+	} else if (!scon) {
+		memcpy(sc, vp, sizeof(sc));
 	}
-	if (!scon || sc[2] > 600 || sc[3] > 600) {
-		return;
+	if (small) {
+		small_left--;
+	} else {
+		/* probe rect in GL coordinates (bottom-left origin) */
+		GLint px0 = probe.x, px1 = probe.x + probe.w, py0 = vp[3] - (probe.y + probe.h), py1 = vp[3] - probe.y;
+		if (sc[0] >= px1 || sc[0] + sc[2] <= px0 || sc[1] >= py1 || sc[1] + sc[3] <= py0) {
+			return;
+		}
+		probe.left--;
 	}
-	/* probe rect in GL coordinates (bottom-left origin) */
-	GLint px0 = probe.x, px1 = probe.x + probe.w, py0 = vp[3] - (probe.y + probe.h), py1 = vp[3] - probe.y;
-	if (sc[0] >= px1 || sc[0] + sc[2] <= px0 || sc[1] >= py1 || sc[1] + sc[3] <= py0) {
-		return;
-	}
-	probe.left--;
 	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb);
 	glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
 	GLint bs = 0, bd = 0;
 	glGetIntegerv(GL_BLEND_SRC_RGB, &bs);
 	glGetIntegerv(GL_BLEND_DST_RGB, &bd);
 	GLuint t0 = unit_held[0], t1 = unit_held[1];
-	sweet_drm_log("sweetgl: PROBE %lds prog %d fb %d mode %#x n %d blend %d %#x/%#x scissor %d %d,%d %dx%d "
+	sweet_drm_log("sweetgl: PROBE %lds vp %dx%d prog %d fb %d mode %#x n %d blend %d %#x/%#x sc %d %d,%d %dx%d "
 	    "u0 %u (%c surf %u %c%c%c%c %ux%u mean %s) u1 %u (%c surf %u %ux%u)",
-	    (long)ts.tv_sec, prog, fb, mode, count, glIsEnabled(GL_BLEND), bs, bd, scon, sc[0], sc[1], sc[2], sc[3],
+	    (long)ts.tv_sec, vp[2], vp[3], prog, fb, mode, count, glIsEnabled(GL_BLEND), bs, bd, scon, sc[0], sc[1], sc[2], sc[3],
 	    t0, t0 < 8192 && tex_src[t0].kind ? tex_src[t0].kind : '-', t0 < 8192 ? tex_src[t0].surf : 0,
 	    FCC(t0 < 8192 ? tex_src[t0].fourcc : 0), t0 < 8192 ? tex_src[t0].w : 0, t0 < 8192 ? tex_src[t0].h : 0,
 	    t0 < 8192 ? tex_src[t0].mean : "",
