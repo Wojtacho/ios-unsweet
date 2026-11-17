@@ -312,7 +312,7 @@ edit(cpp, [
 		if (ns >= 10000000000ull) {
 			uint64_t w = 0;
 			absolutetime_to_nanoseconds(t_wait, &w);
-			IOLog("SWEET SURF: locks (10 s): %llu, %llu waited for the GPU, %llu ms waiting\n",
+			IOLog("SWEET SURF: locks (10 s): %llu, %llu waited for the GPU, %llu ms waiting\\n",
 			    n_lock, n_wait, w / 1000000);
 			n_lock = n_wait = t_wait = 0;
 			t_last = t0;

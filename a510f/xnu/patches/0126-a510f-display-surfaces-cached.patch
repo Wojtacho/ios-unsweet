@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
-index 19e7e00..2384eec 100644
+index 19e7e00..bd3ba75 100644
 --- a/iokit/Kernel/arm/SweetSurface.cpp
 +++ b/iokit/Kernel/arm/SweetSurface.cpp
 @@ -120,6 +120,14 @@ sweet_surface_new_kind(const char *name, uint32_t fmt, uint32_t bpe)
@@ -98,7 +98,7 @@ index 19e7e00..2384eec 100644
  	}
  	props->release();
  	if (ret != kIOReturnSuccess) {
-@@ -1307,10 +1352,44 @@ sweet_surface_held(IOLock *lock, OSArray *refs, uint32_t id)
+@@ -1307,10 +1352,43 @@ sweet_surface_held(IOLock *lock, OSArray *refs, uint32_t id)
  	return s;
  }
  
@@ -132,8 +132,7 @@ index 19e7e00..2384eec 100644
 +		if (ns >= 10000000000ull) {
 +			uint64_t w = 0;
 +			absolutetime_to_nanoseconds(t_wait, &w);
-+			IOLog("SWEET SURF: locks (10 s): %llu, %llu waited for the GPU, %llu ms waiting
-+",
++			IOLog("SWEET SURF: locks (10 s): %llu, %llu waited for the GPU, %llu ms waiting\n",
 +			    n_lock, n_wait, w / 1000000);
 +			n_lock = n_wait = t_wait = 0;
 +			t_last = t0;
@@ -143,7 +142,7 @@ index 19e7e00..2384eec 100644
  	SweetSurface *s = sweet_surface_held(fLock, fRefs, (uint32_t)(uintptr_t)id);
  	if (s == NULL) {
  		return kIOReturnNotFound;
-@@ -1680,11 +1759,120 @@ AppleM2ScalerCSCDriver::newUserClient(task_t owningTask, void *securityID, UInt3
+@@ -1680,11 +1758,120 @@ AppleM2ScalerCSCDriver::newUserClient(task_t owningTask, void *securityID, UInt3
  	return kIOReturnSuccess;
  }
  
