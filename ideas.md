@@ -9,21 +9,23 @@ Mesa Panfrost for iOS, and CoreAnimation rendering on the Mali-T720.
 
 ## Performance
 
-- [ ] **8th CPU core** (M)
+- [x] **8th CPU core** (M)
   Core 1 only refreshes the screen (the panel is in MIPI command mode and needs
   a DECON trigger every ~16 ms). Move that job into the kernel (a timer or the
   vsync interrupt) and give iOS all 8 cores: about 14% more CPU.
+  Done: round 55 (2026-11-17): no shim refresher, SweetFramebuffer triggers DECON every vsync/flip, cpus=8 (testing).
 
-- [ ] **60 Hz direct scanout** (M)
+- [ ] **60 Hz direct scanout** (M) (partly: presents at 60 Hz; still a CPU copy + scale per frame)
   The framebuffer driver copies the finished frame to the panel only 10 times a
   second (`sweetfb_hz`, default 10) and scales 1242x2208 -> 1080x1920 on the
   CPU. Present at 60 Hz and point DECON straight at the finished image (no copy),
   like ios-topaz's direct scanout. Needed for smooth animation once the GPU draws.
 
-- [ ] **GPU at full clock** (S)
+- [x] **GPU at full clock** (S)
   The Mali runs from the 400 MHz bus clock (aclk_g3d_400). Program its own PLL
   (Samsung's table: 668 MHz at 1.1 V, up to 800 MHz) with the same park-on-bus,
   change-PLL, switch-back sequence as Samsung's gpu_set_clock.
+  Done: 668 MHz (rounds 13-16; 400 MHz was ~40% slower).
 
 ## Graphics and display
 
@@ -36,17 +38,19 @@ Mesa Panfrost for iOS, and CoreAnimation rendering on the Mali-T720.
   CoreAnimation's vibrancy / colour filter misbehaving on the CPU renderer; may
   go away with the GPU, check again then.
 
-- [ ] **Astronomy wallpaper off** (S)
+- [x] **Astronomy wallpaper off** (S)
   AegirPoster (the 3D Earth wallpaper) needs Metal: it crashed 93 times in one
   boot and makes the wallpaper gallery lag. Hide or disable that one extension.
+  Done: no longer crash-loops (rounds 49-53 logs: no AegirPoster).
 
-- [ ] **Async GPU submission** (M)
+- [x] **Async GPU submission** (M)
   SweetMali waits for every job to finish. Use the Mali's job/MMU interrupts
   and a queue so the CPU and GPU work in parallel (Linux panfrost's model).
+  Done: SweetMali job queue (sel 17/18, worker thread), ~25% more frames.
 
 ## Hardware
 
-- [ ] **Real date and time** (S-M)
+- [ ] **Real date and time** (S-M) (partly: calendar set to the patch time at boot, round 47; RTC still to read)
   The phone starts in 1969: no RTC driver yet. Read the S2MPU03 PMIC's real-time
   clock (through the HSI2C3 batcher, like the touch power and the CPU voltage)
   and set the kernel clock from it.
@@ -74,7 +78,8 @@ Mesa Panfrost for iOS, and CoreAnimation rendering on the Mali-T720.
   space is written and verified too. Skip all-zero chunks after one fast clear:
   roughly half the time.
 
-- [ ] **Remove crash-loop daemons** (S)
+- [x] **Remove crash-loop daemons** (S)
   bluetoothd (27 restarts per boot), fairplayd (32) and the speech synthesizer
   services keep crashing and being restarted, which costs CPU. Remove or disable
   them in the root build (and in place on the phone).
+  Done: sweetnoexec: bluetoothd, fairplayd, speech services, vmd (round 49); widget/poster extensions at background priority.
