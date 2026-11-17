@@ -92,6 +92,7 @@ static uint32_t submits, failed_submits;
 static uint64_t win_t0, win_job_us, win_call_ns, win_max_us;
 static uint32_t win_n, win_frag;
 static uint32_t win_bo_new, win_bo_close, win_imports;  /* round 50: kernel buffer churn */
+uint32_t sweet_drm_win_fbfetch, sweet_drm_win_draws;    /* round 52: eagl.c counts */
 static struct rusage win_ru;
 
 static uint64_t
@@ -135,11 +136,13 @@ win_account(uint32_t req, uint64_t job_us, uint64_t call_ns)
 	uint64_t sys = tv_us(ru.ru_stime) - tv_us(win_ru.ru_stime);
 	uint64_t span_ms = span / 1000000u;
 	sweet_drm_log("sweetgl: time %llu ms: %u jobs (%u fragment), GPU %llu ms (max job %llu ms), "
-	    "in submit %llu ms, CPU user %llu ms sys %llu ms, bo new %u close %u, surface imports %u",
+	    "in submit %llu ms, CPU user %llu ms sys %llu ms, bo new %u close %u, surface imports %u, draws %u, fbfetch flushes %u",
 	    (unsigned long long)span_ms, win_n, win_frag, (unsigned long long)(win_job_us / 1000),
 	    (unsigned long long)(win_max_us / 1000), (unsigned long long)(win_call_ns / 1000000u),
-	    (unsigned long long)(usr / 1000), (unsigned long long)(sys / 1000), win_bo_new, win_bo_close, win_imports);
+	    (unsigned long long)(usr / 1000), (unsigned long long)(sys / 1000), win_bo_new, win_bo_close, win_imports,
+	    sweet_drm_win_draws, sweet_drm_win_fbfetch);
 	win_bo_new = win_bo_close = win_imports = 0;
+	sweet_drm_win_draws = sweet_drm_win_fbfetch = 0;
 	win_t0 = 0;
 	win_n = win_frag = 0;
 	win_job_us = win_call_ns = win_max_us = 0;

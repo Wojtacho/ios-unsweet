@@ -1404,3 +1404,38 @@ edit('eagl.c', [
 	}
 	flush_stats(t0, mach_absolute_time());'''),
 ])
+
+
+# Round 52: how many draws and fbfetch flushes (each a new render pass: a
+# full load/store of the 1242x2208 target on Midgard) per stats window.
+edit('eagl.c', [
+    ('''	sgl_texture_barrier();
+	/* SWEETGL_TRACE: the first draws of each fbfetch program, wherever they happen */''', '''	{
+		extern uint32_t sweet_drm_win_fbfetch;
+		sweet_drm_win_fbfetch++;
+	}
+	sgl_texture_barrier();
+	/* SWEETGL_TRACE: the first draws of each fbfetch program, wherever they happen */'''),
+    ('''	sgl_big_draw_check();
+	if (sgl_skip_draw) {
+		sgl_skip_draw = false;
+		SGL_POST(65);''', '''	sgl_big_draw_check();
+	{
+		extern uint32_t sweet_drm_win_draws;
+		sweet_drm_win_draws++;
+	}
+	if (sgl_skip_draw) {
+		sgl_skip_draw = false;
+		SGL_POST(65);'''),
+    ('''	sgl_big_draw_check();
+	if (sgl_skip_draw) {
+		sgl_skip_draw = false;
+		SGL_POST(67);''', '''	sgl_big_draw_check();
+	{
+		extern uint32_t sweet_drm_win_draws;
+		sweet_drm_win_draws++;
+	}
+	if (sgl_skip_draw) {
+		sgl_skip_draw = false;
+		SGL_POST(67);'''),
+])
