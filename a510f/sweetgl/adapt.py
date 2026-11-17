@@ -1582,7 +1582,7 @@ static void
 sgl_probe(GLenum mode, GLsizei count, GLenum itype, const void *indices, GLint first)
 {
 	if (probe.on < 0) {
-		const char *e = getenv("SWEETGL_PROBE");
+		const char *e = getenv("SGLP");                 /* SWEETGL_PROBE, short: boot-args are full */
 		probe.on = e != NULL && sscanf(e, "%dx%dx%dx%d", &probe.x, &probe.y, &probe.w, &probe.h) == 4;   /* x: sweetenv splits at commas */
 		probe.left = 400;
 		struct timespec ts;
