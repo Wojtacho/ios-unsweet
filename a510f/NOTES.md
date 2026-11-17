@@ -1459,3 +1459,35 @@ Pushed, NOT built/tested: edff59d (round 52).
 Next (morning): build+flash edff59d, read "GPU time by target", cut render
 passes (fbfetch blend modes with real GL blending where possible), folder
 background trace, check the logo appears.
+
+## 2026-11-17 (evening): rounds 53-61
+
+On the phone (TWRP): boot a510f-ios-boot-r60.tar (63f8efe kernel run
+44136980067, boot-args with SWEETGL_CADBG=150) + sweetgl 843711e (run
+44131958636). Pushed for round 61 (building): see below.
+
+- Rounds 53-58 (details in git log): autoscissor (passes cover drawn tiles
+  only), 8 CPUs with no shim refresher, boot screen + logo, boot text mute
+  (0132-0134), profiler with kernel callers, weather gradient colorP0 highp.
+- Round 60 results (out/r60): swipes 12.2 fps (r58 11.4). Frames now wait on
+  the GPU (swaps waited ~500 ms/10 s), GPU busy 50-65%, ~7 fragment passes a
+  frame (4.6 at 1242x2208, ~6 ms each). backboardd CPU ~52 ms a frame for ~88
+  draws (0.6 ms a draw). CPU surface locks are rare (6-33 per 10 s) and almost
+  never wait: not a bottleneck. Failed GPU jobs happen with glFlush and
+  glFinish alike.
+- CA_PRINT_BACKDROPS/OFFSCREENS through stderr gave nothing (iOS 16 CA logs to
+  os_log): SWEETGL_CADBG dropped from boot-args in round 61.
+- Folder icon square / folder panel / switcher background (observation):
+  SpringBoard scales CA snapshots with the software scaler right after asking
+  for them (1242x2208 -> 621x1104 switcher cards; 1242x2208 -> 311x552 ->
+  104x184, the wallpaper material chain). Guess: the scaler copied the source
+  before the GPU finished it (empty -> transparent/black). Round 61: the
+  scaler waits for the queued GPU work and logs "source N: K of 64 sampled
+  pixels not 0".
+- GitHub Intel macOS runners: jobs often wait 15 min and get cancelled
+  (scratchpad rerunwait.py re-runs them). The kernel run's own recovery
+  artifact already has the boot-args of its commit (no repack needed then).
+
+Next: flash round 61, check the scaler source samples, the folder/switcher
+screenshots; speed: per-draw CPU cost in backboardd (0.6 ms/draw) and the
+full-screen pass count.

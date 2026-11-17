@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
-index 19e7e00..bd3ba75 100644
+index 19e7e00..5f487cd 100644
 --- a/iokit/Kernel/arm/SweetSurface.cpp
 +++ b/iokit/Kernel/arm/SweetSurface.cpp
 @@ -120,6 +120,14 @@ sweet_surface_new_kind(const char *name, uint32_t fmt, uint32_t bpe)
@@ -142,7 +142,25 @@ index 19e7e00..bd3ba75 100644
  	SweetSurface *s = sweet_surface_held(fLock, fRefs, (uint32_t)(uintptr_t)id);
  	if (s == NULL) {
  		return kIOReturnNotFound;
-@@ -1680,11 +1758,120 @@ AppleM2ScalerCSCDriver::newUserClient(task_t owningTask, void *securityID, UInt3
+@@ -1563,7 +1641,17 @@ sweet_scaler_transfer(const uint8_t *req, uint32_t len)
+ 	if (ok && sb != 0 && db != 0 && d->width != 0 && d->height != 0 && s->width != 0 && s->height != 0) {
+ 		const uint8_t *src = (const uint8_t *)sb + (s->wrapped ? s->wrapDelta : 0);
+ 		uint8_t *dst = (uint8_t *)db + (d->wrapped ? d->wrapDelta : 0);
++		sweet_mali_wait_seq(sweet_mali_seq());
+ 		sweet_scaler_cache((uintptr_t)src + sf, (size_t)(se - sf));
++		if (sweet_scaler_logged < 40 && s->pixelFormat == SWEET_FMT_BGRA) {
++			uint32_t nz = 0;
++			for (uint32_t k = 0; k < 64; k++) {
++				uint32_t px = 0;
++				memcpy(&px, src + (uint64_t)((k * 37) % s->height) * s->bytesPerRow + (uint64_t)((k * 53) % s->width) * 4, 4);
++				nz += px != 0;
++			}
++			IOLog("SWEET SCALER: source %u: %u of 64 sampled pixels not 0 (after the GPU wait)\n", sid, nz);
++		}
+ 		uint64_t stepx = ((uint64_t)s->width << 16) / d->width, stepy = ((uint64_t)s->height << 16) / d->height;
+ 		uint32_t w = d->width & ~1u, h = d->height & ~1u;
+ 		if (d->pixelFormat == SWEET_FMT_BGRA || d->pixelFormat == SWEET_FMT_L008) {
+@@ -1680,11 +1768,120 @@ AppleM2ScalerCSCDriver::newUserClient(task_t owningTask, void *securityID, UInt3
  	return kIOReturnSuccess;
  }
  

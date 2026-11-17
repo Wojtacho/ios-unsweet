@@ -332,3 +332,26 @@ extern "C" void absolutetime_to_nanoseconds(uint64_t abstime, uint64_t *result);
 IOReturn
 IOSurfaceRootUserClient::trapLock("""),
 ])
+
+# A510F round 61: SpringBoard scales CoreAnimation snapshots (app switcher
+# cards 1242x2208 -> 621x1104, the wallpaper material chain 1242x2208 ->
+# 311x552 -> 104x184 behind folders and the switcher) right after asking
+# backboardd to render them. The GPU may still be drawing the source: the
+# scaler copied a surface that was still empty (black switcher background and
+# cards, no folder materials). Wait for the queued GPU work first, and log a
+# sample of the source (64 pixels: how many are not 0) to see it.
+edit(cpp, [
+    ("""		sweet_scaler_cache((uintptr_t)src + sf, (size_t)(se - sf));
+""", """		sweet_mali_wait_seq(sweet_mali_seq());
+		sweet_scaler_cache((uintptr_t)src + sf, (size_t)(se - sf));
+		if (sweet_scaler_logged < 40 && s->pixelFormat == SWEET_FMT_BGRA) {
+			uint32_t nz = 0;
+			for (uint32_t k = 0; k < 64; k++) {
+				uint32_t px = 0;
+				memcpy(&px, src + (uint64_t)((k * 37) % s->height) * s->bytesPerRow + (uint64_t)((k * 53) % s->width) * 4, 4);
+				nz += px != 0;
+			}
+			IOLog("SWEET SCALER: source %u: %u of 64 sampled pixels not 0 (after the GPU wait)\\n", sid, nz);
+		}
+"""),
+])
