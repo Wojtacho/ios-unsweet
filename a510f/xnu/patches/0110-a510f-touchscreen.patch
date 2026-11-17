@@ -1560,7 +1560,7 @@ index 0000000..b29e966
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
-index 6f8dba3..81e64de 100644
+index 6f8dba3..6228adb 100644
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
 @@ -33,6 +33,7 @@
@@ -2009,7 +2009,7 @@ index 6f8dba3..81e64de 100644
  	if (error) {
  		return error;
  	}
-@@ -986,9 +1337,981 @@ sweet_mmc_init(void)
+@@ -986,9 +1337,982 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
@@ -2643,7 +2643,8 @@ index 6f8dba3..81e64de 100644
 +static void
 +auto_guard_arm(void)
 +{
-+	uint32_t on = 1;
++	/* default 2, count only: the full mode (1) reset the phone mid-script (rounds 54-56, once sweetwdt=2 left the boot-args) */
++	uint32_t on = 2;
 +	PE_parse_boot_argn("sweetwdt", &on, sizeof(on));
 +	au_pmu = ml_io_map(A510F_PMU_PA, 0x1000);
 +	if (au_pmu == 0) {
