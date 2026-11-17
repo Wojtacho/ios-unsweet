@@ -1,0 +1,28 @@
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+index 19f27cd..4868ab3 100644
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -761,6 +761,23 @@ fbcon_transmit_ready(void)
+ static void
+ fbcon_transmit_data(uint8_t c)
+ {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * A510F boot screen (boot-arg sweetboot=1): the kprintf framebuffer
++	 * console stays off the panel too (round 57: its text covered the boot
++	 * screen). A panic still draws.
++	 */
++	{
++		static int sweet_boot = -1;
++		if (sweet_boot < 0 && PE_state.bootArgs != NULL) {
++			int v = 0;
++			sweet_boot = PE_parse_boot_argn("sweetboot", &v, sizeof(v)) && v;
++		}
++		if (sweet_boot == 1 && !panic_active()) {
++			return;
++		}
++	}
++#endif
+ 	if (c == '\r') {
+ 		fbcon_col = 0;
+ 		return;
