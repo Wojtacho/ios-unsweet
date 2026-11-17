@@ -1,8 +1,8 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 0f8e61a..745b2c9 100644
+index 0f8e61a..56acd60 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -82,6 +82,27 @@ enum {
+@@ -82,6 +82,41 @@ enum {
  #define SWEET_FB_LOGICAL_W              1242
  #define SWEET_FB_LOGICAL_H              2208
  #define SWEET_FB_FORMAT_BGRA            0x42475241
@@ -14,6 +14,20 @@ index 0f8e61a..745b2c9 100644
 +#define A510F_DECON_SHADOWCON           0x0030
 +#define A510F_DECON_UPDATE              0x0710
 +#define A510F_DECON_ADD0                0x0880
++#define A510F_DECON_TRIGCON             0x06B0
++extern "C" { volatile uint32_t *sweet_decon_trigcon; }          /* gicv2 panic wait (0103) */
++
++static inline void
++a510f_decon_kick(uintptr_t decon)
++{
++	if (decon != 0) {
++		volatile uint32_t *t = (volatile uint32_t *)(decon + A510F_DECON_TRIGCON);
++		uint32_t v = *t;
++		if (v & 1u) {
++			*t = v | 2u;            /* SWTRIGEN set: SWTRIGCMD (shim/shim.c decon_kick) */
++		}
++	}
++}
 +#define A510F_SHADOWCON_WIN0_PROTECT    (1u << 8)
 +#define A510F_UPDATE_STANDALONE         (1u << 0)
 +extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -30,7 +44,7 @@ index 0f8e61a..745b2c9 100644
  
  class IOMobileFramebuffer : public IOService {
  	OSDeclareDefaultStructors(IOMobileFramebuffer);
-@@ -124,7 +145,48 @@ public:
+@@ -124,7 +159,48 @@ public:
  	bool          fDirty;
  	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
  	bool          fPowerOff;      /* RequestPowerChange(0) */
@@ -79,7 +93,7 @@ index 0f8e61a..745b2c9 100644
  
  	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
  	void addClient(IOMobileFramebufferUserClient *client);
-@@ -174,6 +236,232 @@ public:
+@@ -174,6 +250,232 @@ public:
  
  OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
  
@@ -312,7 +326,7 @@ index 0f8e61a..745b2c9 100644
  bool
  AppleCLCD::start(IOService *provider)
  {
-@@ -244,8 +532,48 @@ AppleCLCD::start(IOService *provider)
+@@ -244,8 +546,51 @@ AppleCLCD::start(IOService *provider)
  	uint32_t hz = 10;
  	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
  	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
@@ -332,6 +346,9 @@ index 0f8e61a..745b2c9 100644
 +	}
 +	if (flip && fPhys == A510F_FB_A && (uint64_t)fRowBytes * fHeight <= A510F_FB_SIZE) {
 +		fDecon = ml_io_map(A510F_DECON_PA, 0x1000);
++		if (fDecon != 0) {
++			sweet_decon_trigcon = (volatile uint32_t *)(fDecon + A510F_DECON_TRIGCON);
++		}
 +		fBufPA[1] = A510F_FB_B;
 +		fBackMD = IOMemoryDescriptor::withPhysicalAddress(A510F_FB_B, A510F_FB_SIZE, kIODirectionInOut);
 +		fBackMap = fBackMD != NULL ? fBackMD->map(kIOMapWriteCombineCache) : NULL;
@@ -361,7 +378,15 @@ index 0f8e61a..745b2c9 100644
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
  	setProperty("external", false);
  	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
-@@ -285,6 +613,28 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -272,6 +617,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 	AppleCLCD *fb = (AppleCLCD *)owner;
+ 	uint64_t now = mach_absolute_time();
+ 	uint64_t count = ++fb->fVsyncCount;
++	a510f_decon_kick(fb->fDecon);
+ 	uint64_t values[6] = {
+ 		(uint32_t)count, (uint32_t)(count >> 32),
+ 		(uint32_t)now, (uint32_t)(now >> 32),
+@@ -285,6 +631,28 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		client->notify(SWEET_FB_NOTIFY_VSYNC, values, 6);
  	}
  	if (fb->fPowerOff) {
@@ -390,7 +415,7 @@ index 0f8e61a..745b2c9 100644
  		/* Fade out: halve every channel each vsync, then black, then idle. */
  		uint32_t step = fb->fFadeStep;
  		if (step <= 6) {
-@@ -293,7 +643,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -293,7 +661,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		IOLockUnlock(fb->fLock);
  		if (step <= 6) {
  			for (uint32_t y = 0; y < fb->fHeight; y++) {
@@ -399,7 +424,7 @@ index 0f8e61a..745b2c9 100644
  				for (uint32_t x = 0; x < fb->fWidth; x++) {
  					row[x] = step < 6 ? (row[x] >> 1) & 0x7f7f7f7f : 0;
  				}
-@@ -302,21 +652,94 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -302,21 +670,94 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
  		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
  		return;
  	}
@@ -461,7 +486,7 @@ index 0f8e61a..745b2c9 100644
 +			absolutetime_to_nanoseconds(mach_absolute_time() - fb->fOffAt, &ns);
 +			IOLog("SWEET FB: fade step %u at off +%llu ms%s\n", fstep, ns / 1000000,
 +			    fb->fHaveLast ? "" : " (no last frame)");
-+		}
+ 		}
 +		if (fstep >= 1 && fstep <= 7 && fb->fHaveLast) {
 +			/* eased brightness out of 256: 80%, 62%, 46%, 32%, 20%, 11%, 5% */
 +			static const uint16_t bright[8] = { 256, 205, 159, 118, 82, 51, 28, 13 };
@@ -475,7 +500,7 @@ index 0f8e61a..745b2c9 100644
 +			bzero((void *)back, (size_t)fb->fRowBytes * fb->fHeight);
 +			fb->flipTo(fb->fShown ^ 1);
 +			IOLockUnlock(fb->fPresentLock);
- 		}
++		}
 +		IOLockLock(fb->fLock);
 +		fb->fPresentBusy = false;
 +		IOLockWakeup(fb->fLock, &fb->fPresentBusy, false);
@@ -501,7 +526,7 @@ index 0f8e61a..745b2c9 100644
  }
  
  void
-@@ -347,6 +770,8 @@ get32(const uint8_t *p, uint32_t off)
+@@ -347,6 +788,8 @@ get32(const uint8_t *p, uint32_t off)
  }
  
  static uint32_t sweet_fb_swaps_logged;
@@ -510,7 +535,7 @@ index 0f8e61a..745b2c9 100644
  
  /*
   * A510F: layer pixel formats. Every 4-byte format used to be copied as if it
-@@ -412,24 +837,148 @@ static uint64_t sweet_fb_swap_count;
+@@ -412,24 +855,152 @@ static uint64_t sweet_fb_swap_count;
  void
  AppleCLCD::swap(const uint8_t *rec)
  {
@@ -602,6 +627,7 @@ index 0f8e61a..745b2c9 100644
 +	*shadow = *shadow & ~A510F_SHADOWCON_WIN0_PROTECT;
 +	*update = *update | A510F_UPDATE_STANDALONE;
 +	fShown = idx;
++	a510f_decon_kick(fDecon);
 +}
 +
 +/* The last flip has reached the panel (the shim's CPU1 kicks DECON every 16 ms). */
@@ -615,6 +641,9 @@ index 0f8e61a..745b2c9 100644
 +		}
 +		if (i == 0) {
 +			fFlipWaits++;
++		}
++		if ((i % 4) == 3) {
++			a510f_decon_kick(fDecon);
 +		}
 +		IOSleep(1);
 +	}
@@ -661,7 +690,7 @@ index 0f8e61a..745b2c9 100644
  		if (PE_parse_boot_argn("sweetfb_noconsole", &quiet, sizeof(quiet)) && quiet != 0) {
  			/* Not PE_initialize_console(kPEDisableScreen): its console switch
  			 * writes the read-only-late cons_ops_index and panics. */
-@@ -448,8 +997,35 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -448,8 +1019,35 @@ AppleCLCD::present(const uint8_t *rec)
  		if (!(mask & (1u << layer)) || id == 0) {
  			continue;
  		}
@@ -699,7 +728,7 @@ index 0f8e61a..745b2c9 100644
  			sweet_fb_swaps_logged++;
  			IOLog("SWEET FB: swap %u layer %u surface %u %ux%u fmt 0x%x bpr %u a %d,%d %ux%u b %d,%d %dx%d\n",
  			    get32(rec, 0x50), layer, id, s ? s->width : 0, s ? s->height : 0,
-@@ -460,7 +1036,16 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -460,7 +1058,16 @@ AppleCLCD::present(const uint8_t *rec)
  			OSSafeReleaseNULL(s);
  			continue;
  		}
@@ -717,7 +746,7 @@ index 0f8e61a..745b2c9 100644
  		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
  		sweet_fb_note_format(s->pixelFormat, bpe, s->width, s->height);
  		if (w <= 0 || h <= 0) {
-@@ -473,8 +1058,18 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -473,8 +1080,18 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -736,7 +765,7 @@ index 0f8e61a..745b2c9 100644
  			s->release();
  			continue;
  		}
-@@ -511,13 +1106,41 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -511,13 +1128,41 @@ AppleCLCD::present(const uint8_t *rec)
  		}
  		if (src != 0 && bpe == 4) {
  			for (int32_t y = 0; y < h; y++) {
@@ -779,7 +808,7 @@ index 0f8e61a..745b2c9 100644
  }
  
  /*
-@@ -547,7 +1170,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -547,7 +1192,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	if (!fFitCleared) {
  		/* Black pillarbox (the console text was there). */
  		for (uint32_t y = 0; y < fHeight; y++) {
@@ -788,7 +817,7 @@ index 0f8e61a..745b2c9 100644
  		}
  		fFitCleared = true;
  	}
-@@ -570,19 +1193,53 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -570,19 +1215,53 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	const uint8_t *base = (const uint8_t *)(src + s->offset);
  	const uint32_t fmt = s->pixelFormat;
  	const bool convert = fmt == SWEET_FMT_L10R || fmt == SWEET_FMT_W30R;
@@ -844,7 +873,7 @@ index 0f8e61a..745b2c9 100644
  	}
  }
  
-@@ -737,7 +1394,34 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -737,7 +1416,34 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			if (off != fFB->fPowerOff) {
  				fFB->fPowerOff = off;
  				fFB->fFadeStep = 0;

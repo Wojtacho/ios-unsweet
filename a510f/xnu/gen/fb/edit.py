@@ -1096,3 +1096,56 @@ sweet_fb_shot(uint16_t *out, uint32_t maxpix, uint32_t div, uint32_t *w, uint32_
 	AppleCLCD *fb = sweet_fb_instance;""")
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
 print('ok boot canvas')
+
+# Round 55: 8 cores. The shim no longer parks CPU1 as the display refresher
+# (DECON trigger every 16 ms for the command-mode panel); this driver triggers
+# DECON itself: every vsync tick (60 Hz), right after each flip and while
+# waiting for a flip. sweet_decon_trigcon lets the panic path trigger too.
+s = open(p, encoding='utf-8').read()
+rep("""#define A510F_DECON_ADD0                0x0880""", """#define A510F_DECON_ADD0                0x0880
+#define A510F_DECON_TRIGCON             0x06B0
+extern "C" { volatile uint32_t *sweet_decon_trigcon; }          /* gicv2 panic wait (0103) */
+
+static inline void
+a510f_decon_kick(uintptr_t decon)
+{
+	if (decon != 0) {
+		volatile uint32_t *t = (volatile uint32_t *)(decon + A510F_DECON_TRIGCON);
+		uint32_t v = *t;
+		if (v & 1u) {
+			*t = v | 2u;            /* SWTRIGEN set: SWTRIGCMD (shim/shim.c decon_kick) */
+		}
+	}
+}""")
+rep("""		fDecon = ml_io_map(A510F_DECON_PA, 0x1000);""", """		fDecon = ml_io_map(A510F_DECON_PA, 0x1000);
+		if (fDecon != 0) {
+			sweet_decon_trigcon = (volatile uint32_t *)(fDecon + A510F_DECON_TRIGCON);
+		}""")
+rep("""	AppleCLCD *fb = (AppleCLCD *)owner;
+	uint64_t now = mach_absolute_time();
+	uint64_t count = ++fb->fVsyncCount;""", """	AppleCLCD *fb = (AppleCLCD *)owner;
+	uint64_t now = mach_absolute_time();
+	uint64_t count = ++fb->fVsyncCount;
+	a510f_decon_kick(fb->fDecon);""")
+rep("""	*update = *update | A510F_UPDATE_STANDALONE;
+	fShown = idx;""", """	*update = *update | A510F_UPDATE_STANDALONE;
+	fShown = idx;
+	a510f_decon_kick(fDecon);""")
+rep("""		if (!(*update & A510F_UPDATE_STANDALONE)) {
+			return true;
+		}
+		if (i == 0) {
+			fFlipWaits++;
+		}
+		IOSleep(1);""", """		if (!(*update & A510F_UPDATE_STANDALONE)) {
+			return true;
+		}
+		if (i == 0) {
+			fFlipWaits++;
+		}
+		if ((i % 4) == 3) {
+			a510f_decon_kick(fDecon);
+		}
+		IOSleep(1);""")
+open(p, 'w', encoding='utf-8', newline='\n').write(s)
+print('ok 8 cores: decon kicks')

@@ -133,6 +133,18 @@ static int fb_move(void)
 
 /* ---- CPU1: display refresher ---- */
 
+void con_loud(uint32_t bg);
+
+/* a failure page: keep it on the panel (no refresher any more), then off */
+static void fail_off(void)
+{
+	for (int i = 0; i < 60000 / 16; i++) {
+		decon_kick();
+		delay_ms(16);
+	}
+	power_off();
+}
+
 void secondary_main(uint64_t idx)
 {
 	(void)idx;
@@ -148,7 +160,7 @@ void secondary_main(uint64_t idx)
 
 void exc_handler(uint64_t slot, uint64_t *regs)
 {
-	con_clear(BLUE);
+	con_loud(BLUE);
 	con_str("PANIC", "shim exception");
 	con_hex2("SLOT", "n=", slot, "cpu=", rsr("mpidr_el1"));
 	con_str("STAGE", stage);
@@ -156,8 +168,7 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 	con_hex("ELR", rsr("elr_el1"));
 	con_hex("FAR", rsr("far_el1"));
 	con_hex("X0", regs[0]);
-	delay_ms(60000);
-	power_off();
+	fail_off();
 }
 
 void shim_main(uint64_t dtb)
@@ -180,25 +191,22 @@ void shim_main(uint64_t dtb)
 	fdt_chosen_u64(dtb, "linux,initrd-end", &rd_e);
 	con_hex2("INITRD", "lo=", (uint32_t)rd_s, "hi=", (uint32_t)rd_e);
 
-	stage = "refresher";
-	uint64_t self = rsr("mpidr_el1") & 0xffff;
-	uint64_t target = (self & 0xff00) | ((self & 0xff) == 1 ? 0 : 1);
-	uint64_t rc = smc(PSCI_CPU_ON64, target, (uintptr_t)secondary_entry, 1);
-	for (int i = 0; i < 100 && !refresher_alive; i++)
-		delay_ms(1);
-	con_hex2("CPU1", "on=", (uint32_t)rc, "alive=", (uint32_t)refresher_alive);
-	if (!refresher_alive)
-		con_str("WARN", "no refresher: screen may freeze");
+	/*
+	 * Round 55: no display refresher on CPU1 any more. xnu triggers DECON
+	 * (SweetFramebuffer: every vsync and flip; the panic wait) and runs CPU1
+	 * as its eighth core.
+	 */
+	stage = "no refresher";
 
 	stage = "fbmove";
 	con_str("FBMOVE", "moving the framebuffer to low RAM...");
 	int moved = fb_move();
 	if (moved != 0) {
+		con_loud(RED);
 		con_hex2("FBMOVE", "FAILED rc=", (uint32_t)moved, "upd=", rd32(DECON_UPDATE));
 		con_hex2("FBMOVE", "add0=", rd32(DECON_ADD0_W0), "shadow=", rd32(DECON_SHADOWCON));
 		con_str("OFF", "not booting (RAM layout needs the move); off in 60 s");
-		delay_ms(60000);
-		power_off();
+		fail_off();
 	}
 	con_fb = (volatile uint32_t *)FB_BASE;	/* the copy already shows the lines above */
 	con_hex2("FBMOVE", "ok add0=", rd32(DECON_ADD0_W0), "upd=", rd32(DECON_UPDATE));
@@ -206,8 +214,8 @@ void shim_main(uint64_t dtb)
 
 	stage = "loader";
 	const char *why = loader_boot(dtb);
+	con_loud(RED);
 	con_str("LOADER", why);
 	con_str("OFF", "power off in 60 s");
-	delay_ms(60000);
-	power_off();
+	fail_off();
 }

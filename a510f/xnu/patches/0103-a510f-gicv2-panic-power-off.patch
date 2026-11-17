@@ -85,7 +85,7 @@ diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
 index 6089db9..4c64e5c 100644
 --- a/pexpert/arm/pe_fiq.c
 +++ b/pexpert/arm/pe_fiq.c
-@@ -50,6 +50,126 @@ _gic_write32(vm_offset_t addr, uint32_t value)
+@@ -50,6 +50,135 @@ _gic_write32(vm_offset_t addr, uint32_t value)
  #define gicr_write32(offset, data) (_gic_write32(gicr_pe_base + (offset), (data)))
  #define gicr_read64(offset) (_gic_read64(gicr_pe_base + (offset)))
  
@@ -169,11 +169,20 @@ index 6089db9..4c64e5c 100644
 +			freq = 26000000;
 +		}
 +		__builtin_arm_isb(ISB_SY);
-+		uint64_t end = __builtin_arm_rsr64("CNTVCT_EL0") + freq * SWEET_PANIC_OFF_SECONDS;
++		/* CNTPCT: system-wide (the cores' CNTVCT differ wildly here; the wait never ended) */
++		uint64_t end = __builtin_arm_rsr64("CNTPCT_EL0") + freq * SWEET_PANIC_OFF_SECONDS;
++		/* no shim refresher on CPU1 any more: trigger DECON so the panic text reaches the panel */
++		extern volatile uint32_t *sweet_decon_trigcon;  /* SweetFramebuffer.cpp */
++		uint64_t next_kick = 0;
 +		for (;;) {
 +			__builtin_arm_isb(ISB_SY);
-+			if (__builtin_arm_rsr64("CNTVCT_EL0") >= end) {
++			uint64_t now = __builtin_arm_rsr64("CNTPCT_EL0");
++			if (now >= end) {
 +				break;
++			}
++			if (sweet_decon_trigcon != NULL && now >= next_kick) {
++				*sweet_decon_trigcon = *sweet_decon_trigcon | 2u;      /* SWTRIGCMD */
++				next_kick = now + freq / 60;
 +			}
 +		}
 +#if defined(SWEET_GIC_V2)

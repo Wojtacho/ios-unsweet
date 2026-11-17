@@ -47,7 +47,9 @@ mkadt.VTIMER_INTID = 27                      # PPI 11, standard numbering
 # every frame, shim/shim.c) and it runs that loop forever. PSCI CPU_ON for
 # it "succeeds" (PSCI 0.1 firmware, no state check) but nothing happens -
 # the cpus=4 tests timed out at stage 0. xnu gets the other seven.
-MPIDR = [0x000, 0x002, 0x003, 0x100, 0x101, 0x102, 0x103]
+# Round 55: the shim no longer starts the refresher; xnu triggers DECON
+# itself (SweetFramebuffer), so core 0x001 is the eighth core.
+MPIDR = [0x000, 0x001, 0x002, 0x003, 0x100, 0x101, 0x102, 0x103]
 CPU_HZ = 1600000000
 
 

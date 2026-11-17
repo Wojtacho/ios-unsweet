@@ -14,9 +14,22 @@
 volatile uint32_t *con_fb = (volatile uint32_t *)FB_BASE;
 static uint32_t con_bg;
 static int row;
+/*
+ * Quiet until something fails (round 55: the boot shows S-Boot's splash, then
+ * the boot screen, no red debug page). con_loud() turns the console on.
+ */
+int con_quiet = 1;
+
+void con_loud(uint32_t bg)
+{
+	con_quiet = 0;
+	con_clear(bg);
+}
 
 void con_clear(uint32_t bg)
 {
+	if (con_quiet)
+		return;
 	for (int y = 0; y < FB_H; y++) {
 		volatile uint32_t *line = con_fb + y * (FB_STRIDE / 4);
 		for (int x = 0; x < FB_W; x++)
@@ -28,6 +41,8 @@ void con_clear(uint32_t bg)
 
 static void put_char(int col, char ch, uint32_t fg)
 {
+	if (con_quiet)
+		return;
 	if (ch < 0x20 || ch > 0x7e)
 		ch = '?';
 	const unsigned char *g = font8x16[ch - 0x20];
