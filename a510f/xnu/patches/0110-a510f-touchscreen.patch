@@ -12,7 +12,7 @@ index bf2377a..3bca1e5 100644
  bsd/dev/sweet_touch.c			standard
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 new file mode 100644
-index 0000000..6e2272d
+index 0000000..b29e966
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
 @@ -0,0 +1,1543 @@
@@ -1205,7 +1205,7 @@ index 0000000..6e2272d
 +static void
 +bs_logo(void)
 +{
-+	if (bs.fb == NULL || bs.logo == NULL || bs.drawn_logo) {
++	if (bs.fb == NULL || bs.logo == NULL) {        /* every tick: nothing may stay drawn over it */
 +		return;
 +	}
 +	bs.drawn_logo = true;

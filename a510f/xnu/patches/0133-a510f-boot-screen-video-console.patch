@@ -1,0 +1,26 @@
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -1231,5 +1231,23 @@
+ vcputc_options(char c, __unused bool poll)
+ {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * A510F boot screen (boot-arg sweetboot=1): no console text on the panel
++	 * at all, from the first character (round 55: the serial_console mute
++	 * did not cover the video console). A panic still draws.
++	 */
++	{
++		extern int sweet_console_muted;
++		static int sweet_boot = -1;
++		if (sweet_boot < 0 && PE_state.bootArgs != NULL) {
++			int v = 0;
++			sweet_boot = PE_parse_boot_argn("sweetboot", &v, sizeof(v)) && v;
++		}
++		if ((sweet_boot == 1 || sweet_console_muted) && !panic_active()) {
++			return;
++		}
++	}
++#endif
+ 	if (gc_initialized && gc_enabled) {
+ 		VCPUTC_LOCK_LOCK();
+ 		if (gc_enabled) {
