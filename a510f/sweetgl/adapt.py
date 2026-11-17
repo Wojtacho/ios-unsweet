@@ -1439,3 +1439,130 @@ edit('eagl.c', [
 		sgl_skip_draw = false;
 		SGL_POST(67);'''),
 ])
+
+
+# Round 53 (speed): ~90% of GPU time is the 1242x2208 target, about 4
+# passes a frame (each blur backdrop or fbfetch draw ends a pass) at ~10 ms
+# each: every pass loads and stores the whole target, because CA draws without
+# a scissor, so Panfrost's batch bounds (the tiles it processes) cover the
+# screen. An unscissored draw now gets a scissor at its vertices' bounds
+# (2 px margin), so a pass covers only the tiles actually drawn. Only when
+# the position comes from client memory (float), the program's vertex_matrix
+# is affine and the draw has at most 4096 vertices; the scissor box and test
+# are restored after the draw. SWEETGL_AUTOSCISSOR=0: off.
+edit('eagl.c', [
+    ("""void
+sgl_DrawArrays(void *rctx, GLenum mode, GLint first, GLsizei count)""", """static GLint as_posloc[PROG_MAX], as_matloc[PROG_MAX];   /* location + 1; -1 none; 0 not looked up */
+static struct { bool on; GLint box[4]; } as_saved;
+
+/* before a draw: scissor at the draw's bounds when it has none (true: set, restore after) */
+static bool
+sgl_auto_scissor(GLenum itype, const void *indices, GLint first, GLsizei count)
+{
+	static int enabled = -1;
+	if (enabled < 0) {
+		const char *e = getenv("SWEETGL_AUTOSCISSOR");
+		enabled = !(e != NULL && e[0] == '0');
+	}
+	if (!enabled || count <= 0 || count > 4096 || glIsEnabled(GL_SCISSOR_TEST)) {
+		return false;
+	}
+	GLint prog = 0;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+	if (prog <= 0 || prog >= PROG_MAX) {
+		return false;
+	}
+	if (as_posloc[prog] == 0) {
+		GLint pl = glGetAttribLocation(prog, "vertex_position"), ml = glGetUniformLocation(prog, "vertex_matrix");
+		as_posloc[prog] = pl >= 0 && ml >= 0 ? pl + 1 : -1;
+		as_matloc[prog] = ml >= 0 ? ml + 1 : -1;
+	}
+	if (as_posloc[prog] < 0) {
+		return false;
+	}
+	GLint loc = as_posloc[prog] - 1, on = 0, size = 0, type = 0, stride = 0, buf = 0, ebuf = 0;
+	glGetVertexAttribiv(loc, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &on);
+	if (!on) {
+		return false;
+	}
+	glGetVertexAttribiv(loc, GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &buf);
+	glGetVertexAttribiv(loc, GL_VERTEX_ATTRIB_ARRAY_TYPE, &type);
+	glGetVertexAttribiv(loc, GL_VERTEX_ATTRIB_ARRAY_SIZE, &size);
+	if (indices != NULL) {
+		glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &ebuf);
+	}
+	if (buf != 0 || ebuf != 0 || type != GL_FLOAT || size < 2 || size > 4) {
+		return false;
+	}
+	glGetVertexAttribiv(loc, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &stride);
+	void *ptr = NULL;
+	glGetVertexAttribPointerv(loc, GL_VERTEX_ATTRIB_ARRAY_POINTER, &ptr);
+	if (ptr == NULL) {
+		return false;
+	}
+	GLfloat m[16];
+	glGetUniformfv(prog, as_matloc[prog] - 1, m);
+	/* affine only: no perspective row */
+	if (m[3] != 0.0f || m[7] != 0.0f || m[11] != 0.0f || m[15] != 1.0f) {
+		return false;
+	}
+	size_t st = (size_t)(stride ? stride : size * 4);
+	float minx = 1e30f, miny = 1e30f, maxx = -1e30f, maxy = -1e30f;
+	for (GLsizei v = 0; v < count; v++) {
+		GLint idx = first + v;
+		if (indices != NULL) {
+			idx = itype == GL_UNSIGNED_SHORT ? ((const GLushort *)indices)[v] :
+			      itype == GL_UNSIGNED_BYTE ? ((const GLubyte *)indices)[v] : (GLint)((const GLuint *)indices)[v];
+		}
+		const float *e = (const float *)(const void *)((const uint8_t *)ptr + (size_t)idx * st);
+		float x = e[0], y = e[1], z = size > 2 ? e[2] : 0.0f, w = size > 3 ? e[3] : 1.0f;
+		if (w != 1.0f) {
+			return false;
+		}
+		float cx = m[0] * x + m[4] * y + m[8] * z + m[12];
+		float cy = m[1] * x + m[5] * y + m[9] * z + m[13];
+		minx = cx < minx ? cx : minx;
+		maxx = cx > maxx ? cx : maxx;
+		miny = cy < miny ? cy : miny;
+		maxy = cy > maxy ? cy : maxy;
+	}
+	GLint vp[4] = {0};
+	glGetIntegerv(GL_VIEWPORT, vp);
+	if (vp[2] <= 0 || vp[3] <= 0) {
+		return false;
+	}
+	float fx0 = vp[0] + (minx + 1.0f) * 0.5f * vp[2] - 2.0f, fx1 = vp[0] + (maxx + 1.0f) * 0.5f * vp[2] + 2.0f;
+	float fy0 = vp[1] + (miny + 1.0f) * 0.5f * vp[3] - 2.0f, fy1 = vp[1] + (maxy + 1.0f) * 0.5f * vp[3] + 2.0f;
+	GLint x0 = fx0 < vp[0] ? vp[0] : (GLint)fx0, y0 = fy0 < vp[1] ? vp[1] : (GLint)fy0;
+	GLint x1 = fx1 > vp[0] + vp[2] ? vp[0] + vp[2] : (GLint)fx1 + 1, y1 = fy1 > vp[1] + vp[3] ? vp[1] + vp[3] : (GLint)fy1 + 1;
+	if (x1 <= x0 || y1 <= y0) {
+		x1 = x0 + 1;            /* nothing visible: an empty-ish scissor still bounds the pass */
+		y1 = y0 + 1;
+	}
+	if ((long)(x1 - x0) * (y1 - y0) * 10 > (long)vp[2] * vp[3] * 9) {
+		return false;           /* (nearly) the whole target anyway */
+	}
+	glGetIntegerv(GL_SCISSOR_BOX, as_saved.box);
+	glEnable(GL_SCISSOR_TEST);
+	glScissor(x0, y0, x1 - x0, y1 - y0);
+	return true;
+}
+
+static void
+sgl_auto_scissor_end(bool set)
+{
+	if (set) {
+		glScissor(as_saved.box[0], as_saved.box[1], as_saved.box[2], as_saved.box[3]);
+		glDisable(GL_SCISSOR_TEST);
+	}
+}
+
+void
+sgl_DrawArrays(void *rctx, GLenum mode, GLint first, GLsizei count)"""),
+    ("""	glDrawArrays(mode, first, count);""", """	bool as_set = sgl_auto_scissor(0, NULL, first, count);
+	glDrawArrays(mode, first, count);
+	sgl_auto_scissor_end(as_set);"""),
+    ("""	glDrawElements(mode, count, type, indices);""", """	bool as_set = sgl_auto_scissor(type, indices, 0, count);
+	glDrawElements(mode, count, type, indices);
+	sgl_auto_scissor_end(as_set);"""),
+])
