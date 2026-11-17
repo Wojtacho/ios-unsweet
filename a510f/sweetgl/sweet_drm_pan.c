@@ -866,3 +866,85 @@ drmSyncobjTimelineWait(int fd, uint32_t *h, uint64_t *p, unsigned n, int64_t t, 
 	(void)p;
 	return drmSyncobjWait(fd, h, n, t, f, s);
 }
+
+/*
+ * CoreAnimation debug output (round 60). SWEETGL_CADBG=N: turn on CA's
+ * CA_PRINT_BACKDROPS and CA_PRINT_OFFSCREENS (QuartzCore reads them from the
+ * environment) and send what CA writes to stderr into the kernel log, from
+ * N seconds after boot for 40 s, at most 600 lines, each distinct line once
+ * (the folder background hunt: which backdrops and offscreen passes CA's GL
+ * renderer makes and skips). Other lines are read and dropped.
+ */
+static int ca_dbg_fd = -1;
+static unsigned ca_dbg_start_s;
+
+static void *
+ca_dbg_reader(void *arg)
+{
+	(void)arg;
+	char buf[4096], line[232];
+	size_t ln = 0;
+	unsigned sent = 0;
+	static uint32_t seen[1024];
+	mach_timebase_info_data_t tb;
+	mach_timebase_info(&tb);
+	for (;;) {
+		ssize_t n = read(ca_dbg_fd, buf, sizeof(buf));
+		if (n <= 0) {
+			return NULL;
+		}
+		uint64_t s = mach_absolute_time() * tb.numer / tb.denom / 1000000000ull;
+		int on = s >= ca_dbg_start_s && s < ca_dbg_start_s + 40 && sent < 600;
+		for (ssize_t i = 0; i < n; i++) {
+			char c = buf[i];
+			if (c == '\n' || ln == sizeof(line) - 1) {
+				line[ln] = 0;
+				if (on && ln > 0) {
+					/* each distinct line once (digits ignored: addresses, times) */
+					uint32_t h = 2166136261u;
+					for (size_t k = 0; k < ln; k++) {
+						if (line[k] < '0' || line[k] > '9') {
+							h = (h ^ (uint8_t)line[k]) * 16777619u;
+						}
+					}
+					h |= 1;
+					uint32_t *slot = &seen[h % 1024];
+					if (*slot != h) {
+						*slot = h;
+						sweet_drm_log("ca %llu: %s", (unsigned long long)s, line);
+						sent++;
+					}
+				}
+				ln = 0;
+				if (c == '\n') {
+					continue;
+				}
+			}
+			line[ln++] = c == '\t' ? ' ' : c;
+		}
+	}
+}
+
+__attribute__((constructor)) static void
+ca_dbg_init(void)
+{
+	const char *e = getenv("SWEETGL_CADBG");
+	if (e == NULL || *e == 0) {
+		return;
+	}
+	ca_dbg_start_s = (unsigned)atoi(e);
+	int p[2];
+	if (pipe(p) != 0) {
+		return;
+	}
+	setenv("CA_PRINT_BACKDROPS", "1", 1);
+	setenv("CA_PRINT_OFFSCREENS", "1", 1);
+	dup2(p[1], 2);
+	close(p[1]);
+	ca_dbg_fd = p[0];
+	pthread_t th;
+	if (pthread_create(&th, NULL, ca_dbg_reader, NULL) == 0) {
+		pthread_detach(th);
+	}
+	sweet_drm_log("sweetgl: CA debug: backdrops + offscreens, stderr to the log from %u s", ca_dbg_start_s);
+}
