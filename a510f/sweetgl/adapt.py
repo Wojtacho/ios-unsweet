@@ -1584,40 +1584,53 @@ sgl_DrawArrays(void *rctx, GLenum mode, GLint first, GLsizei count)"""),
 # sources), at most 400 lines, from 100 s after start.
 edit('eagl.c', [
     ("""static void
-sgl_auto_scissor_end(bool set)""", """static struct { int on; GLint x, y, w, h; int left; time_t from; } probe = {-1};
+sgl_auto_scissor_end(bool set)""", """static unsigned char tex_rt[TEXSZ_MAX];         /* attached to a framebuffer (round 65 probe) */
+static struct { int on; GLint x, y, w, h; int left; time_t from; } probe = {-1};
 
 static void
 sgl_probe(GLenum mode, GLsizei count, GLenum itype, const void *indices, GLint first)
 {
 	if (probe.on < 0) {
-		const char *e = getenv("SGLP");                 /* SWEETGL_PROBE, short: boot-args are full */
-		probe.on = e != NULL && sscanf(e, "%dx%dx%dx%d", &probe.x, &probe.y, &probe.w, &probe.h) == 4;   /* x: sweetenv splits at commas */
-		probe.left = 1000;
-		struct timespec ts;
-		clock_gettime(CLOCK_MONOTONIC, &ts);
-		probe.from = 154;      /* CLOCK_MONOTONIC = time since boot: page 2 at ~155 s, the folder opens at ~165 s */
+		/* SGLP=XxYxWxHxT (SWEETGL_PROBE, short: boot-args are full; x: sweetenv splits at commas): T = start second */
+		const char *e = getenv("SGLP");
+		int from = 154;
+		int n = e != NULL ? sscanf(e, "%dx%dx%dx%dx%d", &probe.x, &probe.y, &probe.w, &probe.h, &from) : 0;
+		probe.on = n >= 4;
+		probe.left = 400;
+		probe.from = from;      /* CLOCK_MONOTONIC = time since boot */
 	}
-	if (!probe.on || probe.left <= 0) {
+	if (!probe.on) {
 		return;
 	}
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
-	if (ts.tv_sec < probe.from) {
+	if (ts.tv_sec < probe.from || ts.tv_sec > probe.from + 40) {
 		return;
 	}
 	GLint vp[4] = {0}, sc[4] = {0}, fb = 0, prog = 0;
 	glGetIntegerv(GL_VIEWPORT, vp);
 	/*
-	 * Round 63: every draw counts. Small targets (<= 400x400: the backdrop
-	 * blur chains) are logged whole (their own budget of 200); on the screen
-	 * target the bounds are the auto scissor's box, else the scissor, else
-	 * the whole viewport (unscissored draws were skipped before, and the
-	 * folder material was never seen).
+	 * Round 65: the folder material. Small targets (<= 400x400: backdrop
+	 * captures and blur chains) are logged (budget 300); on the screen
+	 * (1242x2208, or a native 1080x1920 one) only draws that sample a small
+	 * render target (<= 700x700: a blur or material result), budget 400.
+	 * CA scissors every draw to the full screen, so positions do not filter.
 	 */
 	static int small_left = 300;
-	bool small = vp[2] != 1242 || vp[3] != 2208;
-	if (small && (vp[2] > 400 || vp[3] > 400 || small_left <= 0)) {
-		return;
+	GLuint t0 = unit_held[0], t1 = unit_held[1];
+	bool screen = (vp[2] == 1242 && vp[3] == 2208) || nat_fb(GL_DRAW_FRAMEBUFFER);
+	if (!screen) {
+		if (vp[2] > 400 || vp[3] > 400 || small_left <= 0) {
+			return;
+		}
+		small_left--;
+	} else {
+		bool m0 = t0 > 0 && t0 < TEXSZ_MAX && tex_rt[t0] && !nat_tex[t0] && tex_w[t0] <= 700 && tex_h[t0] <= 700;
+		bool m1 = t1 > 0 && t1 < TEXSZ_MAX && tex_rt[t1] && !nat_tex[t1] && tex_w[t1] <= 700 && tex_h[t1] <= 700;
+		if (!(m0 || m1) || probe.left <= 0) {
+			return;
+		}
+		probe.left--;
 	}
 	GLboolean scon = glIsEnabled(GL_SCISSOR_TEST);
 	glGetIntegerv(GL_SCISSOR_BOX, sc);
@@ -1626,22 +1639,11 @@ sgl_probe(GLenum mode, GLsizei count, GLenum itype, const void *indices, GLint f
 	} else if (!scon) {
 		memcpy(sc, vp, sizeof(sc));
 	}
-	if (small) {
-		small_left--;
-	} else {
-		/* probe rect in GL coordinates (bottom-left origin) */
-		GLint px0 = probe.x, px1 = probe.x + probe.w, py0 = vp[3] - (probe.y + probe.h), py1 = vp[3] - probe.y;
-		if (sc[0] >= px1 || sc[0] + sc[2] <= px0 || sc[1] >= py1 || sc[1] + sc[3] <= py0) {
-			return;
-		}
-		probe.left--;
-	}
 	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb);
 	glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
 	GLint bs = 0, bd = 0;
 	glGetIntegerv(GL_BLEND_SRC_RGB, &bs);
 	glGetIntegerv(GL_BLEND_DST_RGB, &bd);
-	GLuint t0 = unit_held[0], t1 = unit_held[1];
 	sweet_drm_log("sweetgl: PROBE %lds vp %dx%d prog %d fb %d mode %#x n %d blend %d %#x/%#x sc %d %d,%d %dx%d "
 	    "u0 %u (%c surf %u %c%c%c%c %ux%u mean %s) u1 %u (%c surf %u %ux%u)",
 	    (long)ts.tv_sec, vp[2], vp[3], prog, fb, mode, count, glIsEnabled(GL_BLEND), bs, bd, scon, sc[0], sc[1], sc[2], sc[3],
@@ -2001,4 +2003,14 @@ sgl_BlitFramebufferEXT(void *rctx, GLint srcX0, GLint srcY0, GLint srcX1, GLint 
 	glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
 	SGL_POST(755);
 }"""),
+])
+
+# Round 65: render-target textures for the probe (tex_rt, next to sgl_probe).
+edit('eagl.c', [
+    ("""	SGL_POST(677);
+	nat_apply(rctx);""", """	SGL_POST(677);
+	if (texture < TEXSZ_MAX) {
+		tex_rt[texture] = 1;
+	}
+	nat_apply(rctx);"""),
 ])
