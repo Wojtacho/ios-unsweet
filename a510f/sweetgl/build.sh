@@ -86,7 +86,7 @@ for f in "$O/src/sweetgl" "$O/src/eagl" "$O/src/layerdump" "$O/src/dispatch" "$H
 	$XCC -O2 -Wall -fvisibility=hidden @"$O/mesa-defines.rsp" $INC -c "$f.c" -o "$O/$(basename "$f").o"
 done
 printf '_sweetgl_init\n_sweetgl_create\n_sweetgl_make_current\n_sweetgl_destroy\n_sweetgl_selftest\n' > "$O/exports.txt"
-$CXX -arch arm64 -isysroot "$SDK" -miphoneos-version-min=16.0 -dynamiclib -dead_strip \
+$CXX -arch arm64 -isysroot "$SDK" -miphoneos-version-min=16.0 -dynamiclib -dead_strip -Wl,-not_for_dyld_shared_cache \
 	-install_name /usr/lib/sweetgl.dylib -exported_symbols_list "$O/exports.txt" \
 	-o "$O/sweetgl.dylib" "$O/sweetgl.o" "$O/sweet_drm_pan.o" "$O/eagl.o" "$O/layerdump.o" "$O/dispatch.o" \
 	$LIBS \
