@@ -1662,3 +1662,343 @@ sgl_auto_scissor_end(bool set)"""),
     ("""	bool as_set = sgl_auto_scissor(type, indices, 0, count);""", """	bool as_set = sgl_auto_scissor(type, indices, 0, count);
 	sgl_probe(mode, count, type, indices, 0);"""),
 ])
+
+
+# Round 64 (speed): native 1080p. iOS keeps its 1242x2208 layout, but
+# CoreAnimation's display surfaces (the kernel's "display" ones, SweetMali
+# selector 19) are drawn at the panel's 1080x1920 into their top-left: the GL
+# texture over the surface is 1080x1920 (same memory and pitch), so sampling
+# it (backdrop captures draw from it) needs no change, and viewport, scissor,
+# copy, read and blit rectangles on it are scaled by 1920/2208. The kernel
+# then shows the surface 1:1 instead of scaling it on the CPU. Rectangle
+# sampling keeps the logical size (tex_w/tex_h stay 1242x2208); fbfetch reads
+# at gl_FragCoord and uses the real size. SWEETGL_NATIVE=0 or boot-arg
+# sweetfb_native=0: off.
+edit('gen-dispatch.py', [
+    ("""'glClear', 'glBindFramebufferEXT')}""",
+     """'glClear', 'glBindFramebufferEXT', 'glViewport', 'glScissor', 'glCopyTexSubImage2D', 'glReadPixels', 'glBlitFramebufferEXT')}"""),
+])
+edit('eagl.h', [
+    ("""void sgl_BindFramebufferEXT(void *rctx, GLenum target, GLuint framebuffer);""",
+     """void sgl_BindFramebufferEXT(void *rctx, GLenum target, GLuint framebuffer);
+void sgl_Viewport(void *rctx, GLint x, GLint y, GLsizei width, GLsizei height);
+void sgl_Scissor(void *rctx, GLint x, GLint y, GLsizei width, GLsizei height);
+void sgl_CopyTexSubImage2D(void *rctx, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y,
+    GLsizei width, GLsizei height);
+void sgl_ReadPixels(void *rctx, GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type,
+    void *pixels);
+void sgl_BlitFramebufferEXT(void *rctx, GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0,
+    GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);"""),
+])
+edit('eagl.c', [
+    ("""static uint16_t tex_w[TEXSZ_MAX], tex_h[TEXSZ_MAX];
+""", """static uint16_t tex_w[TEXSZ_MAX], tex_h[TEXSZ_MAX];
+
+/* round 64: native 1080p (see adapt.py) */
+#define NAT_W 1080
+#define NAT_H 1920
+int sweet_drm_surface_native(uint32_t surface_id);
+static unsigned char nat_tex[TEXSZ_MAX];        /* texture over a display surface drawn at 1080x1920 */
+void nat_apply(void *rctx);
+
+static bool
+nat_on(void)
+{
+	static int on = -1;
+	if (on < 0) {
+		const char *e = getenv("SWEETGL_NATIVE");
+		on = !(e != NULL && e[0] == '0');
+	}
+	return on;
+}
+
+/* the framebuffer bound to `which` (GL_DRAW_FRAMEBUFFER / GL_READ_FRAMEBUFFER) draws at 1080x1920 */
+static bool
+nat_fb(GLenum which)
+{
+	GLint fb = 0, type = 0, name = 0;
+	if (!nat_on()) {
+		return false;
+	}
+	glGetIntegerv(which == GL_READ_FRAMEBUFFER ? GL_READ_FRAMEBUFFER_BINDING : GL_DRAW_FRAMEBUFFER_BINDING, &fb);
+	if (fb == 0) {
+		return false;
+	}
+	glGetFramebufferAttachmentParameteriv(which, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
+	if (type != GL_TEXTURE) {
+		return false;
+	}
+	glGetFramebufferAttachmentParameteriv(which, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+	return name > 0 && name < TEXSZ_MAX && nat_tex[name];
+}
+
+/* logical (1242x2208) -> panel (1080x1920) coordinate, rounded; an edge maps the same way in every rectangle */
+static inline GLint
+nat_s(GLint v)
+{
+	int64_t t = (int64_t)v * NAT_H;
+	return (GLint)(t >= 0 ? (t + 1104) / 2208 : -((-t + 1104) / 2208));
+}
+
+static void
+nat_rect(GLint *x, GLint *y, GLsizei *w, GLsizei *h)
+{
+	GLint x0 = nat_s(*x), y0 = nat_s(*y), x1 = nat_s(*x + *w), y1 = nat_s(*y + *h);
+	*x = x0;
+	*y = y0;
+	*w = x1 - x0;
+	*h = y1 - y0;
+}
+"""),
+    # a texture given new storage is no longer a native one (bind_surface marks it again after)
+    ("""	glGetIntegerv(GL_TEXTURE_BINDING_2D, &tex);
+	if (tex > 0 && tex < TEXSZ_MAX) {
+		tex_w[tex] = (uint16_t)w;
+		tex_h[tex] = (uint16_t)h;
+	}""", """	glGetIntegerv(GL_TEXTURE_BINDING_2D, &tex);
+	if (tex > 0 && tex < TEXSZ_MAX) {
+		tex_w[tex] = (uint16_t)w;
+		tex_h[tex] = (uint16_t)h;
+		nat_tex[tex] = 0;
+	}"""),
+    # fbfetch reads at gl_FragCoord: the real size
+    ("""	if (att < TEXSZ_MAX && tex_w[att] > 0) {
+		w = tex_w[att];
+		h = tex_h[att];
+	} else {""", """	if (att < TEXSZ_MAX && tex_w[att] > 0) {
+		w = tex_w[att];
+		h = tex_h[att];
+		if (nat_tex[att]) {
+			w = NAT_W;
+			h = NAT_H;
+		}
+	} else {"""),
+    ("""	size_t pitch = IOSurfaceGetBytesPerRowOfPlane(s, plane);
+	struct sgl_image img = {0};""", """	size_t pitch = IOSurfaceGetBytesPerRowOfPlane(s, plane);
+	struct sgl_image img = {0};
+	/* round 64: CoreAnimation's display surfaces are drawn at the panel size */
+	size_t rw = w, rh = h;
+	if (plane == 0 && w == 1242 && h == 2208 && IOSurfaceGetPlaneCount(s) <= 1 && pitch >= NAT_W * 4 && nat_on() &&
+	    sweet_drm_surface_native(IOSurfaceGetID(s))) {
+		rw = NAT_W;
+		rh = NAT_H;
+		static int told;
+		if (told++ < 8) {
+			sweet_drm_log("sweetgl: %s: surface %u drawn at %dx%d (native 1080p)", why, IOSurfaceGetID(s), NAT_W, NAT_H);
+		}
+	}"""),
+    ("""		.w = (uint32_t)w,
+		.h = (uint32_t)h,""", """		.w = (uint32_t)rw,
+		.h = (uint32_t)rh,"""),
+    ("""			.width0 = (uint32_t)w,
+			.height0 = (uint16_t)h,""", """			.width0 = (uint32_t)rw,
+			.height0 = (uint16_t)rh,"""),
+    ("""	tex_size_bound(target, 0, (GLsizei)w, (GLsizei)h);
+	pipe_resource_reference(&img.res, NULL);""", """	tex_size_bound(target, 0, (GLsizei)w, (GLsizei)h);
+	{
+		GLint bt = 0;
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &bt);
+		if (bt > 0 && bt < TEXSZ_MAX) {
+			nat_tex[bt] = rw != w;
+		}
+	}
+	pipe_resource_reference(&img.res, NULL);"""),
+    ("""		if (textures[i] < TEXSZ_MAX) {
+			tex_argb[textures[i]] = 0;      /* a reused name starts unswizzled */""", """		if (textures[i] < TEXSZ_MAX) {
+			tex_argb[textures[i]] = 0;      /* a reused name starts unswizzled */
+			nat_tex[textures[i]] = 0;"""),
+    ("""	glFramebufferTexture2D(target, attachment, textarget == 0x84F5 ? GL_TEXTURE_2D : textarget, texture, level);
+	SGL_POST(677);""", """	glFramebufferTexture2D(target, attachment, textarget == 0x84F5 ? GL_TEXTURE_2D : textarget, texture, level);
+	SGL_POST(677);
+	nat_apply(rctx);        /* the bound framebuffer may have become (or stopped being) native */"""),
+    ("""	glBindFramebuffer(target, framebuffer);
+	SGL_POST(672);
+}""", """	glBindFramebuffer(target, framebuffer);
+	SGL_POST(672);
+	nat_apply(rctx);
+}
+
+/* ---- round 64: native 1080p rectangles ---- */
+
+/* CoreAnimation's own (logical) viewport and scissor, per context */
+static struct nat_ctx { void *rctx; GLint vp[4], sc[4]; bool vp_set, sc_set; } nat_ctxs[8];
+static unsigned nat_next;
+
+static struct nat_ctx *
+nat_ctx_of(void *rctx)
+{
+	for (int i = 0; i < 8; i++) {
+		if (nat_ctxs[i].rctx == rctx) {
+			return &nat_ctxs[i];
+		}
+	}
+	struct nat_ctx *c = &nat_ctxs[nat_next++ % 8];
+	memset(c, 0, sizeof(*c));
+	c->rctx = rctx;
+	return c;
+}
+
+/* (re)apply the logical viewport and scissor to the framebuffer bound now */
+void
+nat_apply(void *rctx)
+{
+	if (!nat_on()) {
+		return;
+	}
+	struct nat_ctx *c = nat_ctx_of(rctx);
+	bool n = nat_fb(GL_DRAW_FRAMEBUFFER);
+	if (c->vp_set) {
+		GLint x = c->vp[0], y = c->vp[1];
+		GLsizei w = c->vp[2], h = c->vp[3];
+		if (n) {
+			nat_rect(&x, &y, &w, &h);
+		}
+		glViewport(x, y, w, h);
+	}
+	if (c->sc_set) {
+		GLint x = c->sc[0], y = c->sc[1];
+		GLsizei w = c->sc[2], h = c->sc[3];
+		if (n) {
+			nat_rect(&x, &y, &w, &h);
+		}
+		glScissor(x, y, w, h);
+	}
+}
+
+void
+sgl_Viewport(void *rctx, GLint x, GLint y, GLsizei width, GLsizei height)
+{
+	SGL_CUR(rctx);
+	if (nat_on()) {
+		struct nat_ctx *c = nat_ctx_of(rctx);
+		c->vp[0] = x;
+		c->vp[1] = y;
+		c->vp[2] = width;
+		c->vp[3] = height;
+		c->vp_set = true;
+		if (nat_fb(GL_DRAW_FRAMEBUFFER)) {
+			nat_rect(&x, &y, &width, &height);
+		}
+	}
+	glViewport(x, y, width, height);
+	SGL_POST(335);
+}
+
+void
+sgl_Scissor(void *rctx, GLint x, GLint y, GLsizei width, GLsizei height)
+{
+	SGL_CUR(rctx);
+	if (nat_on()) {
+		struct nat_ctx *c = nat_ctx_of(rctx);
+		c->sc[0] = x;
+		c->sc[1] = y;
+		c->sc[2] = width;
+		c->sc[3] = height;
+		c->sc_set = true;
+		if (nat_fb(GL_DRAW_FRAMEBUFFER)) {
+			nat_rect(&x, &y, &width, &height);
+		}
+	}
+	glScissor(x, y, width, height);
+	SGL_POST(251);
+}
+
+/* the logical rectangle of the (native) read framebuffer into the bound draw target, at the target's size */
+static void
+nat_blit_from_read(GLint x, GLint y, GLsizei w, GLsizei h, GLint dx, GLint dy, GLsizei dw, GLsizei dh)
+{
+	GLboolean sc = glIsEnabled(GL_SCISSOR_TEST);
+	if (sc) {
+		glDisable(GL_SCISSOR_TEST);
+	}
+	nat_rect(&x, &y, &w, &h);
+	glBlitFramebuffer(x, y, x + w, y + h, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+	if (sc) {
+		glEnable(GL_SCISSOR_TEST);
+	}
+}
+
+void
+sgl_CopyTexSubImage2D(void *rctx, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y,
+    GLsizei width, GLsizei height)
+{
+	SGL_CUR(rctx);
+	target = SGL_TGT(target);
+	GLint tex = 0;
+	if (target == GL_TEXTURE_2D && nat_fb(GL_READ_FRAMEBUFFER)) {
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &tex);
+	}
+	if (tex <= 0) {
+		glCopyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height);
+		SGL_POST(56);
+		return;
+	}
+	static GLuint dfb;
+	GLint keep = 0;
+	if (dfb == 0) {
+		glGenFramebuffers(1, &dfb);
+	}
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &keep);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dfb);
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, (GLuint)tex, level);
+	nat_blit_from_read(x, y, width, height, xoffset, yoffset, width, height);
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)keep);
+	SGL_POST(56);
+}
+
+void
+sgl_ReadPixels(void *rctx, GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void *pixels)
+{
+	SGL_CUR(rctx);
+	if (width <= 0 || height <= 0 || !nat_fb(GL_READ_FRAMEBUFFER)) {
+		glReadPixels(x, y, width, height, format, type, pixels);
+		SGL_POST(237);
+		return;
+	}
+	static GLuint rfb, rrb;
+	static GLsizei rw, rh;
+	GLint keep_draw = 0, keep_read = 0;
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &keep_draw);
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &keep_read);
+	if (rfb == 0) {
+		glGenFramebuffers(1, &rfb);
+		glGenRenderbuffers(1, &rrb);
+	}
+	if (rw != width || rh != height) {
+		glBindRenderbuffer(GL_RENDERBUFFER, rrb);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, width, height);
+		rw = width;
+		rh = height;
+	}
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rfb);
+	glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rrb);
+	nat_blit_from_read(x, y, width, height, 0, 0, width, height);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, rfb);
+	glReadPixels(0, 0, width, height, format, type, pixels);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)keep_read);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)keep_draw);
+	SGL_POST(237);
+}
+
+void
+sgl_BlitFramebufferEXT(void *rctx, GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0,
+    GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter)
+{
+	SGL_CUR(rctx);
+	if (nat_fb(GL_READ_FRAMEBUFFER)) {
+		srcX0 = nat_s(srcX0);
+		srcY0 = nat_s(srcY0);
+		srcX1 = nat_s(srcX1);
+		srcY1 = nat_s(srcY1);
+	}
+	if (nat_fb(GL_DRAW_FRAMEBUFFER)) {
+		dstX0 = nat_s(dstX0);
+		dstY0 = nat_s(dstY0);
+		dstX1 = nat_s(dstX1);
+		dstY1 = nat_s(dstY1);
+	}
+	glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
+	SGL_POST(755);
+}"""),
+])

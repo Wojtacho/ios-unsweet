@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 0f8e61a..56acd60 100644
+index 0f8e61a..1c6fbc8 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -82,6 +82,41 @@ enum {
@@ -456,16 +456,16 @@ index 0f8e61a..56acd60 100644
 +	 */
 +	bool flush = fb->fDirty && !fb->fPresentBusy && fb->fPresentTimer != NULL &&
 +	    now - fb->fLastPresent >= fb->fMinGap;
-+	if (flush) {
-+		fb->fLastPresent = now;
-+		fb->fPresentBusy = true;
-+	}
-+	IOLockUnlock(fb->fLock);
  	if (flush) {
 -		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
 -		if (rec != NULL) {
 -			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
 -			fb->fDirty = false;
++		fb->fLastPresent = now;
++		fb->fPresentBusy = true;
++	}
++	IOLockUnlock(fb->fLock);
++	if (flush) {
 +		fb->fPresentTimer->setTimeoutUS(1);
 +	}
 +	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
@@ -746,7 +746,7 @@ index 0f8e61a..56acd60 100644
  		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
  		sweet_fb_note_format(s->pixelFormat, bpe, s->width, s->height);
  		if (w <= 0 || h <= 0) {
-@@ -473,8 +1080,18 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -473,8 +1080,45 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -758,6 +758,33 @@ index 0f8e61a..56acd60 100644
 +		}
 +		uint64_t t3 = mach_absolute_time();
 +		fTInval += t3 - t2;
++		if (fFit && s->nativeFit && src != 0 && bpe == 4 && fWidth == 1080 && fHeight == 1920 &&
++		    s->width == 1242 && s->height == 2208 && s->bytesPerRow >= 1080 * 4 && sx == 0 && sy == 0 &&
++		    s->memory != NULL && s->offset + (uint64_t)1920 * s->bytesPerRow <= s->memory->getLength()) {
++			const uint8_t *sp = (const uint8_t *)(src + s->offset);
++			sweet_fb_dc_civac((uintptr_t)sp, (uint64_t)1920 * s->bytesPerRow);
++			uint32_t keep = fDim != 0 && fDim < 256 ? 256 - fDim : 256;
++			for (uint32_t y = 0; y < 1920; y++) {
++				const uint8_t *row = sp + (uint64_t)y * s->bytesPerRow;
++				uint8_t *out = (uint8_t *)(fDraw + (uint64_t)y * fRowBytes);
++				if (keep == 256) {
++					memcpy(out, row, 1080 * 4);
++				} else {
++					for (uint32_t k = 0; k < 1080 * 4; k++) {
++						out[k] = (uint8_t)((row[k] * keep) >> 8);
++					}
++				}
++			}
++			static bool told;
++			if (!told) {
++				told = true;
++				IOLog("SWEET FB: surface %u drawn at panel size by the GPU: shown 1:1, no CPU scaling\n", id);
++			}
++			fTScale += mach_absolute_time() - t3;
++			OSSafeReleaseNULL(rmap);
++			s->release();
++			continue;
++		}
  		if (fFit) {
  			presentFit(s, src, bpe, sx, sy, dx, dy, w, h);
 +			fTScale += mach_absolute_time() - t3;
@@ -765,7 +792,7 @@ index 0f8e61a..56acd60 100644
  			s->release();
  			continue;
  		}
-@@ -511,13 +1128,41 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -511,13 +1155,41 @@ AppleCLCD::present(const uint8_t *rec)
  		}
  		if (src != 0 && bpe == 4) {
  			for (int32_t y = 0; y < h; y++) {
@@ -808,7 +835,7 @@ index 0f8e61a..56acd60 100644
  }
  
  /*
-@@ -547,7 +1192,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -547,7 +1219,7 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	if (!fFitCleared) {
  		/* Black pillarbox (the console text was there). */
  		for (uint32_t y = 0; y < fHeight; y++) {
@@ -817,7 +844,7 @@ index 0f8e61a..56acd60 100644
  		}
  		fFitCleared = true;
  	}
-@@ -570,19 +1215,53 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
+@@ -570,19 +1242,53 @@ AppleCLCD::presentFit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx,
  	const uint8_t *base = (const uint8_t *)(src + s->offset);
  	const uint32_t fmt = s->pixelFormat;
  	const bool convert = fmt == SWEET_FMT_L10R || fmt == SWEET_FMT_W30R;
@@ -873,7 +900,7 @@ index 0f8e61a..56acd60 100644
  	}
  }
  
-@@ -737,7 +1416,34 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -737,7 +1443,34 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			if (off != fFB->fPowerOff) {
  				fFB->fPowerOff = off;
  				fFB->fFadeStep = 0;

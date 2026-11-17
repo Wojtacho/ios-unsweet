@@ -1149,3 +1149,44 @@ rep("""		if (!(*update & A510F_UPDATE_STANDALONE)) {
 		IOSleep(1);""")
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
 print('ok 8 cores: decon kicks')
+
+# --- round 64: native 1080p. sweetgl draws CoreAnimation's display surfaces at
+# panel size into their top-left 1080x1920 (SweetMali selector 19 marks them
+# nativeFit): copy those 1:1 instead of scaling 1242x2208 on the CPU. The wake
+# fade (fDim) scales each channel as presentFit does.
+rep("""		uint64_t t3 = mach_absolute_time();
+		fTInval += t3 - t2;
+		if (fFit) {
+			presentFit(s, src, bpe, sx, sy, dx, dy, w, h);""", """		uint64_t t3 = mach_absolute_time();
+		fTInval += t3 - t2;
+		if (fFit && s->nativeFit && src != 0 && bpe == 4 && fWidth == 1080 && fHeight == 1920 &&
+		    s->width == 1242 && s->height == 2208 && s->bytesPerRow >= 1080 * 4 && sx == 0 && sy == 0 &&
+		    s->memory != NULL && s->offset + (uint64_t)1920 * s->bytesPerRow <= s->memory->getLength()) {
+			const uint8_t *sp = (const uint8_t *)(src + s->offset);
+			sweet_fb_dc_civac((uintptr_t)sp, (uint64_t)1920 * s->bytesPerRow);
+			uint32_t keep = fDim != 0 && fDim < 256 ? 256 - fDim : 256;
+			for (uint32_t y = 0; y < 1920; y++) {
+				const uint8_t *row = sp + (uint64_t)y * s->bytesPerRow;
+				uint8_t *out = (uint8_t *)(fDraw + (uint64_t)y * fRowBytes);
+				if (keep == 256) {
+					memcpy(out, row, 1080 * 4);
+				} else {
+					for (uint32_t k = 0; k < 1080 * 4; k++) {
+						out[k] = (uint8_t)((row[k] * keep) >> 8);
+					}
+				}
+			}
+			static bool told;
+			if (!told) {
+				told = true;
+				IOLog("SWEET FB: surface %u drawn at panel size by the GPU: shown 1:1, no CPU scaling\\n", id);
+			}
+			fTScale += mach_absolute_time() - t3;
+			OSSafeReleaseNULL(rmap);
+			s->release();
+			continue;
+		}
+		if (fFit) {
+			presentFit(s, src, bpe, sx, sy, dx, dy, w, h);""")
+open(p, 'w', encoding='utf-8', newline='\n').write(s)
+print('ok native 1080p present')

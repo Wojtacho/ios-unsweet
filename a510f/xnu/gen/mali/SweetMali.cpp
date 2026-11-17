@@ -1400,6 +1400,33 @@ SweetMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
 		}
 		return boReply(bo, args);
 	}
+	case 19: {                                      /* SURF_NATIVE (round 64) */
+		/*
+		 * sweetgl asks to draw a surface at panel size: only CoreAnimation's
+		 * display surfaces (backboardd, full iPhone 8 Plus size). Out: 1 if the
+		 * surface is now drawn and shown at 1080x1920, else 0. Boot-arg
+		 * sweetfb_native=0: always 0.
+		 */
+		static int allow = -1;
+		if (allow < 0) {
+			int v = 1;
+			PE_parse_boot_argn("sweetfb_native", &v, sizeof(v));
+			allow = v != 0;
+		}
+		if (nin < 1 || args->scalarOutputCount < 1) {
+			return kIOReturnBadArgument;
+		}
+		SweetSurface *s = sweet_surface_copy((uint32_t)in[0]);
+		bool ok = allow && s != NULL && s->display && s->width == 1242 && s->height == 2208 &&
+		    s->bytesPerRow >= 1080 * 4;
+		if (ok) {
+			s->nativeFit = 1;
+		}
+		OSSafeReleaseNULL(s);
+		args->scalarOutput[0] = ok ? 1 : 0;
+		args->scalarOutputCount = 1;
+		return kIOReturnSuccess;
+	}
 	case 13: {                                      /* SUBMIT */
 		if (nin < 2 || args->scalarOutputCount < 2) {
 			return kIOReturnBadArgument;

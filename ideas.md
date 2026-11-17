@@ -15,11 +15,13 @@ Mesa Panfrost for iOS, and CoreAnimation rendering on the Mali-T720.
   vsync interrupt) and give iOS all 8 cores: about 14% more CPU.
   Done: round 55 (2026-11-17): no shim refresher, SweetFramebuffer triggers DECON every vsync/flip, cpus=8 (testing).
 
-- [ ] **60 Hz direct scanout** (M) (partly: presents at 60 Hz; still a CPU copy + scale per frame)
+- [ ] **60 Hz direct scanout** (M) (partly: presents at 60 Hz into a double buffer, round 50s; still a CPU copy + scale per frame)
   The framebuffer driver copies the finished frame to the panel only 10 times a
   second (`sweetfb_hz`, default 10) and scales 1242x2208 -> 1080x1920 on the
   CPU. Present at 60 Hz and point DECON straight at the finished image (no copy),
   like ios-topaz's direct scanout. Needed for smooth animation once the GPU draws.
+  With native 1080p rendering (below) the CPU scale goes away and only a 1:1
+  copy is left.
 
 - [x] **GPU at full clock** (S)
   The Mali runs from the 400 MHz bus clock (aclk_g3d_400). Program its own PLL
@@ -29,14 +31,27 @@ Mesa Panfrost for iOS, and CoreAnimation rendering on the Mali-T720.
 
 ## Graphics and display
 
-- [ ] **Native 1080p rendering** (M)
+- [ ] **Native 1080p rendering** (M) (next speed round, 2026-11-17)
   iOS renders the iPhone 8 Plus canvas, 1242x2208: 32% more pixels than the
   1080x1920 panel. Render at the panel size, or let the GPU do the scaling.
+  Plan: iOS keeps its 1242x2208 layout (same look); sweetgl draws the screen
+  target at 1080x1920 (viewport, scissor and copy rectangles scaled by
+  1920/2208) into the top-left of the same surface, and the kernel shows it
+  1:1. About 24% less GPU work per full-screen pass and no CPU scaling (the
+  GPU is the frame limit at ~12 fps, round 60).
 
-- [ ] **Fix the red clock text** (S-M)
+- [x] **Fix the red clock text** (S-M)
   The lock-screen clock starts red and fades to white when pressing Home. Likely
   CoreAnimation's vibrancy / colour filter misbehaving on the CPU renderer; may
   go away with the GPU, check again then.
+  Done: gone since CoreAnimation renders on the GPU (user check, 2026-11-17).
+
+- [ ] **Folder and app switcher materials** (S-M)
+  The frosted square behind folder icons, the open folder's panel and the app
+  switcher's blurred background are missing (the dock's material works; the
+  folder recipe is the same with a smaller backdrop scale). Cards of apps not
+  opened since boot are blank: snapshots need a JPEG codec (AppleJPEGDriver is
+  a stand-in). Round 63 probes every draw over the folder icon.
 
 - [x] **Astronomy wallpaper off** (S)
   AegirPoster (the 3D Earth wallpaper) needs Metal: it crashed 93 times in one
@@ -55,7 +70,12 @@ Mesa Panfrost for iOS, and CoreAnimation rendering on the Mali-T720.
   clock (through the HSI2C3 batcher, like the touch power and the CPU voltage)
   and set the kernel clock from it.
 
-- [ ] **Wi-Fi** (L)
+- [ ] **Wi-Fi** (L) (next big project after the speed round, for Safari)
+  Plan: SDIO host (same DW-MMC family as our eMMC driver), the Broadcom
+  firmware + NVRAM from the phone's own Android backups, the firmware's own
+  WPA2 supplicant (no wpa_supplicant), and an Ethernet-style interface that
+  iOS uses like a wired network (network name and password from boot-args).
+  The Settings Wi-Fi page would stay empty: it needs Apple's own driver.
   Broadcom Wi-Fi chip: SDIO host, firmware loading and a driver that wifid
   accepts (ios-flame did this for Qualcomm's WCN3990 in user space: `wland`).
 

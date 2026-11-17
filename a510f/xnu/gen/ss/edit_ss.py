@@ -355,3 +355,14 @@ edit(cpp, [
 		}
 """),
 ])
+
+# A510F round 64: native 1080p. SweetMali selector 19 marks a display surface
+# that sweetgl draws at panel size (top-left 1080x1920); the framebuffer then
+# shows it 1:1 instead of scaling it.
+edit(h, [
+    ("""	volatile uint32_t         gpuImported;  /* SweetMali IMPORT made a GPU mapping of it (round 60) */
+""", """	volatile uint32_t         gpuImported;  /* SweetMali IMPORT made a GPU mapping of it (round 60) */
+	volatile uint32_t         nativeFit;    /* drawn at panel size in its top-left (round 64) */
+"""),
+    ("""gpuImported = 0; return OSObject::init(); }""", """gpuImported = 0; nativeFit = 0; return OSObject::init(); }"""),
+])

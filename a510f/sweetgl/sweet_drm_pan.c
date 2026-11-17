@@ -51,6 +51,7 @@
 #define SEL_LOG         16
 #define SEL_SUBMIT_ASYNC 17
 #define SEL_WAIT_SEQ    18
+#define SEL_SURF_NATIVE 19      /* round 64: draw a display surface at 1080x1920 */
 
 struct sbo {
 	uint64_t gpu, map, size;
@@ -594,6 +595,23 @@ sweet_drm_import_iosurface(uint32_t surface_id, uint64_t map, uint32_t *handle, 
 		*size = out[3];
 	}
 	return err;
+}
+
+/*
+ * Round 64: may this surface be drawn at the panel size (1080x1920, top-left)?
+ * Yes only for CoreAnimation's display surfaces; the kernel then shows it 1:1.
+ * An older kernel answers with an error: no.
+ */
+int
+sweet_drm_surface_native(uint32_t surface_id)
+{
+	if (!conn) {
+		return 0;
+	}
+	uint64_t in = surface_id, out[1] = {0};
+	uint32_t n = 1;
+	kern_return_t kr = IOConnectCallScalarMethod(conn, SEL_SURF_NATIVE, &in, 1, out, &n);
+	return kr == KERN_SUCCESS && n >= 1 && out[0] == 1;
 }
 
 int

@@ -15,6 +15,7 @@ uint64_t sweet_drm_prime_size(int fd);
 
 /* A GEM handle for an IOSurface's memory: 0 or -errno. */
 int sweet_drm_import_iosurface(uint32_t surface_id, uint64_t map, uint32_t *handle, uint64_t *size);
+int sweet_drm_surface_native(uint32_t surface_id);
 
 /* A prime fd for a handle (panfrost imports by fd only); close with sweet_drm_close_fd. */
 int sweet_drm_handle_to_fd(uint32_t handle);
