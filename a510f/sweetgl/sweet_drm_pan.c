@@ -966,3 +966,231 @@ ca_dbg_init(void)
 	}
 	sweet_drm_log("sweetgl: CA debug: backdrops + offscreens, stderr to the log from %u s", ca_dbg_start_s);
 }
+
+/*
+ * Round 67: CoreAnimation writes CA_PRINT_* through os_log, not stderr
+ * (rounds 60 and 66: nothing on stderr). sweetgl is an inserted library, so
+ * dyld applies its __interpose section to every image: _os_log_impl comes
+ * here first, calls the real one, and QuartzCore's messages (formatted from
+ * the os_log argument buffer) go to the kernel log in the SWEETGL_CADBG
+ * window (N..N+40 s after boot, each distinct line once, at most 600).
+ */
+#include <dlfcn.h>
+#include <os/log.h>
+
+static pthread_mutex_t ca_log_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void
+ca_log_emit(const char *line)
+{
+	static uint32_t seen[1024];
+	static unsigned sent;
+	uint32_t h = 2166136261u;
+	for (const char *c = line; *c; c++) {
+		if (*c < '0' || *c > '9') {
+			h = (h ^ (uint8_t)*c) * 16777619u;
+		}
+	}
+	h |= 1;
+	pthread_mutex_lock(&ca_log_lock);
+	int fresh = sent < 600 && seen[h % 1024] != h;
+	if (fresh) {
+		seen[h % 1024] = h;
+		sent++;
+	}
+	pthread_mutex_unlock(&ca_log_lock);
+	if (fresh) {
+		sweet_drm_log("ca: %s", line);
+	}
+}
+
+/* printf-style rendering of an os_log format and its argument buffer (type << 4 | flags, size, data) */
+static void
+ca_log_format(const char *fmt, const uint8_t *buf, uint32_t size, char *out, size_t outlen)
+{
+	typedef const void *(*copy_fn)(const void *);
+	typedef unsigned char (*cstr_fn)(const void *, char *, long, uint32_t);
+	typedef void (*release_fn)(const void *);
+	static copy_fn cf_copy;
+	static cstr_fn cf_cstr;
+	static release_fn cf_release;
+	if (cf_copy == NULL) {
+		cf_copy = (copy_fn)dlsym(RTLD_DEFAULT, "CFCopyDescription");
+		cf_cstr = (cstr_fn)dlsym(RTLD_DEFAULT, "CFStringGetCString");
+		cf_release = (release_fn)dlsym(RTLD_DEFAULT, "CFRelease");
+	}
+	size_t o = 0;
+	uint32_t pos = 2, n = size >= 2 ? buf[1] : 0, used = 0;
+	for (const char *p = fmt; *p != 0 && o + 1 < outlen; p++) {
+		if (*p != '%') {
+			out[o++] = *p;
+			continue;
+		}
+		p++;
+		if (*p == '%') {
+			out[o++] = '%';
+			continue;
+		}
+		if (*p == '{') {
+			while (*p != 0 && *p != '}') {
+				p++;
+			}
+			if (*p == 0) {
+				break;
+			}
+			p++;
+		}
+		char spec[24];
+		size_t sl = 0;
+		spec[sl++] = '%';
+		while (*p != 0 && strchr("-+ #0123456789.*hlLqjzt", *p) != NULL) {
+			if (strchr("*hlLqjzt", *p) == NULL && sl < 12) {
+				spec[sl++] = *p;
+			}
+			p++;
+		}
+		if (*p == 0) {
+			break;
+		}
+		char conv = *p;
+		/* the next value (count arguments set the precision of a following string) */
+		int prec = -1;
+		uint8_t type = 0xff, sz = 0;
+		const uint8_t *data = NULL;
+		while (used < n && pos + 2 <= size) {
+			type = buf[pos] >> 4;
+			sz = buf[pos + 1];
+			data = buf + pos + 2;
+			if (pos + 2 + sz > size) {
+				data = NULL;
+				break;
+			}
+			pos += 2 + sz;
+			used++;
+			if (type == 1) {
+				int32_t c32 = 0;
+				memcpy(&c32, data, sz >= 4 ? 4 : sz);
+				prec = c32;
+				data = NULL;
+				continue;
+			}
+			break;
+		}
+		char tmp[200];
+		tmp[0] = 0;
+		if (data == NULL) {
+			snprintf(tmp, sizeof(tmp), "<?>");
+		} else if (type == 2 || conv == 's') {
+			const char *str = NULL;
+			if (sz == 8) {
+				memcpy(&str, data, 8);
+			}
+			if (str == NULL) {
+				str = "(null)";
+			}
+			snprintf(tmp, sizeof(tmp), "%.*s", prec >= 0 && prec < 190 ? prec : 190, str);
+		} else if (type == 4 || conv == '@') {
+			const void *obj = NULL;
+			if (sz == 8) {
+				memcpy(&obj, data, 8);
+			}
+			snprintf(tmp, sizeof(tmp), "(null)");
+			if (obj != NULL && cf_copy != NULL && cf_cstr != NULL && cf_release != NULL) {
+				const void *d = cf_copy(obj);
+				if (d != NULL) {
+					if (!cf_cstr(d, tmp, (long)sizeof(tmp), 0x08000100u)) {
+						snprintf(tmp, sizeof(tmp), "<object>");
+					}
+					cf_release(d);
+				}
+			}
+		} else if (strchr("fFeEgGaA", conv) != NULL && sz == 8) {
+			double v = 0;
+			memcpy(&v, data, 8);
+			spec[sl] = conv;
+			spec[sl + 1] = 0;
+			snprintf(tmp, sizeof(tmp), spec, v);
+		} else {
+			int64_t v = 0;
+			if (sz == 1) {
+				int8_t x = 0;
+				memcpy(&x, data, 1);
+				v = x;
+			} else if (sz == 2) {
+				int16_t x = 0;
+				memcpy(&x, data, 2);
+				v = x;
+			} else if (sz == 4) {
+				int32_t x = 0;
+				memcpy(&x, data, 4);
+				v = x;
+			} else if (sz == 8) {
+				memcpy(&v, data, 8);
+			}
+			if (conv == 'c') {
+				snprintf(tmp, sizeof(tmp), "%c", (char)v);
+			} else {
+				char c2 = strchr("diouxX", conv) != NULL ? conv : 'x';
+				if (conv == 'p') {
+					spec[sl++] = '#';
+				}
+				spec[sl] = 'l';
+				spec[sl + 1] = 'l';
+				spec[sl + 2] = c2;
+				spec[sl + 3] = 0;
+				snprintf(tmp, sizeof(tmp), spec, (long long)v);
+			}
+		}
+		for (const char *t = tmp; *t != 0 && o + 1 < outlen; t++) {
+			out[o++] = *t;
+		}
+	}
+	out[o] = 0;
+}
+
+static void
+sweet_os_log_impl(void *dso, os_log_t lg, os_log_type_t type, const char *format, uint8_t *buf, uint32_t size)
+{
+	_os_log_impl(dso, lg, type, format, buf, size);
+	if (ca_dbg_start_s == 0 || format == NULL || dso == NULL) {
+		return;
+	}
+	static void *volatile qc;
+	static void *volatile other[16];
+	static volatile unsigned nother;
+	if (dso != qc) {
+		for (unsigned i = 0; i < 16; i++) {
+			if (other[i] == dso) {
+				return;
+			}
+		}
+		Dl_info di;
+		if (dladdr(dso, &di) != 0 && di.dli_fname != NULL && strstr(di.dli_fname, "QuartzCore") != NULL) {
+			qc = dso;
+		} else {
+			other[nother++ % 16] = dso;
+			return;
+		}
+	}
+	static mach_timebase_info_data_t tb;
+	if (tb.denom == 0) {
+		mach_timebase_info(&tb);
+	}
+	uint64_t s = mach_absolute_time() * tb.numer / tb.denom / 1000000000ull;
+	if (s < ca_dbg_start_s || s >= ca_dbg_start_s + 40) {
+		return;
+	}
+	char line[220];
+	ca_log_format(format, buf, size, line, sizeof(line));
+	for (char *c = line; *c != 0; c++) {
+		if (*c == 10 || *c == 13) {
+			*c = ' ';
+		}
+	}
+	ca_log_emit(line);
+}
+
+__attribute__((used, section("__DATA,__interpose")))
+static const struct { const void *replacement; const void *replacee; } sweet_interpose_os_log = {
+	(const void *)sweet_os_log_impl, (const void *)_os_log_impl
+};
