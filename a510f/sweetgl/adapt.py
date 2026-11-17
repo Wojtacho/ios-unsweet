@@ -1566,3 +1566,80 @@ sgl_DrawArrays(void *rctx, GLenum mode, GLint first, GLsizei count)"""),
 	glDrawElements(mode, count, type, indices);
 	sgl_auto_scissor_end(as_set);"""),
 ])
+
+
+# Round 53: the folder icon's frosted square (page 2) is missing. A light
+# probe instead of the full trace (which lost the home double press): with
+# SWEETGL_PROBE=x,y,w,h (render-target pixels, top-left origin; 1242x2208)
+# every draw into the screen-sized target whose bounds meet the rectangle is
+# logged (program, blend, scissor, bounds, unit 0/1 textures and their
+# sources), at most 400 lines, from 100 s after start.
+edit('eagl.c', [
+    ("""static void
+sgl_auto_scissor_end(bool set)""", """static struct { int on; GLint x, y, w, h; int left; time_t from; } probe = {-1};
+
+static void
+sgl_probe(GLenum mode, GLsizei count, GLenum itype, const void *indices, GLint first)
+{
+	if (probe.on < 0) {
+		const char *e = getenv("SWEETGL_PROBE");
+		probe.on = e != NULL && sscanf(e, "%d,%d,%d,%d", &probe.x, &probe.y, &probe.w, &probe.h) == 4;
+		probe.left = 400;
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		probe.from = ts.tv_sec + 100;
+	}
+	if (!probe.on || probe.left <= 0) {
+		return;
+	}
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	if (ts.tv_sec < probe.from) {
+		return;
+	}
+	GLint vp[4] = {0}, sc[4] = {0}, fb = 0, prog = 0;
+	glGetIntegerv(GL_VIEWPORT, vp);
+	if (vp[2] != 1242 || vp[3] != 2208) {
+		return;
+	}
+	/* bounds: the scissor if on, else the vertex bounds as the auto scissor sets them */
+	GLboolean scon = glIsEnabled(GL_SCISSOR_TEST);
+	glGetIntegerv(GL_SCISSOR_BOX, sc);
+	if (!scon) {
+		sc[0] = 0;
+		sc[1] = 0;
+		sc[2] = vp[2];
+		sc[3] = vp[3];
+	}
+	/* probe rect in GL coordinates (bottom-left origin) */
+	GLint px0 = probe.x, px1 = probe.x + probe.w, py0 = vp[3] - (probe.y + probe.h), py1 = vp[3] - probe.y;
+	if (sc[0] >= px1 || sc[0] + sc[2] <= px0 || sc[1] >= py1 || sc[1] + sc[3] <= py0) {
+		return;
+	}
+	probe.left--;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb);
+	glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+	GLint bs = 0, bd = 0;
+	glGetIntegerv(GL_BLEND_SRC_RGB, &bs);
+	glGetIntegerv(GL_BLEND_DST_RGB, &bd);
+	GLuint t0 = unit_held[0], t1 = unit_held[1];
+	sweet_drm_log("sweetgl: PROBE %lds prog %d fb %d mode %#x n %d blend %d %#x/%#x scissor %d %d,%d %dx%d "
+	    "u0 %u (%c surf %u %c%c%c%c %ux%u mean %s) u1 %u (%c surf %u %ux%u)",
+	    (long)ts.tv_sec, prog, fb, mode, count, glIsEnabled(GL_BLEND), bs, bd, scon, sc[0], sc[1], sc[2], sc[3],
+	    t0, t0 < 8192 && tex_src[t0].kind ? tex_src[t0].kind : '-', t0 < 8192 ? tex_src[t0].surf : 0,
+	    FCC(t0 < 8192 ? tex_src[t0].fourcc : 0), t0 < 8192 ? tex_src[t0].w : 0, t0 < 8192 ? tex_src[t0].h : 0,
+	    t0 < 8192 ? tex_src[t0].mean : "",
+	    t1, t1 < 8192 && tex_src[t1].kind ? tex_src[t1].kind : '-', t1 < 8192 ? tex_src[t1].surf : 0,
+	    t1 < 8192 ? tex_src[t1].w : 0, t1 < 8192 ? tex_src[t1].h : 0);
+	(void)itype;
+	(void)indices;
+	(void)first;
+}
+
+static void
+sgl_auto_scissor_end(bool set)"""),
+    ("""	bool as_set = sgl_auto_scissor(0, NULL, first, count);""", """	sgl_probe(mode, count, 0, NULL, first);
+	bool as_set = sgl_auto_scissor(0, NULL, first, count);"""),
+    ("""	bool as_set = sgl_auto_scissor(type, indices, 0, count);""", """	sgl_probe(mode, count, type, indices, 0);
+	bool as_set = sgl_auto_scissor(type, indices, 0, count);"""),
+])
