@@ -1570,7 +1570,7 @@ sgl_DrawArrays(void *rctx, GLenum mode, GLint first, GLsizei count)"""),
 
 # Round 53: the folder icon's frosted square (page 2) is missing. A light
 # probe instead of the full trace (which lost the home double press): with
-# SWEETGL_PROBE=x,y,w,h (render-target pixels, top-left origin; 1242x2208)
+# SWEETGL_PROBE=XxYxWxH (render-target pixels, top-left origin; 1242x2208)
 # every draw into the screen-sized target whose bounds meet the rectangle is
 # logged (program, blend, scissor, bounds, unit 0/1 textures and their
 # sources), at most 400 lines, from 100 s after start.
@@ -1583,7 +1583,7 @@ sgl_probe(GLenum mode, GLsizei count, GLenum itype, const void *indices, GLint f
 {
 	if (probe.on < 0) {
 		const char *e = getenv("SWEETGL_PROBE");
-		probe.on = e != NULL && sscanf(e, "%d,%d,%d,%d", &probe.x, &probe.y, &probe.w, &probe.h) == 4;
+		probe.on = e != NULL && sscanf(e, "%dx%dx%dx%d", &probe.x, &probe.y, &probe.w, &probe.h) == 4;   /* x: sweetenv splits at commas */
 		probe.left = 400;
 		struct timespec ts;
 		clock_gettime(CLOCK_MONOTONIC, &ts);

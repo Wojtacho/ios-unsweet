@@ -2,7 +2,7 @@ diff --git a/osfmk/arm64/a510f_prof.c b/osfmk/arm64/a510f_prof.c
 new file mode 100644
 --- /dev/null
 +++ b/osfmk/arm64/a510f_prof.c
-@@ -0,0 +1,466 @@
+@@ -0,0 +1,474 @@
 +/*
 + * A510F: sampling CPU profiler (autopilot "prof SECONDS", round 46).
 + *
@@ -158,6 +158,10 @@ new file mode 100644
 +		uint64_t pc2 = get_saved_state_pc(st);
 +		bool k = !PSR64_IS_USER(get_saved_state_cpsr(st));
 +		prof_add2(((uint64_t)ni << 56) | ((uint64_t)k << 55) | (pc2 & 0x7fffffffffffull));
++		if (k) {
++			/* the kernel caller: who spent this time (round 54) */
++			prof_add2(((uint64_t)ni << 56) | (1ull << 55) | (1ull << 54) | (get_saved_state_lr(st) & 0x7fffffffffffull));
++		}
 +		/*
 +		 * Round 47: the user call stack, each frame counted once per
 +		 * sample (inclusive: callers of objc_msgSend & co). From the
@@ -321,6 +325,10 @@ new file mode 100644
 +			used2[best] = 1;
 +			uint64_t key = prof_tab2[best].key, pc = key & 0x7fffffffffffull;
 +			const char *kc = (key & (1ull << 54)) ? "C" : "U";
++			if ((key & (1ull << 54)) && (key & (1ull << 55))) {
++				printf("A510F PROF: %s %5u KC 0x%llx\n", prof_names[bi].name, prof_tab2[best].n, pc | 0xffff800000000000ull);
++				continue;
++			}
 +			if (key & (1ull << 54)) {
 +				if (pc >= sc_base && pc < sc_base + sc_size) {
 +					printf("A510F PROF: %s %5u C cache+0x%llx\n", prof_names[bi].name, prof_tab2[best].n, pc - sc_base);
