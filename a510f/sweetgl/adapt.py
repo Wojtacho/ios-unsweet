@@ -1454,6 +1454,8 @@ edit('eagl.c', [
     ("""void
 sgl_DrawArrays(void *rctx, GLenum mode, GLint first, GLsizei count)""", """static GLint as_posloc[PROG_MAX], as_matloc[PROG_MAX];   /* location + 1; -1 none; 0 not looked up */
 static struct { bool on; GLint box[4]; } as_saved;
+static GLint as_bbox[4];        /* the last auto scissor's box (probe) */
+static bool as_bbox_ok;
 
 /* before a draw: scissor at the draw's bounds when it has none (true: set, restore after) */
 static bool
@@ -1464,6 +1466,7 @@ sgl_auto_scissor(GLenum itype, const void *indices, GLint first, GLsizei count)
 		const char *e = getenv("SWEETGL_AUTOSCISSOR");
 		enabled = !(e != NULL && e[0] == '0');
 	}
+	as_bbox_ok = false;
 	if (!enabled || count <= 0 || count > 4096 || glIsEnabled(GL_SCISSOR_TEST)) {
 		return false;
 	}
@@ -1542,6 +1545,11 @@ sgl_auto_scissor(GLenum itype, const void *indices, GLint first, GLsizei count)
 	if ((long)(x1 - x0) * (y1 - y0) * 10 > (long)vp[2] * vp[3] * 9) {
 		return false;           /* (nearly) the whole target anyway */
 	}
+	as_bbox[0] = x0;
+	as_bbox[1] = y0;
+	as_bbox[2] = x1 - x0;
+	as_bbox[3] = y1 - y0;
+	as_bbox_ok = true;
 	glGetIntegerv(GL_SCISSOR_BOX, as_saved.box);
 	glEnable(GL_SCISSOR_TEST);
 	glScissor(x0, y0, x1 - x0, y1 - y0);
@@ -1587,7 +1595,7 @@ sgl_probe(GLenum mode, GLsizei count, GLenum itype, const void *indices, GLint f
 		probe.left = 400;
 		struct timespec ts;
 		clock_gettime(CLOCK_MONOTONIC, &ts);
-		probe.from = ts.tv_sec + 100;
+		probe.from = 145;      /* CLOCK_MONOTONIC = time since boot: page 2 is up at ~150 s */
 	}
 	if (!probe.on || probe.left <= 0) {
 		return;
@@ -1602,14 +1610,14 @@ sgl_probe(GLenum mode, GLsizei count, GLenum itype, const void *indices, GLint f
 	if (vp[2] != 1242 || vp[3] != 2208) {
 		return;
 	}
-	/* bounds: the scissor if on, else the vertex bounds as the auto scissor sets them */
+	/* bounds: the auto scissor's box (set just before), else a small scissor; big draws are skipped */
 	GLboolean scon = glIsEnabled(GL_SCISSOR_TEST);
 	glGetIntegerv(GL_SCISSOR_BOX, sc);
-	if (!scon) {
-		sc[0] = 0;
-		sc[1] = 0;
-		sc[2] = vp[2];
-		sc[3] = vp[3];
+	if (as_bbox_ok) {
+		memcpy(sc, as_bbox, sizeof(sc));
+	}
+	if (!scon || sc[2] > 600 || sc[3] > 600) {
+		return;
 	}
 	/* probe rect in GL coordinates (bottom-left origin) */
 	GLint px0 = probe.x, px1 = probe.x + probe.w, py0 = vp[3] - (probe.y + probe.h), py1 = vp[3] - probe.y;
@@ -1638,8 +1646,8 @@ sgl_probe(GLenum mode, GLsizei count, GLenum itype, const void *indices, GLint f
 
 static void
 sgl_auto_scissor_end(bool set)"""),
-    ("""	bool as_set = sgl_auto_scissor(0, NULL, first, count);""", """	sgl_probe(mode, count, 0, NULL, first);
-	bool as_set = sgl_auto_scissor(0, NULL, first, count);"""),
-    ("""	bool as_set = sgl_auto_scissor(type, indices, 0, count);""", """	sgl_probe(mode, count, type, indices, 0);
-	bool as_set = sgl_auto_scissor(type, indices, 0, count);"""),
+    ("""	bool as_set = sgl_auto_scissor(0, NULL, first, count);""", """	bool as_set = sgl_auto_scissor(0, NULL, first, count);
+	sgl_probe(mode, count, 0, NULL, first);"""),
+    ("""	bool as_set = sgl_auto_scissor(type, indices, 0, count);""", """	bool as_set = sgl_auto_scissor(type, indices, 0, count);
+	sgl_probe(mode, count, type, indices, 0);"""),
 ])
