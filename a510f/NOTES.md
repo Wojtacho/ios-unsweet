@@ -1491,3 +1491,32 @@ On the phone (TWRP): boot a510f-ios-boot-r60.tar (63f8efe kernel run
 Next: flash round 61, check the scaler source samples, the folder/switcher
 screenshots; speed: per-draw CPU cost in backboardd (0.6 ms/draw) and the
 full-screen pass count.
+
+## 2026-11-17 (night): rounds 61-64, end of the speed work
+
+On the phone (TWRP): boot a510f-ios-boot-r64.tar (2c87f43, kernel run
+44160084662) + sweetgl 2c87f43 (run 44160084679).
+
+- Round 61: the software scaler waits for the GPU before copying CA snapshots;
+  the sources were never empty (64 of 64 samples). Folder/switcher unchanged.
+- Round 62: CA_BACKDROP_SCALE=0.25 had no effect (pixel-identical).
+  Recipes (MaterialKit, read over TWRP): folderLight = dockLight with
+  backdropScale 0.125 (dock 0.25); folderExpanded 0.05. SpringBoard's blur
+  qualities come from product lists (sbf_*GraphicsQuality, _currentProduct):
+  iPhone10,2 gets full quality (UIKit _graphicsQuality returns 100).
+- Round 63: probe over the folder icon (page 2): CA renders the folder's
+  backdrop capture (184x184 target sampling the screen surface, blur chain
+  82x142 ...) but no screen draw uses the result. CA samples display surfaces
+  directly as textures for backdrops (no CopyTexSubImage). Probe budget ran
+  out at 157 s (CA scissors every draw to the full screen): the open folder
+  was not covered. CalendarWidgetExtension off: <= ~10% more frames (noise),
+  back on.
+- Round 64, native 1080p (sweetgl + kernel selector 19, nativeFit): display
+  surfaces 2/4 (and 438) drawn at 1080x1920 and shown 1:1. Full-screen pass
+  6.3 -> 5.1 ms, GPU busy down; swipes 99-141 frames/10 s (r63 118-131): the
+  CPU side (backboardd ~50 ms a frame, SpringBoard) now limits as much as the
+  GPU. Screenshots match round 61 (~1% pixels differ: clock, antialiasing).
+  Off: SWEETGL_NATIVE=0 or sweetfb_native=0.
+
+Next: Wi-Fi (see ideas.md); folder materials need a probe of the open folder
+(budget per target, from 163 s).
