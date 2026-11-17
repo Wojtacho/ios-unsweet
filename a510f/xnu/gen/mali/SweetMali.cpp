@@ -1394,6 +1394,7 @@ SweetMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
 		    (s->wrapped || s->display) ? kIOMapDefaultCache : kIOMapWriteCombineCache, false);
 		if (bo != NULL) {
 			bo->surface = s;
+			s->gpuImported = 1;      /* CPU locks of it wait for the GPU (round 60) */
 		} else {
 			s->release();
 		}

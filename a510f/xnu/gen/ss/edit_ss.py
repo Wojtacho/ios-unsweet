@@ -276,3 +276,59 @@ edit(cpp, [
 	}
 	s->cacheMode = sweet_dict_u32(props, "IOSurfaceCacheMode", 0);"""),
 ])
+
+# A510F round 60: a CPU lock waits for the GPU only when the GPU can touch the
+# surface (imported into SweetMali by some process). CPU-only surfaces (text,
+# icons drawn by apps before upload, IOSurface-backed CPU buffers) lock at
+# once. Every 10 s: lock count, how many waited and the time spent waiting.
+edit(h, [
+    ("""	bool                      display;
+""", """	bool                      display;
+	volatile uint32_t         gpuImported;  /* SweetMali IMPORT made a GPU mapping of it (round 60) */
+"""),
+    ("""wrapped = false; display = false; return OSObject::init(); }""",
+     """wrapped = false; display = false; gpuImported = 0; return OSObject::init(); }"""),
+])
+edit(cpp, [
+    ("""	sweet_mali_wait_seq(sweet_mali_seq());
+""", """	SweetSurface *ls = sweet_surface_held(fLock, fRefs, (uint32_t)(uintptr_t)id);
+	if (ls != NULL) {
+		static uint64_t n_lock, n_wait, t_wait, t_last;
+		uint64_t t0 = mach_absolute_time();
+		n_lock++;
+		if (ls->gpuImported) {
+			uint64_t q = sweet_mali_seq();
+			if (q != 0) {
+				sweet_mali_wait_seq(q);
+				n_wait++;
+				t_wait += mach_absolute_time() - t0;
+			}
+		}
+		if (t_last == 0) {
+			t_last = t0;
+		}
+		uint64_t ns = 0;
+		absolutetime_to_nanoseconds(t0 - t_last, &ns);
+		if (ns >= 10000000000ull) {
+			uint64_t w = 0;
+			absolutetime_to_nanoseconds(t_wait, &w);
+			IOLog("SWEET SURF: locks (10 s): %llu, %llu waited for the GPU, %llu ms waiting\n",
+			    n_lock, n_wait, w / 1000000);
+			n_lock = n_wait = t_wait = 0;
+			t_last = t0;
+		}
+		ls->release();
+	}
+"""),
+])
+edit(cpp, [
+    ("""extern "C" void sweet_mali_wait_seq(uint64_t seq);
+
+IOReturn
+IOSurfaceRootUserClient::trapLock(""", """extern "C" void sweet_mali_wait_seq(uint64_t seq);
+extern "C" uint64_t mach_absolute_time(void);
+extern "C" void absolutetime_to_nanoseconds(uint64_t abstime, uint64_t *result);
+
+IOReturn
+IOSurfaceRootUserClient::trapLock("""),
+])

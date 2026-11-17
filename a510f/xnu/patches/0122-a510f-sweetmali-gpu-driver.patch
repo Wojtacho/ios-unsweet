@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
-@@ -0,0 +1,1585 @@
+@@ -0,0 +1,1586 @@
 +/*
 + * SweetMali: kernel driver for the A510F's Mali-T720 MP2 (Exynos 7580),
 + * shaped after Linux panfrost (drivers/gpu/drm/panfrost) so that Mesa's
@@ -1400,6 +1400,7 @@ index 0000000..1111111
 +		    (s->wrapped || s->display) ? kIOMapDefaultCache : kIOMapWriteCombineCache, false);
 +		if (bo != NULL) {
 +			bo->surface = s;
++			s->gpuImported = 1;      /* CPU locks of it wait for the GPU (round 60) */
 +		} else {
 +			s->release();
 +		}
