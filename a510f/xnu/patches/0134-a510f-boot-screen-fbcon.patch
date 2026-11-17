@@ -2,7 +2,7 @@ diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
 index 19f27cd..4868ab3 100644
 --- a/pexpert/arm/pe_serial.c
 +++ b/pexpert/arm/pe_serial.c
-@@ -761,6 +761,23 @@ fbcon_transmit_ready(void)
+@@ -761,6 +761,29 @@ fbcon_transmit_ready(void)
  static void
  fbcon_transmit_data(uint8_t c)
  {
@@ -14,9 +14,15 @@ index 19f27cd..4868ab3 100644
 +	 */
 +	{
 +		static int sweet_boot = -1;
-+		if (sweet_boot < 0 && PE_state.bootArgs != NULL) {
++		static int sweet_tries;
++		extern volatile int a510f_bootscreen_on;        /* bsd/dev/a510f_touch.c */
++		if (sweet_boot != 1 && sweet_tries < 100000 && PE_state.bootArgs != NULL) {
 +			int v = 0;
++			sweet_tries++;      /* retried: an early parse may not find the args yet */
 +			sweet_boot = PE_parse_boot_argn("sweetboot", &v, sizeof(v)) && v;
++		}
++		if (a510f_bootscreen_on) {
++			sweet_boot = 1;
 +		}
 +		if (sweet_boot == 1 && !panic_active()) {
 +			return;
