@@ -39,6 +39,7 @@
 #include <net/if_ether.h>
 #include <net/kpi_interface.h>
 #include <net/route.h>
+#include <net/bpf.h>
 #include <netinet/in.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
@@ -1678,7 +1679,7 @@ static errno_t
 wif_output(ifnet_t ifp, mbuf_t m)
 {
 	size_t len = mbuf_pkthdr_len(m);
-	(void)ifp;
+	bpf_tap_out(ifp, DLT_EN10MB, m, NULL, 0);
 	lck_mtx_lock(&wif_lock);
 	unsigned next = (txq_head + 1u) % TXQ;
 	if (len <= sizeof(txq[0].b) && next != txq_tail && mbuf_copydata(m, 0, len, txq[txq_head].b) == 0) {
@@ -1708,6 +1709,7 @@ wif_deliver(const uint8_t *f, uint32_t len)
 	mbuf_setlen(m, len);
 	mbuf_pkthdr_setlen(m, len);
 	mbuf_pkthdr_setrcvif(m, wif);
+	bpf_tap_in(wif, DLT_EN10MB, m, NULL, 0);
 	mbuf_pkthdr_setheader(m, d);
 	mbuf_setdata(m, d + 14, len - 14u);
 	mbuf_pkthdr_adjustlen(m, -14);
@@ -1756,6 +1758,12 @@ wif_attach(void)
 	sdl.sdl_alen = 6;
 	memcpy(LLADDR(&sdl), w_mac, 6);
 	e = ifnet_attach(wif, &sdl);
+	if (e == 0) {
+		bpfattach(wif, DLT_EN10MB, 14);
+		(void)ifnet_set_flags(wif, IFF_UP | IFF_RUNNING, IFF_UP | IFF_RUNNING);   /* round 81: round 80 sent got ENETDOWN */
+		extern void a510f_net_publish(const uint8_t *mac, const char *bsd_name, uint32_t unit);
+		a510f_net_publish(w_mac, "en0", 0);
+	}
 	printf("A510F WIFI: en0 attached (%d)\n", e);
 	return e;
 }
@@ -1783,7 +1791,7 @@ wif_ipconfig(void)
 	bzero(&ifr, sizeof(ifr));
 	strlcpy(ifr.ifr_name, "en0", sizeof(ifr.ifr_name));
 	errno_t ea = sock_ioctl(so, SIOCPROTOATTACH, &ifr);
-	ifr.ifr_flags = IFF_UP | IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
+	ifr.ifr_flags = IFF_UP | IFF_RUNNING | IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
 	errno_t ef = sock_ioctl(so, SIOCSIFFLAGS, &ifr);
 	struct ifaliasreq ifra;
 	bzero(&ifra, sizeof(ifra));
@@ -1827,6 +1835,7 @@ wif_ipconfig(void)
 		es = sock_send(rs, &msg, 0, &sent);
 		sock_close(rs);
 	}
+	(void)ifnet_set_flags(wif, IFF_UP | IFF_RUNNING, IFF_UP | IFF_RUNNING);
 	printf("A510F WIFI: en0 inet attach %d, up %d, address %u.%u.%u.%u %d, default route via %u.%u.%u.%u %d/%d\n", ea, ef,
 	    w2.ip[0], w2.ip[1], w2.ip[2], w2.ip[3], eaddr, w2.gw[0], w2.gw[1], w2.gw[2], w2.gw[3], er, es);
 }

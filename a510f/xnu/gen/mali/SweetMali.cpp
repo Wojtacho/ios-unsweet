@@ -1593,9 +1593,88 @@ sweet_mali_publish(IOService *provider)
 	}
 	OSSafeReleaseNULL(m);
 }
+
+/*
+ * A510F Wi-Fi (bsd/dev/a510f_wifi.c): what iOS's configd looks for in
+ * IOKit to adopt a network interface (SCNetworkInterface: an
+ * IONetworkInterface with BSD Name, IOInterfaceType/Unit/NamePrefix,
+ * IOBuiltin, under an IOEthernetController with IOMACAddress and link
+ * status). IONetworkingFamily is not built here: these are named stand-ins
+ * with the same properties; the data path is the BSD ifnet en0.
+ */
+class IONetworkController : public IOService {
+	OSDeclareDefaultStructors(IONetworkController);
+};
+OSDefineMetaClassAndStructors(IONetworkController, IOService);
+
+class IOEthernetController : public IONetworkController {
+	OSDeclareDefaultStructors(IOEthernetController);
+};
+OSDefineMetaClassAndStructors(IOEthernetController, IONetworkController);
+
+class IONetworkInterface : public IOService {
+	OSDeclareDefaultStructors(IONetworkInterface);
+};
+OSDefineMetaClassAndStructors(IONetworkInterface, IOService);
+
+class IOEthernetInterface : public IONetworkInterface {
+	OSDeclareDefaultStructors(IOEthernetInterface);
+};
+OSDefineMetaClassAndStructors(IOEthernetInterface, IONetworkInterface);
+
+extern "C" void a510f_net_publish(const uint8_t *mac, const char *bsd_name, uint32_t unit);
+
+void
+a510f_net_publish(const uint8_t *mac, const char *bsd_name, uint32_t unit)
+{
+	IOService *res = IOService::getResourceService();
+	IOEthernetController *c = OSTypeAlloc(IOEthernetController);
+	IOEthernetInterface *i = OSTypeAlloc(IOEthernetInterface);
+	OSData *macd = OSData::withBytes(mac, 6);
+	if (res == NULL || c == NULL || i == NULL || macd == NULL || !c->init() || !i->init()) {
+		IOLog("A510F WIFI: IOKit network objects failed\n");
+		OSSafeReleaseNULL(c);
+		OSSafeReleaseNULL(i);
+		OSSafeReleaseNULL(macd);
+		return;
+	}
+	c->setProperty("IOMACAddress", macd);
+	c->setProperty("IOLinkStatus", 3ULL, 32);              /* valid | active */
+	c->setProperty("IOLinkSpeed", 72000000ULL, 64);
+	c->setProperty("IOMaxPacketSize", 1514ULL, 32);
+	c->setProperty("IOMinPacketSize", 64ULL, 32);
+	c->setProperty("IOVendor", "Broadcom");
+	c->setProperty("IOModel", "BCM43454 (A510F Wi-Fi)");
+	c->setProperty("IOBuiltin", kOSBooleanTrue);
+	i->setProperty("BSD Name", bsd_name);
+	i->setProperty("IOInterfaceName", bsd_name);
+	i->setProperty("IOInterfaceNamePrefix", "en");
+	i->setProperty("IOInterfaceType", 6ULL, 32);            /* IFT_ETHER */
+	i->setProperty("IOInterfaceUnit", (unsigned long long)unit, 32);
+	i->setProperty("IOMaxTransferUnit", 1500ULL, 32);
+	i->setProperty("IOMediaAddressLength", 6ULL, 32);
+	i->setProperty("IOMediaHeaderLength", 14ULL, 32);
+	i->setProperty("IOMACAddress", macd);
+	i->setProperty("IOBuiltin", kOSBooleanTrue);
+	i->setProperty("IOPrimaryInterface", kOSBooleanTrue);
+	i->setProperty("IOInterfaceState", 3ULL, 32);
+	bool ok = c->attach(res);
+	c->registerService();
+	ok = ok && i->attach(c);
+	i->registerService();
+	IOLog("A510F WIFI: IOKit IOEthernetController + IOEthernetInterface (%s) published (%d)\n", bsd_name, ok);
+	OSSafeReleaseNULL(macd);
+	OSSafeReleaseNULL(i);
+	OSSafeReleaseNULL(c);
+}
 #else
 void
 sweet_mali_publish(IOService *)
+{
+}
+extern "C" void a510f_net_publish(const uint8_t *mac, const char *bsd_name, uint32_t unit);
+void
+a510f_net_publish(const uint8_t *, const char *, uint32_t)
 {
 }
 extern "C" uint64_t sweet_mali_seq(void);
