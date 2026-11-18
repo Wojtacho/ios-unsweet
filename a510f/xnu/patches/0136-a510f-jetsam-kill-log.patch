@@ -1,0 +1,16 @@
+diff --git a/bsd/kern/kern_memorystatus.c b/bsd/kern/kern_memorystatus.c
+--- a/bsd/kern/kern_memorystatus.c
++++ b/bsd/kern/kern_memorystatus.c
+@@ -1584,6 +1584,12 @@
+ 	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_DO_KILL)) | DBG_FUNC_START,
+ 	    victim_pid, cause, vm_page_free_count, footprint, 0);
+ 	DTRACE_MEMORYSTATUS4(memorystatus_do_kill, proc_t, p, os_reason_t, jetsam_reason, uint32_t, cause, uint64_t, footprint);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* A510F: jetsam kills leave no crash report; name them on the console */
++	printf("A510F JETSAM: killing %s[%d] band %d cause %u footprint %llu MB, %u free pages\n",
++	    (*p->p_name ? p->p_name : p->p_comm), victim_pid, p->p_memstat_effectivepriority, cause,
++	    footprint >> 20, vm_page_free_count);
++#endif
+ 
+ #if CONFIG_JETSAM
+ 	if (*p->p_name && !strncmp(memorystatus_jetsam_proc_name_panic, p->p_name, sizeof(p->p_name))) { /* name */
