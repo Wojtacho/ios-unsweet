@@ -2014,3 +2014,67 @@ edit('eagl.c', [
 	}
 	nat_apply(rctx);"""),
 ])
+
+# Round 92 (folders): held transparent clears (variable blur, round 29) also
+# held clears of other offscreen targets until their next draw. CA fills some
+# backdrop buffers by copy or blit, not by a draw: the held clear then ran
+# after the copy and wiped the captured backdrop (folder icon square and open
+# folder panel empty since ~round 40; they were fine before round 29). Run a
+# held clear before any copy or blit into a texture that is not a variable
+# blur source (those keep the round 29 behaviour).
+edit('eagl.c', [
+    ("""/* round 64: native 1080p (see adapt.py) */""", """/* round 64: native 1080p (see adapt.py) */
+static void pend_clear_before_copy(GLint dest, const char *what);       /* round 92, defined with pend_clear */"""),
+    ("""/* run a held clear now, with the clear colour and scissor it was issued with */""",
+     """static void pend_clear_apply(void);
+
+/* round 92: a copy or blit is about to write texture dest */
+static void
+pend_clear_before_copy(GLint dest, const char *what)
+{
+	if (!pend_clear.on || (dest > 0 && dest < 8192 && is_blur_s[dest])) {
+		return;
+	}
+	static unsigned told;
+	if (told++ < 8) {
+		sweet_drm_log("sweetgl: held clear of fbo %d run before a %s into tex %d", pend_clear.fb, what, dest);
+	}
+	pend_clear_apply();
+}
+
+/* run a held clear now, with the clear colour and scissor it was issued with */"""),
+    ("""	SGL_CUR(rctx);
+	target = SGL_TGT(target);
+	GLint tex = 0;
+	if (target == GL_TEXTURE_2D && nat_fb(GL_READ_FRAMEBUFFER)) {""",
+     """	SGL_CUR(rctx);
+	target = SGL_TGT(target);
+	{
+		GLint dt = 0;
+		glGetIntegerv(target == GL_TEXTURE_2D ? GL_TEXTURE_BINDING_2D : GL_TEXTURE_BINDING_CUBE_MAP, &dt);
+		pend_clear_before_copy(dt, "copy");
+	}
+	GLint tex = 0;
+	if (target == GL_TEXTURE_2D && nat_fb(GL_READ_FRAMEBUFFER)) {"""),
+    ("""    GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter)
+{
+	SGL_CUR(rctx);
+	if (nat_fb(GL_READ_FRAMEBUFFER)) {""",
+     """    GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter)
+{
+	SGL_CUR(rctx);
+	{
+		GLint df = 0, at = 0, nm = 0;
+		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &df);
+		if (df != 0) {
+			glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &at);
+			if (at == GL_TEXTURE) {
+				glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+				    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &nm);
+			}
+		}
+		pend_clear_before_copy(nm, "blit");
+	}
+	if (nat_fb(GL_READ_FRAMEBUFFER)) {"""),
+])
