@@ -30,12 +30,27 @@ out = ['diff --git a/bsd/conf/files b/bsd/conf/files', '--- a/bsd/conf/files', '
        ' bsd/dev/sweet_sample.c\t\t\tstandard',
        ' bsd/dev/sweet_keys.c\t\t\tstandard',
        ' bsd/dev/sweet_touch.c\t\t\tstandard']
-start = k        # 1-based line number of tl[k-1]
+# a510f_touch.c hunks, in file order: (index of the line the insertion goes before, added lines)
+vib = open(os.path.join(G, 'vib_touch.inc'), encoding='utf-8').read().rstrip('\n').split('\n') + ['']
+kt = tl.index('touch_thread(__unused void *arg, __unused wait_result_t w)')
+assert tl[kt - 1] == 'static void', tl[kt - 1]
+kl = tl.index('\tunsigned lows = 0;') + 2      # keys_poll() in touch_thread's loop (another loop calls it too)
+assert tl[kl - 1] == '\tfor (;;) {' and tl[kl - 2] == '\tunsigned lows = 0;', tl[kl - 2:kl]
+inserts = [
+    (kt - 1, vib),                                                      # the motor code before touch_thread()
+    (kl + 1, ['\t\tvib_poll();']),
+    (k + 2, ['\t{', '\t\textern void a510f_wifi_start(void);   /* bsd/dev/a510f_wifi.c */', '\t\ta510f_wifi_start();', '\t}']),
+]
 out += ['diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c', '--- a/bsd/dev/a510f_touch.c',
-        '+++ b/bsd/dev/a510f_touch.c', '@@ -%d,6 +%d,10 @@' % (start, start)]
-out += [' ' + tl[j] for j in (k - 1, k, k + 1)]
-out += ['+\t{', '+\t\textern void a510f_wifi_start(void);   /* bsd/dev/a510f_wifi.c */', '+\t\ta510f_wifi_start();', '+\t}']
-out += [' ' + tl[j] for j in (k + 2, k + 3, k + 4)]
+        '+++ b/bsd/dev/a510f_touch.c']
+shift = 0
+for at, add in inserts:
+    old_start = at - 3 + 1                      # 1-based number of the first context line (3 before)
+    out += ['@@ -%d,6 +%d,%d @@' % (old_start, old_start + shift, 6 + len(add))]
+    out += [' ' + tl[j] for j in (at - 3, at - 2, at - 1)]
+    out += ['+' + l for l in add]
+    out += [' ' + tl[j] for j in (at, at + 1, at + 2)]
+    shift += len(add)
 # sweet_mmc.c as 0106 + 0110 leave it: a510f_mmc_read() after sweet_bootlogo_load()
 import shutil
 import subprocess
