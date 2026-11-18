@@ -401,7 +401,8 @@ wifi_step1(void)
 		}
 		IOSleep(1);
 	} while (++tries < 200);
-	(void)cmd52(1, 0x1000e, true, 0x20, NULL);
+	/* keep ALP forced (brcmfmac: FORCE_HW_CLKREQ_OFF | FORCE_ALP); 0x20 alone dropped it and the backplane hung */
+	(void)cmd52(1, 0x1000e, true, 0x21, NULL);
 	printf("A510F WIFI: chip clock csr 0x%x after %d ms\n", csr, tries);
 
 	/* 10. ChipCommon chip id: window 0x18000000 (SBADDR low/mid/high), 4-byte access at +0x8000 */
