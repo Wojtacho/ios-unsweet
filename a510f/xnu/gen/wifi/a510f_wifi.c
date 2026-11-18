@@ -391,6 +391,7 @@ static struct {
 	uint32_t d11_wrap;                      /* 802.11 core (0x812) wrapper: PHY held in reset while the ARM is halted */
 	int fw_ok;                              /* blob sum matched */
 	int f2_ready;                           /* step 2b: function 2 came up */
+	int up;                                 /* step 3: WLC_UP worked */
 	uint8_t *blob;
 	uint32_t fw_len, nv_len;
 	char ssid[33];
@@ -1035,6 +1036,90 @@ frame_read(uint32_t *chan, uint32_t *doff)
 	return len;
 }
 
+/*
+ * Firmware events (channel 1): BCDC header (4 bytes, [3] = extra words),
+ * Ethernet header (type 0x886c), Broadcom header (10 bytes), event message
+ * (big endian: version 2, flags 2, type 4, status 4, reason 4, auth 4,
+ * datalen 4, addr 6, ifname 16, ifidx, bsscfgidx = 48 bytes), then data.
+ * Scan results (69): escan result (buflen, version, sync id, bss count),
+ * then bss_info: SSID length +18, SSID +19, chanspec +72, RSSI +78.
+ */
+#define EV_SET_SSID     0u
+#define EV_LINK         16u
+#define EV_PSK_SUP      46u
+#define EV_ESCAN        69u
+
+static struct {
+	int scan_done, join, link, keyed, nlog;
+	unsigned nseen;
+	char ssid[24][33];
+	int rssi[24];
+	unsigned chan[24];
+} ev;
+
+static uint32_t
+be32(const uint8_t *p)
+{
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+
+static void
+wifi_event(const uint8_t *f, uint32_t len, uint32_t doff)
+{
+	if (len < doff + 4u) {
+		return;
+	}
+	uint32_t bdo = (uint32_t)f[doff + 3] * 4u, at = doff + 4u + bdo;
+	if (len < at + 14u + 10u + 48u || f[at + 12] != 0x88 || f[at + 13] != 0x6c) {
+		return;
+	}
+	const uint8_t *m = f + at + 24, *d = m + 48;
+	uint32_t type = be32(m + 4), status = be32(m + 8), reason = be32(m + 12), dlen = be32(m + 24);
+	uint32_t flags = ((uint32_t)m[2] << 8) | m[3];
+	uint32_t have = len - (at + 24u + 48u);
+	if (dlen > have) {
+		dlen = have;
+	}
+	if (type == EV_ESCAN) {
+		if (status == 8u && dlen >= 12u + 80u) {
+			const uint8_t *b = d + 12;
+			uint32_t sl = b[18] <= 32 ? b[18] : 32;
+			int16_t rs = (int16_t)((uint16_t)b[78] | ((uint16_t)b[79] << 8));
+			unsigned ch = b[72];
+			char name[33];
+			memcpy(name, b + 19, sl);
+			name[sl] = 0;
+			bool dup = false;
+			for (unsigned i = 0; i < ev.nseen; i++) {
+				dup |= strcmp(ev.ssid[i], name) == 0;
+			}
+			if (!dup && ev.nseen < 24) {
+				memcpy(ev.ssid[ev.nseen], name, sl + 1);
+				ev.rssi[ev.nseen] = rs;
+				ev.chan[ev.nseen] = ch;
+				ev.nseen++;
+			}
+		} else if (status != 8u) {
+			ev.scan_done = status == 0 ? 1 : -1;
+		}
+		return;
+	}
+	if (type == EV_SET_SSID) {
+		ev.join = status == 0 ? 1 : -1;
+	} else if (type == EV_LINK) {
+		ev.link = (flags & 1u) ? 1 : -1;
+	} else if (type == EV_PSK_SUP) {
+		if (status == 6u) {
+			ev.keyed = 1;                   /* WLC_SUP_KEYED */
+		} else if (status == 7u) {
+			ev.keyed = -7;                  /* WLC_SUP_TIMEOUT (wrong passphrase, usually) */
+		}
+	}
+	if (ev.nlog++ < 40) {
+		printf("A510F WIFI: event %u status %u reason %u flags 0x%x, %u bytes of data\n", type, status, reason, flags, dlen);
+	}
+}
+
 /* one BCDC command on the control channel; the reply payload (up to outmax bytes) back into data */
 static int
 fw_dcmd(uint32_t cmd, bool set, uint8_t *data, uint32_t len, uint32_t outmax, uint32_t *status)
@@ -1062,15 +1147,18 @@ fw_dcmd(uint32_t cmd, bool set, uint8_t *data, uint32_t len, uint32_t outmax, ui
 		printf("A510F WIFI: dcmd %u send failed (%d)\n", cmd, e);
 		return e;
 	}
-	for (int tries = 0; tries < 20; tries++) {
-		(void)sdio_wait(0x40u, 500);    /* round 77: read a frame even without the frame bit (intstatus reads may fail) */
+	for (int tries = 0; tries < 300; tries++) {
+		IOSleep(10);    /* round 78: poll for frames (intstatus reads get data CRC errors since the firmware runs) */
 		for (int f = 0; f < 8; f++) {
 			uint32_t ch = 0, doff = 0, fl = frame_read(&ch, &doff);
 			if (fl == 0) {
 				break;
 			}
+			if (ch == 1) {
+				wifi_event(f2_buf, fl, doff);
+				continue;
+			}
 			if (ch != 0) {
-				printf("A510F WIFI: frame on channel %u, %u bytes (not control)\n", ch, fl);
 				continue;
 			}
 			uint32_t rflags = 0, rstat = 0;
@@ -1166,6 +1254,140 @@ wifi_step3(void)
 	e = fw_dcmd(WLC_UP, true, NULL, 0, 0, &fst);
 	printf("A510F WIFI: WLC_UP %d (status %u)\n", e, fst);
 	printf("A510F WIFI: step 3 done (data CRC errors %u, reads taken after two agreed %u)\n", w_dcrc, w_dcrc_soft);
+	w2.up = e == 0;
+}
+
+/*
+ * Step 4: scan (escan) and join the network from OTA sector 100 with the
+ * firmware's own WPA2-PSK supplicant (brcmfmac cfg80211.c / fwil_types.h:
+ * SET_INFRA 20, SET_AUTH 22, SET_SSID 26, SET_WSEC 134 (AES 4), SET_WPA_AUTH
+ * 165 (WPA2_PSK 0x80), SET_WSEC_PMK 268 (passphrase), SET_VAR 263, "sup_wpa").
+ */
+#define WLC_SET_INFRA   20u
+#define WLC_SET_AUTH    22u
+#define WLC_SET_SSID    26u
+#define WLC_SET_WSEC    134u
+#define WLC_SET_WPA_AUTH 165u
+#define WLC_SET_VAR     263u
+#define WLC_SET_WSEC_PMK 268u
+
+static int
+fw_setvar(const char *name, const void *val, uint32_t vlen)
+{
+	uint8_t req[256];
+	size_t nl = strlen(name) + 1;
+	if (nl + vlen > sizeof(req)) {
+		return EINVAL;
+	}
+	memcpy(req, name, nl);
+	memcpy(req + nl, val, vlen);
+	uint32_t st = 0;
+	int e = fw_dcmd(WLC_SET_VAR, true, req, (uint32_t)nl + vlen, 0, &st);
+	return e != 0 ? e : (int)st;
+}
+
+static int
+fw_set_u32(uint32_t cmd, uint32_t v)
+{
+	uint32_t st = 0;
+	int e = fw_dcmd(cmd, true, (uint8_t *)&v, 4, 0, &st);
+	return e != 0 ? e : (int)st;
+}
+
+/* read frames for up to ms, events to wifi_event; stop when *flag becomes non-zero */
+static void
+events_poll(uint32_t ms, const int *flag)
+{
+	for (uint32_t t = 0; t < ms && (flag == NULL || *flag == 0); t += 10) {
+		for (int f = 0; f < 8; f++) {
+			uint32_t ch = 0, doff = 0, fl = frame_read(&ch, &doff);
+			if (fl == 0) {
+				break;
+			}
+			if (ch == 1) {
+				wifi_event(f2_buf, fl, doff);
+			}
+		}
+		IOSleep(10);
+	}
+}
+
+static void
+wifi_step4(void)
+{
+	if (!w2.up) {
+		printf("A510F WIFI: step 4 skipped (radio not up)\n");
+		return;
+	}
+	/* events: SET_SSID 0, JOIN 1, AUTH 3, DEAUTH 5/6, ASSOC 7, DISASSOC 11/12, LINK 16, PSK_SUP 46, ESCAN_RESULT 69 */
+	uint8_t mask[16];
+	bzero(mask, sizeof(mask));
+	int e = fw_getvar("event_msgs", mask, 16);
+	const unsigned want[] = {0, 1, 3, 5, 6, 7, 11, 12, 16, 46, 69};
+	for (unsigned i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+		mask[want[i] / 8] |= (uint8_t)(1u << (want[i] % 8));
+	}
+	int e2 = fw_setvar("event_msgs", mask, 16);
+	printf("A510F WIFI: event mask get %d set %d\n", e, e2);
+
+	/* escan: version 1, action START, sync id, then scan params (any BSS, active, defaults, all channels) */
+	uint8_t sp[76];
+	bzero(sp, sizeof(sp));
+	uint32_t v32 = 1;
+	memcpy(sp, &v32, 4);                    /* version */
+	uint16_t v16 = 1;
+	memcpy(sp + 4, &v16, 2);                /* action: start */
+	v16 = 0x1234;
+	memcpy(sp + 6, &v16, 2);                /* sync id */
+	memset(sp + 44, 0xff, 6);               /* bssid: broadcast */
+	sp[50] = 2;                             /* bss_type: any */
+	memset(sp + 52, 0xff, 16);              /* nprobes, active, passive, home time: firmware defaults */
+	ev.scan_done = 0;
+	ev.nseen = 0;
+	e = fw_setvar("escan", sp, sizeof(sp));
+	events_poll(8000, &ev.scan_done);
+	printf("A510F WIFI: scan %d, %s, %u networks:\n", e, ev.scan_done == 1 ? "complete" : ev.scan_done ? "FAILED" : "timed out",
+	    ev.nseen);
+	bool seen = false;
+	for (unsigned i = 0; i < ev.nseen; i++) {
+		printf("A510F WIFI:   \"%s\" %d dBm, channel %u\n", ev.ssid[i], ev.rssi[i], ev.chan[i]);
+		seen |= strcmp(ev.ssid[i], w2.ssid) == 0;
+	}
+	if (w2.ssid[0] == 0 || w2.pass[0] == 0) {
+		printf("A510F WIFI: no network to join\n");
+		return;
+	}
+	printf("A510F WIFI: joining \"%s\" (%s in the scan)\n", w2.ssid, seen ? "seen" : "not");
+
+	/* WPA2-PSK with the firmware supplicant */
+	int r1 = fw_set_u32(WLC_SET_INFRA, 1);
+	int r2 = fw_set_u32(WLC_SET_AUTH, 0);
+	int r3 = fw_set_u32(WLC_SET_WSEC, 4);
+	uint32_t one = 1;
+	int r4 = fw_setvar("sup_wpa", &one, 4);
+	int r5 = fw_set_u32(WLC_SET_WPA_AUTH, 0x80);
+	uint8_t pmk[68];
+	bzero(pmk, sizeof(pmk));
+	uint16_t kl = (uint16_t)strlen(w2.pass), kf = 1;   /* WSEC_PASSPHRASE */
+	memcpy(pmk, &kl, 2);
+	memcpy(pmk + 2, &kf, 2);
+	memcpy(pmk + 4, w2.pass, kl);
+	uint32_t st = 0;
+	int r6 = fw_dcmd(WLC_SET_WSEC_PMK, true, pmk, sizeof(pmk), 0, &st);
+	bzero(pmk, sizeof(pmk));
+	printf("A510F WIFI: infra %d auth %d wsec %d sup_wpa %d wpa_auth %d pmk %d/%u\n", r1, r2, r3, r4, r5, r6, st);
+	uint8_t ss[36];
+	bzero(ss, sizeof(ss));
+	uint32_t sl = (uint32_t)strlen(w2.ssid);
+	memcpy(ss, &sl, 4);
+	memcpy(ss + 4, w2.ssid, sl);
+	ev.join = ev.link = ev.keyed = 0;
+	e = fw_dcmd(WLC_SET_SSID, true, ss, sizeof(ss), 0, &st);
+	printf("A510F WIFI: SET_SSID %d/%u\n", e, st);
+	events_poll(20000, &ev.keyed);
+	printf("A510F WIFI: join %s, link %s, keys %s\n", ev.join == 1 ? "OK" : ev.join ? "FAILED" : "no event",
+	    ev.link == 1 ? "UP" : ev.link ? "down" : "no event", ev.keyed == 1 ? "DONE (connected)" : ev.keyed ? "failed" : "no event");
+	printf("A510F WIFI: step 4 done\n");
 }
 
 static void
@@ -1364,6 +1586,7 @@ wifi_step1(void)
 	wifi_step2a();
 	wifi_step2b();
 	wifi_step3();
+	wifi_step4();
 }
 
 static void
