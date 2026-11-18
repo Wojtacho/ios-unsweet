@@ -1,0 +1,45 @@
+diff --git a/bsd/kern/kern_sig.c b/bsd/kern/kern_sig.c
+--- a/bsd/kern/kern_sig.c
++++ b/bsd/kern/kern_sig.c
+@@ -2051,6 +2051,18 @@
+ 
+ 	mask = sigmask(signum);
+ 	prop = sigprop[signum];
++#if defined(__arm64__)
++	/* A510F: SpringBoard restarted with no crash report (rounds 86/87): who signals it */
++	if (p != PROC_NULL && (signum == SIGKILL || signum == SIGTERM || signum == SIGABRT || signum == SIGQUIT) &&
++	    (!strcmp(p->p_comm, "SpringBoard") || !strcmp(p->p_comm, "backboardd") || !strcmp(p->p_comm, "MobileSafari"))) {
++		proc_t cur = current_proc();
++		printf("A510F SIG: %s[%d] sig %d from %s[%d] reason ns %u code 0x%llx flags 0x%llx\n",
++		    p->p_comm, proc_getpid(p), signum, cur != PROC_NULL ? cur->p_comm : "?", cur != PROC_NULL ? proc_getpid(cur) : -1,
++		    signal_reason != NULL ? signal_reason->osr_namespace : 0u,
++		    signal_reason != NULL ? (unsigned long long)signal_reason->osr_code : 0ULL,
++		    signal_reason != NULL ? (unsigned long long)signal_reason->osr_flags : 0ULL);
++	}
++#endif
+ 
+ #if SIGNAL_DEBUG
+ 	if (rdebug_proc && (p != PROC_NULL) && (p == rdebug_proc)) {
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1844,6 +1844,19 @@
+ 	struct rusage_superset *rup;
+ 	int kr = 0;
+ 	int create_corpse = FALSE;
++
++#if defined(__arm64__)
++	/* A510F: how SpringBoard, backboardd and MobileSafari end (rounds 86/87: silent restarts) */
++	if ((!strcmp(p->p_comm, "SpringBoard") || !strcmp(p->p_comm, "backboardd") || !strcmp(p->p_comm, "MobileSafari"))) {
++		char *desc = PROC_HAS_EXITREASON(p) ? exit_reason_get_string_desc(p->p_exit_reason) : NULL;
++		printf("A510F EXIT: %s[%d] rv 0x%x (status %d, signal %d) reason ns %u code 0x%llx flags 0x%llx: %s\n",
++		    p->p_comm, proc_getpid(p), rv, WEXITSTATUS(rv), WTERMSIG(rv),
++		    PROC_HAS_EXITREASON(p) ? p->p_exit_reason->osr_namespace : 0u,
++		    PROC_HAS_EXITREASON(p) ? (unsigned long long)p->p_exit_reason->osr_code : 0ULL,
++		    PROC_HAS_EXITREASON(p) ? (unsigned long long)p->p_exit_reason->osr_flags : 0ULL,
++		    desc != NULL ? desc : "(none)");
++	}
++#endif
+ 
+ 	if (p->p_crash_behavior != 0 || p == initproc) {
+ 		proc_handle_critical_exit(p, rv);

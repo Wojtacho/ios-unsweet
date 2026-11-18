@@ -1072,7 +1072,27 @@ frame_read(uint32_t *chan, uint32_t *doff)
 	uint32_t chk = (uint32_t)f2_buf[2] | ((uint32_t)f2_buf[3] << 8);
 	if (len == 0 || ((len ^ chk) & 0xffffu) != 0xffffu || len < 12u || len > sizeof(f2_buf)) {
 		if (len != 0) {
-			printf("A510F WIFI: bad frame header len 0x%x chk 0x%x\n", len, chk);
+			/*
+			 * Round 87: 15931 of these, the read stream out of step. Drop
+			 * the rest of the frame as brcmfmac's rxfail does: abort F2
+			 * (CCCR 0x06), FRAMECTRL (0x1000d) SFC_RF_TERM, wait until the
+			 * read frame byte count (0x1001b/c) is 0.
+			 */
+			static unsigned bad;
+			bad++;
+			if (bad <= 8 || (bad & 1023u) == 0) {
+				printf("A510F WIFI: bad frame header len 0x%x chk 0x%x (%u so far), dropping the frame\n", len, chk, bad);
+			}
+			(void)cmd52(0, 0x06, true, 2, NULL);
+			(void)cmd52(1, 0x1000d, true, 1, NULL);
+			for (int i = 0; i < 10; i++) {
+				uint8_t hi = 0, lo = 0;
+				(void)cmd52(1, 0x1001c, false, 0, &hi);
+				(void)cmd52(1, 0x1001b, false, 0, &lo);
+				if (hi == 0 && lo == 0) {
+					break;
+				}
+			}
 		}
 		return 0;
 	}
