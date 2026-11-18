@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
-@@ -0,0 +1,1692 @@
+@@ -0,0 +1,1757 @@
 +/*
 + * SweetMali: kernel driver for the A510F's Mali-T720 MP2 (Exynos 7580),
 + * shaped after Linux panfrost (drivers/gpu/drm/panfrost) so that Mesa's
@@ -1628,12 +1628,77 @@ index 0000000..1111111
 +};
 +OSDefineMetaClassAndStructors(IOEthernetInterface, IONetworkInterface);
 +
++/*
++ * IONetworkStack: configd's InterfaceNamer waits for it (round 83:
++ * IOServiceFirstMatch IONetworkStack -> never) before it handles network
++ * interfaces, and registers/names them through its user client
++ * (IOConnectSetCFProperties). en0 is named already: accept and log.
++ */
++class IONetworkStackUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(IONetworkStackUserClient);
++public:
++	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(IONetworkStackUserClient, IOUserClient);
++
++IOReturn
++IONetworkStackUserClient::setProperties(OSObject *properties)
++{
++	OSSerialize *ser = OSSerialize::withCapacity(256);
++	if (ser != NULL && properties != NULL && properties->serialize(ser)) {
++		IOLog("A510F WIFI: IONetworkStack command %.300s\n", ser->text());
++	}
++	OSSafeReleaseNULL(ser);
++	return kIOReturnSuccess;
++}
++
++IOReturn
++IONetworkStackUserClient::clientClose(void)
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++class IONetworkStack : public IOService {
++	OSDeclareDefaultStructors(IONetworkStack);
++public:
++	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(IONetworkStack, IOService);
++
++IOReturn
++IONetworkStack::newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler)
++{
++	IONetworkStackUserClient *c = OSTypeAlloc(IONetworkStackUserClient);
++	if (c == NULL || !c->initWithTask(owningTask, securityID, type) || !c->attach(this) || !c->start(this)) {
++		if (c != NULL) {
++			c->detach(this);
++		}
++		OSSafeReleaseNULL(c);
++		return kIOReturnNoMemory;
++	}
++	char name[32];
++	proc_selfname(name, sizeof(name));
++	IOLog("A510F WIFI: IONetworkStack opened by %s (type %u)\n", name, (unsigned)type);
++	*handler = c;
++	return kIOReturnSuccess;
++}
++
 +extern "C" void a510f_net_publish(const uint8_t *mac, const char *bsd_name, uint32_t unit);
 +
 +void
 +a510f_net_publish(const uint8_t *mac, const char *bsd_name, uint32_t unit)
 +{
 +	IOService *res = IOService::getResourceService();
++	{
++		IONetworkStack *st = OSTypeAlloc(IONetworkStack);
++		if (st != NULL && res != NULL && st->init() && st->attach(res)) {
++			st->registerService();
++			IOLog("A510F WIFI: IONetworkStack published\n");
++		}
++		OSSafeReleaseNULL(st);
++	}
 +	IOEthernetController *c = OSTypeAlloc(IOEthernetController);
 +	IOEthernetInterface *i = OSTypeAlloc(IOEthernetInterface);
 +	OSData *macd = OSData::withBytes(mac, 6);
