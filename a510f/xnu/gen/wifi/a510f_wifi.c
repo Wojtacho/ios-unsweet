@@ -26,6 +26,7 @@
 #include <kern/thread.h>
 #include <kern/locks.h>
 #include <kern/sched_prim.h>
+#include <kern/kalloc.h>
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 
@@ -72,6 +73,7 @@ void a510f_wifi_start(void);
 #define I_RESP_ERR      (1u << 1)
 #define I_CMD_DONE      (1u << 2)
 #define I_DATA_OVER     (1u << 3)
+#define I_TXDR          (1u << 4)
 #define I_RXDR          (1u << 5)
 #define I_RCRC          (1u << 6)
 #define I_DCRC          (1u << 7)
@@ -90,6 +92,7 @@ void a510f_wifi_start(void);
 #define C_UPD_CLK       (1u << 21)
 #define C_SEND_INIT     (1u << 15)
 #define C_PRV_WAIT      (1u << 13)
+#define C_DAT_WR        (1u << 10)
 #define C_DAT_EXP       (1u << 9)
 #define C_RESP_CRC      (1u << 8)
 #define C_RESP_EXP      (1u << 6)
@@ -242,6 +245,238 @@ cmd53_read(unsigned fn, uint32_t addr, uint8_t *buf, uint32_t n)
 			return ETIMEDOUT;
 		}
 	}
+}
+
+/* CMD53 byte mode write of n (<= 64) bytes to function fn at addr, incrementing (Linux order: command, then FIFO) */
+static int
+cmd53_write(unsigned fn, uint32_t addr, const uint8_t *buf, uint32_t n)
+{
+	if (!wait_clear(W_STATUS, 1u << 9, 100)) {
+		return EBUSY;
+	}
+	wr(w.mmc, W_CTRL, rd(w.mmc, W_CTRL) | 2u);  /* FIFO reset */
+	if (!wait_clear(W_CTRL, 2u, 100)) {
+		return EBUSY;
+	}
+	wr(w.mmc, W_RINTSTS, 0xffffffffu);
+	wr(w.mmc, W_BLKSIZ, n);
+	wr(w.mmc, W_BYTCNT, n);
+	uint32_t arg = (1u << 31) | ((fn & 7u) << 28) | (1u << 26) | ((addr & 0x1ffffu) << 9) | (n & 0x1ffu);
+	wr(w.mmc, W_CMDARG, arg);
+	wr(w.mmc, W_CMD, 53 | C_RESP_EXP | C_RESP_CRC | C_DAT_EXP | C_DAT_WR | C_PRV_WAIT | C_START | C_USE_HOLD);
+	if (!wait_clear(W_CMD, C_START, 100)) {
+		return EBUSY;
+	}
+	uint32_t put = 0, s = 0;
+	uint64_t end = after_ms(1000);
+	volatile uint8_t *fifo = (volatile uint8_t *)(w.mmc + w.data_off);
+	for (;;) {
+		s = rd(w.mmc, W_RINTSTS);
+		if (put < n) {
+			uint32_t used = (rd(w.mmc, W_STATUS) >> 17) & 0x1fffu;
+			uint32_t room = used < 64u ? 64u - used : 0;
+			while (room-- > 0 && put < n) {
+				uint32_t v[2] = {0, 0};
+				uint32_t c = n - put < w.fifo_bytes ? n - put : w.fifo_bytes;
+				memcpy(v, buf + put, c);
+				*(volatile uint32_t *)fifo = v[0];
+				if (w.fifo_bytes == 8) {
+					*(volatile uint32_t *)(fifo + 4) = v[1];
+				}
+				put += w.fifo_bytes;
+			}
+		}
+		if (s & I_TXDR) {
+			wr(w.mmc, W_RINTSTS, I_TXDR);
+		}
+		if (s & (I_CMD_ERR | I_DATA_ERR)) {
+			printf("A510F WIFI: CMD53 write fn %u addr 0x%x x%u: rintsts 0x%x, r5 0x%x\n", fn, addr, n, s, rd(w.mmc, W_RESP0));
+			return EIO;
+		}
+		if (s & I_DATA_OVER) {
+			return wait_clear(W_STATUS, 1u << 9, 100) ? 0 : EBUSY;
+		}
+		if (mach_absolute_time() > end) {
+			printf("A510F WIFI: CMD53 write fn %u addr 0x%x x%u timed out: rintsts 0x%x\n", fn, addr, n, s);
+			return ETIMEDOUT;
+		}
+	}
+}
+
+/* backplane: 32 KiB window (SBADDR low/mid/high), 4-byte accesses at +0x8000 */
+static uint32_t bp_win = 0xffffffffu;
+
+static int
+bp_window(uint32_t addr)
+{
+	uint32_t win = addr & 0xffff8000u;
+	if (win == bp_win) {
+		return 0;
+	}
+	int e = cmd52(1, 0x1000a, true, (uint8_t)((win >> 8) & 0x80u), NULL);
+	e |= cmd52(1, 0x1000b, true, (uint8_t)(win >> 16), NULL);
+	e |= cmd52(1, 0x1000c, true, (uint8_t)(win >> 24), NULL);
+	bp_win = e == 0 ? win : 0xffffffffu;
+	return e;
+}
+
+static int
+bp_read32(uint32_t addr, uint32_t *v)
+{
+	uint8_t b[4] = {0, 0, 0, 0};
+	int e = bp_window(addr);
+	if (e == 0) {
+		e = cmd53_read(1, (addr & 0x7fffu) | 0x8000u, b, 4);
+	}
+	*v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+	return e;
+}
+
+static int
+bp_write32(uint32_t addr, uint32_t v)
+{
+	uint8_t b[4] = {(uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24)};
+	int e = bp_window(addr);
+	return e != 0 ? e : cmd53_write(1, (addr & 0x7fffu) | 0x8000u, b, 4);
+}
+
+extern int a510f_mmc_read(const char *part, uint64_t lba, uint32_t nsect, void *dst);   /* sweet_mmc.c */
+
+/*
+ * Step 2a: the chip's cores (EROM), the ARM CR4's RAM, and the firmware and
+ * network written by twrp-write/auto.py wifi: the blob is in the last MiB of
+ * the sweetgl region (4 KiB block 2268198 = LBA 18145584), the network in OTA
+ * sector 100. The passphrase is never logged.
+ */
+#define WIFI_BLOB_LBA   18145584ull
+#define WIFI_BLOB_SECT  2048u
+#define CC_BASE         0x18000000u
+#define CORE_CR4        0x83eu
+#define CORE_SDIO       0x829u
+
+static struct {
+	uint32_t cr4_base, cr4_wrap, sdio_base, sdio_wrap, ram_size;
+	uint8_t *blob;
+	uint32_t fw_len, nv_len;
+	char ssid[33];
+	char pass[65];
+} w2;
+
+static void
+wifi_step2a(void)
+{
+	uint32_t id = 0, erom = 0;
+	int e = bp_read32(CC_BASE, &id);
+	e |= bp_read32(CC_BASE + 0xfc, &erom);
+	printf("A510F WIFI: chipid 0x%08x (chip 0x%x rev %u), EROM at 0x%x (%d)\n", id, id & 0xffffu, (id >> 16) & 0xfu, erom, e);
+	if (e != 0) {
+		return;
+	}
+	/* EROM: component (CIA, CIB), then master port / address descriptors, EOT 0xf */
+	uint32_t a = erom, core = 0, rev = 0, base = 0, wrap = 0;
+	int ncores = 0;
+	for (int k = 0; k < 400; k++) {
+		uint32_t v = 0;
+		if (bp_read32(a, &v) != 0) {
+			break;
+		}
+		a += 4;
+		uint32_t type = v & 0xfu;
+		if (type == 0xfu || type == 0x1u) {
+			if (core != 0) {
+				printf("A510F WIFI: core 0x%03x rev %u base 0x%08x wrap 0x%08x\n", core, rev, base, wrap);
+				if (core == CORE_CR4 && w2.cr4_base == 0) {
+					w2.cr4_base = base;
+					w2.cr4_wrap = wrap;
+				}
+				if (core == CORE_SDIO && w2.sdio_base == 0) {
+					w2.sdio_base = base;
+					w2.sdio_wrap = wrap;
+				}
+				ncores++;
+			}
+			core = rev = base = wrap = 0;
+			if (type == 0xfu) {
+				break;
+			}
+			uint32_t cib = 0;
+			if (bp_read32(a, &cib) != 0) {
+				break;
+			}
+			a += 4;
+			core = (v >> 8) & 0xfffu;
+			rev = cib >> 24;
+		} else if (type == 0x5u) {
+			uint32_t stype = (v >> 6) & 3u, sz = (v >> 4) & 3u;
+			if (v & 0x8u) {
+				a += 4;                         /* 64-bit address: high word */
+			}
+			if (sz == 3u) {
+				uint32_t sd = 0;
+				(void)bp_read32(a, &sd);
+				a += (sd & 0x8u) ? 8 : 4;       /* size descriptor (+ high word) */
+			}
+			if (stype == 0 && base == 0) {
+				base = v & 0xfffff000u;
+			} else if ((stype == 2 || stype == 3) && wrap == 0) {
+				wrap = v & 0xfffff000u;
+			}
+		}
+	}
+	printf("A510F WIFI: %d cores; ARM CR4 at 0x%x (wrap 0x%x), SDIO core at 0x%x (wrap 0x%x)\n", ncores, w2.cr4_base, w2.cr4_wrap,
+	    w2.sdio_base, w2.sdio_wrap);
+	if (w2.cr4_base != 0) {
+		uint32_t cap = 0;
+		(void)bp_read32(w2.cr4_base + 0x04, &cap);
+		uint32_t nab = cap & 0xfu, nbb = (cap >> 4) & 0xfu;
+		w2.ram_size = 0;
+		for (uint32_t i = 0; i < nab + nbb && i < 16; i++) {
+			uint32_t bx = 0;
+			(void)bp_write32(w2.cr4_base + 0x40, i);
+			(void)bp_read32(w2.cr4_base + 0x44, &bx);
+			w2.ram_size += ((bx & 0x7fu) + 1u) * ((bx & 0x200u) ? 1024u : 8192u);
+		}
+		printf("A510F WIFI: CR4 corecap 0x%x (%u+%u banks): RAM 0x198000, %u KiB\n", cap, nab, nbb, w2.ram_size / 1024u);
+	}
+
+	/* the firmware blob and the network, from the eMMC */
+	w2.blob = kalloc_data((vm_size_t)WIFI_BLOB_SECT * 512u, Z_WAITOK | Z_ZERO);
+	e = w2.blob != NULL ? a510f_mmc_read(NULL, WIFI_BLOB_LBA, WIFI_BLOB_SECT, w2.blob) : ENOMEM;
+	if (e == 0 && memcmp(w2.blob, "SWWIFI01", 8) == 0) {
+		uint32_t sum = 0, want = 0;
+		memcpy(&w2.fw_len, w2.blob + 8, 4);
+		memcpy(&w2.nv_len, w2.blob + 12, 4);
+		memcpy(&want, w2.blob + 16, 4);
+		uint32_t fw_pad = (w2.fw_len + 511u) & ~511u;
+		if (512u + fw_pad + w2.nv_len <= WIFI_BLOB_SECT * 512u) {
+			for (uint32_t i = 0; i < w2.fw_len; i++) {
+				sum += w2.blob[512 + i];
+			}
+			for (uint32_t i = 0; i < w2.nv_len; i++) {
+				sum += w2.blob[512 + fw_pad + i];
+			}
+		}
+		printf("A510F WIFI: firmware %u bytes, NVRAM %u bytes, sum 0x%x (%s)\n", w2.fw_len, w2.nv_len, sum,
+		    sum == want ? "OK" : "BAD");
+	} else {
+		printf("A510F WIFI: no firmware blob (read %d)\n", e);
+	}
+	uint8_t *sec = kalloc_data(512, Z_WAITOK | Z_ZERO);
+	e = sec != NULL ? a510f_mmc_read("OTA", 100, 1, sec) : ENOMEM;
+	if (e == 0 && memcmp(sec, "SWNET001", 8) == 0 && sec[8] >= 1 && sec[8] <= 32 && sec[41] >= 8 && sec[41] <= 63) {
+		memcpy(w2.ssid, sec + 9, sec[8]);
+		w2.ssid[sec[8]] = 0;
+		memcpy(w2.pass, sec + 42, sec[41]);
+		w2.pass[sec[41]] = 0;
+		printf("A510F WIFI: network \"%s\" (passphrase %u characters)\n", w2.ssid, sec[41]);
+	} else {
+		printf("A510F WIFI: no network in OTA sector 100 (read %d)\n", e);
+	}
+	if (sec != NULL) {
+		bzero(sec, 512);
+		kfree_data(sec, 512);
+	}
+	printf("A510F WIFI: step 2a done\n");
 }
 
 static void
@@ -437,6 +672,7 @@ wifi_step1(void)
 	v = (uint32_t)id[0] | ((uint32_t)id[1] << 8) | ((uint32_t)id[2] << 16) | ((uint32_t)id[3] << 24);
 	printf("A510F WIFI: chipid by CMD53, 4-bit (%d) 0x%08x\n", eid, v);
 	printf("A510F WIFI: step 1 done\n");
+	wifi_step2a();
 }
 
 static void

@@ -36,6 +36,65 @@ out += ['diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c', '--- a/bsd
 out += [' ' + tl[j] for j in (k - 1, k, k + 1)]
 out += ['+\t{', '+\t\textern void a510f_wifi_start(void);   /* bsd/dev/a510f_wifi.c */', '+\t\ta510f_wifi_start();', '+\t}']
 out += [' ' + tl[j] for j in (k + 2, k + 3, k + 4)]
+# sweet_mmc.c as 0106 + 0110 leave it: a510f_mmc_read() after sweet_bootlogo_load()
+import shutil
+import subprocess
+import tempfile
+T = tempfile.mkdtemp()
+try:
+    subprocess.run(['git', 'init', '-q'], cwd=T, check=True)
+    for pn in ('0106-a510f-emmc.patch', '0110-a510f-touchscreen.patch'):
+        subprocess.run(['git', 'apply', '--include=bsd/dev/sweet_mmc.c', os.path.join(P, pn)], cwd=T, check=True)
+    ml = open(os.path.join(T, 'bsd', 'dev', 'sweet_mmc.c'), encoding='utf-8', newline='').read().replace('\r', '').split('\n')
+finally:
+    shutil.rmtree(T, ignore_errors=True)
+k = [j for j, l in enumerate(ml) if 'printf("SWEET MMC: no boot logo (error %d)' in l]
+assert len(k) == 1, k
+k = k[0]
+assert ml[k + 1] == '}' and ml[k + 2] == '' and ml[k + 3] == 'static void', ml[k + 1:k + 4]
+helper = [
+    '/*',
+    ' * A510F Wi-Fi (bsd/dev/a510f_wifi.c): read nsect sectors at lba inside the',
+    ' * partition named part (NULL: absolute LBA) into dst (any kernel memory:',
+    ' * bounced through a DMA buffer, 64 sectors a read). 0 or an errno.',
+    ' */',
+    'int a510f_mmc_read(const char *part, uint64_t lba, uint32_t nsect, void *dst);',
+    '',
+    'int',
+    'a510f_mmc_read(const char *part, uint64_t lba, uint32_t nsect, void *dst)',
+    '{',
+    '\tstatic uint8_t *bounce;',
+    '\tint error = 0;',
+    '\tuint64_t first = 0, n = UINT64_MAX;',
+    '\tmmc_lock();',
+    '\tif (bounce == NULL) {',
+    '\t\tbounce = mmc_alloc(64 * MMC_SECTOR);',
+    '\t}',
+    '\tif (part != NULL) {',
+    '\t\terror = mmc_part_find(part, &first, &n);',
+    '\t}',
+    '\tif (!error && (bounce == NULL || lba + nsect > n)) {',
+    '\t\terror = bounce == NULL ? ENOMEM : EINVAL;',
+    '\t}',
+    '\tfor (uint32_t k = 0; !error && k < nsect; k += 64) {',
+    '\t\tuint32_t c = nsect - k < 64 ? nsect - k : 64;',
+    '\t\terror = mmc_read(first + lba + k, c, bounce);',
+    '\t\tif (!error) {',
+    '\t\t\tmemcpy((uint8_t *)dst + (uint64_t)k * MMC_SECTOR, bounce, (size_t)c * MMC_SECTOR);',
+    '\t\t}',
+    '\t}',
+    '\tmmc_unlock();',
+    '\treturn error;',
+    '}',
+    '',
+]
+start = k + 1                                   # 1-based number of ml[k]
+out += ['diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c', '--- a/bsd/dev/sweet_mmc.c', '+++ b/bsd/dev/sweet_mmc.c',
+        '@@ -%d,6 +%d,%d @@' % (start, start, 6 + len(helper))]
+out += [' ' + ml[j] for j in (k, k + 1, k + 2)]
+out += ['+' + l for l in helper]
+out += [' ' + ml[j] for j in (k + 3, k + 4, k + 5)]
+
 out += ['diff --git a/bsd/dev/a510f_wifi.c b/bsd/dev/a510f_wifi.c', 'new file mode 100644', '--- /dev/null',
         '+++ b/bsd/dev/a510f_wifi.c', '@@ -0,0 +1,%d @@' % len(new)]
 out += ['+' + l for l in new]
