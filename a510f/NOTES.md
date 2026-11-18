@@ -1623,3 +1623,23 @@ Wi-Fi rounds 79-82 (2026-11-18, afternoon):
   Wi-Fi 10 s after boot (a510fwifi=10) so en0 exists before configd.
 - Open: F1 register reads get data CRC errors since the firmware runs;
   SDIO clock is still ciu/510 (~45 KB/s): raise it for real use.
+
+Wi-Fi rounds 83-87 (2026-11-18, evening):
+- Round 84: configd adopted en0 once an IONetworkStack stand-in existed
+  (IONetworkStack + IONetworkStackUserClient in SweetMali.cpp; the user
+  client logs configd's commands). configd sets the address and routes
+  itself from then on. Safari launches and shows "not connected" without a
+  network.
+- TX drops after configd took over: the SDIO clock was ciu/510. Round 85:
+  card clock divider 4 (checked with 8 chip-id reads, steps down to 16 on
+  failure), tx queue 128.
+- Round 85/86: F1 (backplane) CMD53 chunks raised from 64 to 512 bytes.
+  Every 512-byte F1 write failed with a CRC error at every divider down to
+  255: byte-mode transfers must not be longer than the function's block
+  size, and F1's is 64 (FBR1 0x110/0x111). F2's is 512, so 512-byte F2
+  frames are fine. Round 87 goes back to 64-byte F1 chunks and keeps the
+  fast clock.
+- Round 86: tapping Safari restarted SpringBoard (the user saw the spinner)
+  with no crash report; memory was low (free 112 MB, wired 571 MB, 49
+  surfaces = 185 MB). Likely a jetsam kill: 0136 now prints "A510F JETSAM:
+  killing <name>[pid] band cause footprint" on the console.
