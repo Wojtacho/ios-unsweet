@@ -29,6 +29,17 @@
 #include <kern/kalloc.h>
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
+#include <sys/socket.h>
+#include <sys/sockio.h>
+#include <sys/kpi_mbuf.h>
+#include <sys/kpi_socket.h>
+#include <net/if.h>
+#include <net/if_types.h>
+#include <net/if_dl.h>
+#include <net/if_ether.h>
+#include <net/kpi_interface.h>
+#include <net/route.h>
+#include <netinet/in.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern void IOSleep(unsigned int milliseconds);
@@ -393,6 +404,8 @@ static struct {
 	int f2_ready;                           /* step 2b: function 2 came up */
 	int up;                                 /* step 3: WLC_UP worked */
 	int keyed;                              /* step 4: WPA2 keys in place */
+	int dhcp;                               /* step 5: DHCP ACK */
+	uint8_t ip[4], mask[4], gw[4], dns[4];
 	uint8_t *blob;
 	uint32_t fw_len, nv_len;
 	char ssid[33];
@@ -1630,8 +1643,321 @@ wifi_step5(void)
 		    got_ack ? "ACK" : "no ACK", yi[0], yi[1], yi[2], yi[3], msk[0], msk[1], msk[2], msk[3], gw[0], gw[1], gw[2], gw[3],
 		    dns[0], dns[1], dns[2], dns[3], lease);
 	}
+	if (got_ack) {
+		memcpy(w2.ip, yi, 4);
+		memcpy(w2.mask, msk, 4);
+		memcpy(w2.gw, gw, 4);
+		memcpy(w2.dns, dns, 4);
+		w2.dhcp = 1;
+	}
 	kfree_data(pkt, 1600);
 	printf("A510F WIFI: step 5 done\n");
+}
+
+/*
+ * Step 6: en0 for iOS. An Ethernet interface (XNU's own Ethernet framer and
+ * demux: ARP and IP as for any adapter); this thread owns the SDIO bus from
+ * here on: frames the stack sends are queued by wif_output and sent here,
+ * received ones go to ifnet_input. The DHCP result is set from the kernel
+ * (IPv4 attach, up, address, default route); a DNS query to the router's DNS
+ * server through a kernel UDP socket tests the whole path.
+ */
+#define TXQ             32u
+
+static struct {
+	uint16_t len;
+	uint8_t b[1536];
+} txq[TXQ];
+static volatile unsigned txq_head, txq_tail;
+static LCK_GRP_DECLARE(wif_grp, "a510f_wifi");
+static LCK_MTX_DECLARE(wif_lock, &wif_grp);
+static ifnet_t wif;
+static volatile uint32_t wif_rx, wif_tx, wif_drop;
+
+static errno_t
+wif_output(ifnet_t ifp, mbuf_t m)
+{
+	size_t len = mbuf_pkthdr_len(m);
+	(void)ifp;
+	lck_mtx_lock(&wif_lock);
+	unsigned next = (txq_head + 1u) % TXQ;
+	if (len <= sizeof(txq[0].b) && next != txq_tail && mbuf_copydata(m, 0, len, txq[txq_head].b) == 0) {
+		txq[txq_head].len = (uint16_t)len;
+		txq_head = next;
+	} else {
+		wif_drop++;
+	}
+	lck_mtx_unlock(&wif_lock);
+	mbuf_freem(m);
+	return 0;
+}
+
+static void
+wif_deliver(const uint8_t *f, uint32_t len)
+{
+	mbuf_t m = NULL;
+	if (wif == NULL || len < 14u || len > 1600u || mbuf_gethdr(MBUF_DONTWAIT, MBUF_TYPE_DATA, &m) != 0) {
+		return;
+	}
+	if (len > mbuf_maxlen(m) && mbuf_mclget(MBUF_DONTWAIT, MBUF_TYPE_DATA, &m) != 0) {
+		mbuf_freem(m);
+		return;
+	}
+	uint8_t *d = mbuf_data(m);
+	memcpy(d, f, len);
+	mbuf_setlen(m, len);
+	mbuf_pkthdr_setlen(m, len);
+	mbuf_pkthdr_setrcvif(m, wif);
+	mbuf_pkthdr_setheader(m, d);
+	mbuf_setdata(m, d + 14, len - 14u);
+	mbuf_pkthdr_adjustlen(m, -14);
+	struct ifnet_stat_increment_param st;
+	bzero(&st, sizeof(st));
+	st.packets_in = 1;
+	st.bytes_in = len;
+	(void)ifnet_input(wif, m, &st);
+	wif_rx++;
+}
+
+static int
+wif_attach(void)
+{
+	static const uint8_t bcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+	struct ifnet_init_params p;
+	bzero(&p, sizeof(p));
+	p.uniqueid = "a510f-wifi";
+	p.uniqueid_len = 10;
+	p.name = "en";
+	p.unit = 0;
+	p.family = IFNET_FAMILY_ETHERNET;
+	p.type = IFT_ETHER;
+	p.output = wif_output;
+	p.demux = ether_demux;
+	p.add_proto = ether_add_proto;
+	p.del_proto = ether_del_proto;
+	p.check_multi = ether_check_multi;
+	p.framer = ether_frameout;
+	p.broadcast_addr = bcast;
+	p.broadcast_len = 6;
+	errno_t e = ifnet_allocate(&p, &wif);
+	if (e != 0) {
+		printf("A510F WIFI: ifnet_allocate failed (%d)\n", e);
+		wif = NULL;
+		return e;
+	}
+	(void)ifnet_set_lladdr(wif, w_mac, 6);
+	(void)ifnet_set_mtu(wif, 1500);
+	(void)ifnet_set_flags(wif, IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST, IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST);
+	struct sockaddr_dl sdl;
+	bzero(&sdl, sizeof(sdl));
+	sdl.sdl_len = (u_char)sizeof(sdl);
+	sdl.sdl_family = AF_LINK;
+	sdl.sdl_type = IFT_ETHER;
+	sdl.sdl_alen = 6;
+	memcpy(LLADDR(&sdl), w_mac, 6);
+	e = ifnet_attach(wif, &sdl);
+	printf("A510F WIFI: en0 attached (%d)\n", e);
+	return e;
+}
+
+static void
+sin_set(struct sockaddr *sa, const uint8_t a[4])
+{
+	struct sockaddr_in *s = (struct sockaddr_in *)(void *)sa;
+	bzero(s, sizeof(*s));
+	s->sin_len = (uint8_t)sizeof(*s);
+	s->sin_family = AF_INET;
+	memcpy(&s->sin_addr, a, 4);
+}
+
+static void
+wif_ipconfig(void)
+{
+	socket_t so = NULL;
+	errno_t e = sock_socket(PF_INET, SOCK_DGRAM, 0, NULL, NULL, &so);
+	if (e != 0) {
+		printf("A510F WIFI: inet socket failed (%d)\n", e);
+		return;
+	}
+	struct ifreq ifr;
+	bzero(&ifr, sizeof(ifr));
+	strlcpy(ifr.ifr_name, "en0", sizeof(ifr.ifr_name));
+	errno_t ea = sock_ioctl(so, SIOCPROTOATTACH, &ifr);
+	ifr.ifr_flags = IFF_UP | IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
+	errno_t ef = sock_ioctl(so, SIOCSIFFLAGS, &ifr);
+	struct ifaliasreq ifra;
+	bzero(&ifra, sizeof(ifra));
+	strlcpy(ifra.ifra_name, "en0", sizeof(ifra.ifra_name));
+	uint8_t bc[4];
+	for (int i = 0; i < 4; i++) {
+		bc[i] = (uint8_t)(w2.ip[i] | (uint8_t)~w2.mask[i]);
+	}
+	sin_set(&ifra.ifra_addr, w2.ip);
+	sin_set(&ifra.ifra_mask, w2.mask);
+	sin_set(&ifra.ifra_broadaddr, bc);
+	errno_t eaddr = sock_ioctl(so, SIOCAIFADDR, &ifra);
+	sock_close(so);
+
+	/* default route via the gateway: RTM_ADD on a routing socket */
+	socket_t rs = NULL;
+	errno_t er = sock_socket(PF_ROUTE, SOCK_RAW, 0, NULL, NULL, &rs);
+	errno_t es = EINVAL;
+	if (er == 0) {
+		struct {
+			struct rt_msghdr h;
+			struct sockaddr_in dst, gw, mask;
+		} m;
+		bzero(&m, sizeof(m));
+		m.h.rtm_msglen = (u_short)sizeof(m);
+		m.h.rtm_version = RTM_VERSION;
+		m.h.rtm_type = RTM_ADD;
+		m.h.rtm_flags = RTF_UP | RTF_GATEWAY | RTF_STATIC;
+		m.h.rtm_addrs = RTA_DST | RTA_GATEWAY | RTA_NETMASK;
+		m.h.rtm_seq = 1;
+		static const uint8_t zero[4] = {0, 0, 0, 0};
+		sin_set((struct sockaddr *)&m.dst, zero);
+		sin_set((struct sockaddr *)&m.gw, w2.gw);
+		sin_set((struct sockaddr *)&m.mask, zero);
+		struct iovec iov = {&m, sizeof(m)};
+		struct msghdr msg;
+		bzero(&msg, sizeof(msg));
+		msg.msg_iov = &iov;
+		msg.msg_iovlen = 1;
+		size_t sent = 0;
+		es = sock_send(rs, &msg, 0, &sent);
+		sock_close(rs);
+	}
+	printf("A510F WIFI: en0 inet attach %d, up %d, address %u.%u.%u.%u %d, default route via %u.%u.%u.%u %d/%d\n", ea, ef,
+	    w2.ip[0], w2.ip[1], w2.ip[2], w2.ip[3], eaddr, w2.gw[0], w2.gw[1], w2.gw[2], w2.gw[3], er, es);
+}
+
+/* a DNS query for apple.com to the router's DNS server, through the kernel's own UDP socket */
+static void
+wif_dns_test(__unused void *arg, __unused wait_result_t wr_)
+{
+	IOSleep(3000);
+	socket_t so = NULL;
+	errno_t e = sock_socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, NULL, &so);
+	if (e == 0) {
+		struct timeval tv = {4, 0};
+		(void)sock_setsockopt(so, SOL_SOCKET, SO_RCVTIMEO, &tv, (int)sizeof(tv));
+		static const uint8_t q[] = {0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0,
+			                    5, 'a', 'p', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1};
+		struct sockaddr_in to;
+		sin_set((struct sockaddr *)&to, w2.dns);
+		to.sin_port = htons(53);
+		struct iovec iov = {(void *)(uintptr_t)q, sizeof(q)};
+		struct msghdr m;
+		bzero(&m, sizeof(m));
+		m.msg_name = &to;
+		m.msg_namelen = (socklen_t)sizeof(to);
+		m.msg_iov = &iov;
+		m.msg_iovlen = 1;
+		size_t sent = 0, got = 0;
+		e = sock_send(so, &m, 0, &sent);
+		uint8_t r[512];
+		struct iovec riov = {r, sizeof(r)};
+		struct msghdr rm;
+		bzero(&rm, sizeof(rm));
+		rm.msg_iov = &riov;
+		rm.msg_iovlen = 1;
+		errno_t e2 = e == 0 ? sock_receive(so, &rm, 0, &got) : e;
+		uint8_t a[4] = {0, 0, 0, 0};
+		if (e2 == 0 && got > sizeof(q)) {
+			/* answers after the question: name (pointer or labels), type, class, ttl, rdlength, data */
+			uint32_t at = sizeof(q);
+			unsigned ans = ((unsigned)r[6] << 8) | r[7];
+			for (unsigned k = 0; k < ans && at + 12u <= got; k++) {
+				if ((r[at] & 0xc0u) == 0xc0u) {
+					at += 2;
+				} else {
+					while (at < got && r[at] != 0) {
+						at += 1u + r[at];
+					}
+					at++;
+				}
+				if (at + 10u > got) {
+					break;
+				}
+				unsigned type = ((unsigned)r[at] << 8) | r[at + 1], rl = ((unsigned)r[at + 8] << 8) | r[at + 9];
+				at += 10;
+				if (type == 1 && rl == 4 && at + 4u <= got) {
+					memcpy(a, r + at, 4);
+					break;
+				}
+				at += rl;
+			}
+		}
+		printf("A510F WIFI: DNS test: sent %d (%lu bytes), reply %d (%lu bytes): apple.com = %u.%u.%u.%u\n", e, (unsigned long)sent, e2, (unsigned long)got,
+		    a[0], a[1], a[2], a[3]);
+		sock_close(so);
+	} else {
+		printf("A510F WIFI: DNS test: socket failed (%d)\n", e);
+	}
+	thread_terminate(current_thread());
+}
+
+/* this thread from now on: send queued frames, deliver received ones, handle events; never returns */
+static void
+wif_service(void)
+{
+	uint64_t next_log = 0;
+	for (;;) {
+		bool busy = false;
+		while (txq_tail != txq_head) {
+			unsigned t = txq_tail;
+			(void)data_send(txq[t].b, txq[t].len);
+			lck_mtx_lock(&wif_lock);
+			txq_tail = (t + 1u) % TXQ;
+			lck_mtx_unlock(&wif_lock);
+			wif_tx++;
+			busy = true;
+		}
+		for (int f = 0; f < 8; f++) {
+			uint32_t ch = 0, doff = 0, fl = frame_read(&ch, &doff);
+			if (fl == 0) {
+				break;
+			}
+			busy = true;
+			if (ch == 1) {
+				wifi_event(f2_buf, fl, doff);
+			} else if (ch == 2 && fl > doff + 4u) {
+				uint32_t at = doff + 4u + (uint32_t)f2_buf[doff + 3] * 4u;
+				if (at < fl) {
+					wif_deliver(f2_buf + at, fl - at);
+				}
+			}
+		}
+		uint64_t now = mach_absolute_time();
+		if (now > next_log) {
+			uint64_t abs = 0;
+			nanoseconds_to_absolutetime(30ull * NSEC_PER_SEC, &abs);
+			next_log = now + abs;
+			printf("A510F WIFI: en0: %u frames in, %u out, %u dropped\n", wif_rx, wif_tx, wif_drop);
+		}
+		if (!busy) {
+			IOSleep(2);
+		}
+	}
+}
+
+static void
+wifi_step6(void)
+{
+	if (!w2.dhcp) {
+		printf("A510F WIFI: step 6 skipped (no DHCP lease)\n");
+		return;
+	}
+	if (wif_attach() != 0) {
+		return;
+	}
+	wif_ipconfig();
+	thread_t th;
+	if (kernel_thread_start(wif_dns_test, NULL, &th) == KERN_SUCCESS) {
+		thread_deallocate(th);
+	}
+	printf("A510F WIFI: step 6: en0 up, serving\n");
+	wif_service();
 }
 
 static void
@@ -1832,6 +2158,7 @@ wifi_step1(void)
 	wifi_step3();
 	wifi_step4();
 	wifi_step5();
+	wifi_step6();
 }
 
 static void
