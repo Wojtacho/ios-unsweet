@@ -1155,21 +1155,28 @@ sweet_os_log_impl(void *dso, os_log_t lg, os_log_type_t type, const char *format
 	if (ca_dbg_start_s == 0 || format == NULL || dso == NULL) {
 		return;
 	}
-	static void *volatile qc;
-	static void *volatile other[16];
-	static volatile unsigned nother;
-	if (dso != qc) {
-		for (unsigned i = 0; i < 16; i++) {
-			if (other[i] == dso) {
-				return;
-			}
+	/* round 68: every image (tagged), and how many calls came through at all */
+	static volatile uint64_t calls;
+	calls++;
+	static struct { void *dso; const char *name; } names[32];
+	static unsigned nnames;
+	const char *name = NULL;
+	for (unsigned i = 0; i < 32 && i < nnames; i++) {
+		if (names[i].dso == dso) {
+			name = names[i].name;
 		}
+	}
+	if (name == NULL) {
 		Dl_info di;
-		if (dladdr(dso, &di) != 0 && di.dli_fname != NULL && strstr(di.dli_fname, "QuartzCore") != NULL) {
-			qc = dso;
-		} else {
-			other[nother++ % 16] = dso;
-			return;
+		name = "?";
+		if (dladdr(dso, &di) != 0 && di.dli_fname != NULL) {
+			const char *slash = strrchr(di.dli_fname, '/');
+			name = slash != NULL ? slash + 1 : di.dli_fname;
+		}
+		if (nnames < 32) {
+			names[nnames].dso = dso;
+			names[nnames].name = name;
+			nnames++;
 		}
 	}
 	static mach_timebase_info_data_t tb;
@@ -1180,8 +1187,17 @@ sweet_os_log_impl(void *dso, os_log_t lg, os_log_type_t type, const char *format
 	if (s < ca_dbg_start_s || s >= ca_dbg_start_s + 40) {
 		return;
 	}
+	static int told;
+	if (!told) {
+		told = 1;
+		sweet_drm_log("ca: os_log interposer: %llu calls before the window", (unsigned long long)calls);
+	}
 	char line[220];
-	ca_log_format(format, buf, size, line, sizeof(line));
+	int pre = snprintf(line, sizeof(line), "[%.24s] ", name);
+	if (pre < 0 || pre >= (int)sizeof(line)) {
+		pre = 0;
+	}
+	ca_log_format(format, buf, size, line + pre, sizeof(line) - (size_t)pre);
 	for (char *c = line; *c != 0; c++) {
 		if (*c == 10 || *c == 13) {
 			*c = ' ';
