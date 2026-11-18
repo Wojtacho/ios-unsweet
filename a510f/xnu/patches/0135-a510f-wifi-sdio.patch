@@ -158,7 +158,7 @@ diff --git a/bsd/dev/a510f_wifi.c b/bsd/dev/a510f_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/a510f_wifi.c
-@@ -0,0 +1,1618 @@
+@@ -0,0 +1,1863 @@
 +/*
 + * A510F Wi-Fi, step 1: Broadcom BCM43454 on SDIO.
 + *
@@ -553,6 +553,7 @@ new file mode 100644
 +	int fw_ok;                              /* blob sum matched */
 +	int f2_ready;                           /* step 2b: function 2 came up */
 +	int up;                                 /* step 3: WLC_UP worked */
++	int keyed;                              /* step 4: WPA2 keys in place */
 +	uint8_t *blob;
 +	uint32_t fw_len, nv_len;
 +	char ssid[33];
@@ -1116,6 +1117,8 @@ new file mode 100644
 +
 +static uint8_t f2_buf[2048];
 +static uint8_t tx_seq;
++static uint8_t tx_max;
++static bool have_credit;
 +static uint16_t req_id;
 +
 +static int
@@ -1190,10 +1193,13 @@ new file mode 100644
 +	if (rest > 0 && f2_read(f2_buf + 4, rest) != 0) {
 +		return 0;
 +	}
-+	uint32_t w0 = 0;
++	uint32_t w0 = 0, w1 = 0;
 +	memcpy(&w0, f2_buf + 4, 4);
++	memcpy(&w1, f2_buf + 8, 4);
 +	*chan = (w0 >> 8) & 0xfu;
 +	*doff = w0 >> 24;
++	tx_max = (uint8_t)(w1 >> 8);            /* the firmware's tx credit: we may send up to sequence tx_max */
++	have_credit = true;
 +	return len;
 +}
 +
@@ -1549,6 +1555,244 @@ new file mode 100644
 +	printf("A510F WIFI: join %s, link %s, keys %s\n", ev.join == 1 ? "OK" : ev.join ? "FAILED" : "no event",
 +	    ev.link == 1 ? "UP" : ev.link ? "down" : "no event", ev.keyed == 1 ? "DONE (connected)" : ev.keyed ? "failed" : "no event");
 +	printf("A510F WIFI: step 4 done\n");
++	w2.keyed = ev.keyed == 1;
++}
++
++/*
++ * Step 5: the data path. Ethernet frames go on SDPCM channel 2 behind a
++ * 4-byte BCDC data header (flags 0x20 = protocol version 2, priority,
++ * flags2 = interface 0, data offset in words); received ones come the same
++ * way. Tested with a DHCP exchange (DISCOVER, OFFER, REQUEST, ACK): the
++ * router's answer proves both directions and gives the address, gateway and
++ * DNS server.
++ */
++static uint8_t w_mac[6];
++
++static int
++data_send(const uint8_t *eth, uint32_t len)
++{
++	/* the firmware's credit: (tx_max - tx_seq) must be 1..127 */
++	for (int t = 0; t < 50 && (!have_credit || (uint8_t)(tx_max - tx_seq) == 0 || ((uint8_t)(tx_max - tx_seq) & 0x80u)); t++) {
++		events_poll(10, NULL);
++	}
++	uint32_t total = 12u + 4u + len;
++	if (total > sizeof(f2_buf)) {
++		return EINVAL;
++	}
++	bzero(f2_buf, (total + 3u) & ~3u);
++	uint16_t l16 = (uint16_t)total, c16 = (uint16_t)~l16;
++	memcpy(f2_buf, &l16, 2);
++	memcpy(f2_buf + 2, &c16, 2);
++	uint32_t w0 = (uint32_t)tx_seq++ | (2u << 8) | (12u << 24);
++	memcpy(f2_buf + 4, &w0, 4);
++	f2_buf[12] = 0x20;                      /* BCDC version 2, no checksum offload */
++	memcpy(f2_buf + 16, eth, len);
++	return f2_write(f2_buf, (total + 3u) & ~3u);
++}
++
++/* the next received Ethernet frame within ms (events handled meanwhile); its length, 0 if none */
++static uint32_t
++data_recv(uint8_t *out, uint32_t max, uint32_t ms)
++{
++	for (uint32_t t = 0; t < ms; t += 10) {
++		for (int f = 0; f < 8; f++) {
++			uint32_t ch = 0, doff = 0, fl = frame_read(&ch, &doff);
++			if (fl == 0) {
++				break;
++			}
++			if (ch == 1) {
++				wifi_event(f2_buf, fl, doff);
++			} else if (ch == 2 && fl > doff + 4u) {
++				uint32_t at = doff + 4u + (uint32_t)f2_buf[doff + 3] * 4u;
++				if (at < fl) {
++					uint32_t n = fl - at < max ? fl - at : max;
++					memcpy(out, f2_buf + at, n);
++					return n;
++				}
++			}
++		}
++		IOSleep(10);
++	}
++	return 0;
++}
++
++static uint16_t
++ip_sum(const uint8_t *p, uint32_t n)
++{
++	uint32_t s = 0;
++	for (uint32_t i = 0; i + 1 < n; i += 2) {
++		s += ((uint32_t)p[i] << 8) | p[i + 1];
++	}
++	while (s >> 16) {
++		s = (s & 0xffffu) + (s >> 16);
++	}
++	return (uint16_t)~s;
++}
++
++/* a DHCP message (type 1 DISCOVER or 3 REQUEST) as an Ethernet broadcast; its length */
++static uint32_t
++dhcp_build(uint8_t *f, uint8_t type, uint32_t xid, const uint8_t req_ip[4], const uint8_t server[4])
++{
++	bzero(f, 342);
++	memset(f, 0xff, 6);
++	memcpy(f + 6, w_mac, 6);
++	f[12] = 0x08;
++	f[13] = 0x00;
++	uint8_t *ip = f + 14, *udp = ip + 20, *b = udp + 8;
++	b[0] = 1;                               /* BOOTREQUEST */
++	b[1] = 1;
++	b[2] = 6;
++	b[4] = (uint8_t)(xid >> 24);
++	b[5] = (uint8_t)(xid >> 16);
++	b[6] = (uint8_t)(xid >> 8);
++	b[7] = (uint8_t)xid;
++	b[10] = 0x80;                           /* broadcast reply */
++	memcpy(b + 28, w_mac, 6);
++	b[236] = 0x63;
++	b[237] = 0x82;
++	b[238] = 0x53;
++	b[239] = 0x63;
++	uint8_t *o = b + 240;
++	*o++ = 53;
++	*o++ = 1;
++	*o++ = type;
++	if (type == 3) {
++		*o++ = 50;
++		*o++ = 4;
++		memcpy(o, req_ip, 4);
++		o += 4;
++		*o++ = 54;
++		*o++ = 4;
++		memcpy(o, server, 4);
++		o += 4;
++	}
++	*o++ = 55;
++	*o++ = 4;
++	*o++ = 1;                               /* subnet mask */
++	*o++ = 3;                               /* router */
++	*o++ = 6;                               /* DNS */
++	*o++ = 51;                              /* lease time */
++	*o++ = 255;
++	uint32_t blen = 300;                    /* BOOTP minimum */
++	uint32_t ulen = 8u + blen, iplen = 20u + ulen;
++	ip[0] = 0x45;
++	ip[2] = (uint8_t)(iplen >> 8);
++	ip[3] = (uint8_t)iplen;
++	ip[8] = 64;
++	ip[9] = 17;
++	memset(ip + 16, 0xff, 4);
++	uint16_t cs = ip_sum(ip, 20);
++	ip[10] = (uint8_t)(cs >> 8);
++	ip[11] = (uint8_t)cs;
++	udp[1] = 68;
++	udp[3] = 67;
++	udp[4] = (uint8_t)(ulen >> 8);
++	udp[5] = (uint8_t)ulen;
++	return 14u + iplen;
++}
++
++/* a DHCP reply to xid: its message type, offered address and options (0: not one) */
++static int
++dhcp_parse(const uint8_t *f, uint32_t n, uint32_t xid, uint8_t yi[4], uint8_t srv[4], uint8_t mask[4], uint8_t gw[4],
++    uint8_t dns[4], uint32_t *lease)
++{
++	if (n < 14u + 20u + 8u + 240u || f[12] != 0x08 || f[13] != 0x00 || f[14 + 9] != 17) {
++		return 0;
++	}
++	uint32_t ihl = (uint32_t)(f[14] & 0xfu) * 4u;
++	const uint8_t *udp = f + 14 + ihl, *b = udp + 8;
++	if (14u + ihl + 8u + 240u > n || udp[3] != 68 || b[0] != 2) {
++		return 0;
++	}
++	uint32_t x = ((uint32_t)b[4] << 24) | ((uint32_t)b[5] << 16) | ((uint32_t)b[6] << 8) | b[7];
++	if (x != xid) {
++		return 0;
++	}
++	memcpy(yi, b + 16, 4);
++	int type = 0;
++	const uint8_t *o = b + 240, *end = f + n;
++	while (o + 2 <= end && *o != 255) {
++		if (*o == 0) {
++			o++;
++			continue;
++		}
++		uint8_t code = o[0], l = o[1];
++		const uint8_t *v = o + 2;
++		if (v + l > end) {
++			break;
++		}
++		if (code == 53 && l >= 1) {
++			type = v[0];
++		} else if (code == 54 && l >= 4) {
++			memcpy(srv, v, 4);
++		} else if (code == 1 && l >= 4) {
++			memcpy(mask, v, 4);
++		} else if (code == 3 && l >= 4) {
++			memcpy(gw, v, 4);
++		} else if (code == 6 && l >= 4) {
++			memcpy(dns, v, 4);
++		} else if (code == 51 && l >= 4) {
++			*lease = ((uint32_t)v[0] << 24) | ((uint32_t)v[1] << 16) | ((uint32_t)v[2] << 8) | v[3];
++		}
++		o = v + l;
++	}
++	return type;
++}
++
++static void
++wifi_step5(void)
++{
++	if (!w2.keyed) {
++		printf("A510F WIFI: step 5 skipped (not connected)\n");
++		return;
++	}
++	uint8_t mac[8];
++	bzero(mac, sizeof(mac));
++	if (fw_getvar("cur_etheraddr", mac, 6) != 0) {
++		printf("A510F WIFI: step 5: no MAC\n");
++		return;
++	}
++	memcpy(w_mac, mac, 6);
++	uint8_t *pkt = kalloc_data(1600, Z_WAITOK | Z_ZERO);
++	if (pkt == NULL) {
++		return;
++	}
++	uint32_t xid = 0xa5100000u | (uint32_t)(mach_absolute_time() & 0xffffu);
++	uint8_t yi[4] = {0}, srv[4] = {0}, msk[4] = {0}, gw[4] = {0}, dns[4] = {0}, none[4] = {0};
++	uint32_t lease = 0;
++	int got_offer = 0, got_ack = 0, frames = 0;
++	for (int attempt = 0; attempt < 3 && !got_offer; attempt++) {
++		uint32_t n = dhcp_build(pkt, 1, xid, none, none);
++		int e = data_send(pkt, n);
++		printf("A510F WIFI: DHCPDISCOVER %u bytes sent (%d), credit %u\n", n, e, (uint8_t)(tx_max - tx_seq));
++		for (int k = 0; k < 40 && !got_offer; k++) {
++			uint32_t r = data_recv(pkt, 1600, 100);
++			if (r == 0) {
++				continue;
++			}
++			frames++;
++			got_offer = dhcp_parse(pkt, r, xid, yi, srv, msk, gw, dns, &lease) == 2;
++		}
++	}
++	printf("A510F WIFI: %d frames received; offer %s: %u.%u.%u.%u from %u.%u.%u.%u\n", frames, got_offer ? "yes" : "no",
++	    yi[0], yi[1], yi[2], yi[3], srv[0], srv[1], srv[2], srv[3]);
++	if (got_offer) {
++		uint8_t want[4];
++		memcpy(want, yi, 4);
++		uint32_t n = dhcp_build(pkt, 3, xid, want, srv);
++		(void)data_send(pkt, n);
++		for (int k = 0; k < 40 && !got_ack; k++) {
++			uint32_t r = data_recv(pkt, 1600, 100);
++			if (r != 0) {
++				got_ack = dhcp_parse(pkt, r, xid, yi, srv, msk, gw, dns, &lease) == 5;
++			}
++		}
++		printf("A510F WIFI: DHCP %s: address %u.%u.%u.%u mask %u.%u.%u.%u gateway %u.%u.%u.%u DNS %u.%u.%u.%u, lease %u s\n",
++		    got_ack ? "ACK" : "no ACK", yi[0], yi[1], yi[2], yi[3], msk[0], msk[1], msk[2], msk[3], gw[0], gw[1], gw[2], gw[3],
++		    dns[0], dns[1], dns[2], dns[3], lease);
++	}
++	kfree_data(pkt, 1600);
++	printf("A510F WIFI: step 5 done\n");
 +}
 +
 +static void
@@ -1748,6 +1992,7 @@ new file mode 100644
 +	wifi_step2b();
 +	wifi_step3();
 +	wifi_step4();
++	wifi_step5();
 +}
 +
 +static void
