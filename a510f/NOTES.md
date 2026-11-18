@@ -1643,3 +1643,25 @@ Wi-Fi rounds 83-87 (2026-11-18, evening):
   with no crash report; memory was low (free 112 MB, wired 571 MB, 49
   surfaces = 185 MB). Likely a jetsam kill: 0136 now prints "A510F JETSAM:
   killing <name>[pid] band cause footprint" on the console.
+
+Round 88 (2026-11-18): SpringBoard is not killed: "A510F EXIT: SpringBoard
+rv 0x100 (status 1)", no signal, right after "Failed to decode CAPackage
+with error (null)" when leaving Settings (home press). Round 89 prints the
+exit() caller's backtrace. Wi-Fi: rejected headers were good frames longer
+than f2_buf (0xb40 bytes, checksum ok); round 89: 4 KiB buffer, rxglom 0.
+
+Folder materials (static look, 2026-11-18): recipes off the phone
+(ref/recipes): folderLight = dockLight except backdropScale 0.125 (dock
+0.25) and brightness 0.12; open-folder panel folderExpandedLight (scale
+0.05); full-screen open-folder blur folderExpandedBackgroundHome (scale
+0.25, works). So scale < 0.25 (or the folder backdrop groups) fails.
+QuartzCore local symbols: ref/qc_localsyms.json (dsc_localsyms.py
+QuartzCore), disassembler scratchpad qcdis.py. CA::OGL render of a
+BackdropLayer (0x1882f3798) asks GLESContext::get(0x1d) (GLContext::get
+returns 0 for it: only 0x11/0x1e and 8-15 are 1), so on GL it draws only
+from the group's BackdropBuffer (group+0x30, buffer context == this one,
+buffer+0x20 surface) and skips the layer otherwise (0x1882f43e8).
+capture_backdrop (0x188318a64) fills that buffer only when the group's
++0x1b0 equals the renderer's pass id and for the last item of the group.
+GL texture functions still NULL in tex_fragment_shaders (0x1d5b48a10 on
+this phone): 0x19, 0x1c, 0x28, 0x33+.
