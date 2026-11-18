@@ -709,8 +709,8 @@ bp_write_mem(uint32_t addr, const uint8_t *buf, uint32_t len)
 	uint32_t off = 0;
 	while (off < len) {
 		uint32_t a = addr + off, c = len - off;
-		if (c > 512u) {
-			c = 512u;               /* round 85: 512-byte CMD53s (the FIFO holds 64 x 8 bytes) */
+		if (c > 64u) {
+			c = 64u;                /* function 1's block size: 512-byte byte-mode writes failed at every clock (round 86) */
 		}
 		if (c > 0x8000u - (a & 0x7fffu)) {
 			c = 0x8000u - (a & 0x7fffu);
@@ -744,8 +744,8 @@ bp_read_mem(uint32_t addr, uint8_t *buf, uint32_t len)
 	uint32_t off = 0;
 	while (off < len) {
 		uint32_t a = addr + off, c = len - off;
-		if (c > 512u) {
-			c = 512u;               /* round 85: 512-byte CMD53s (the FIFO holds 64 x 8 bytes) */
+		if (c > 64u) {
+			c = 64u;                /* function 1's block size: 512-byte byte-mode writes failed at every clock (round 86) */
 		}
 		if (c > 0x8000u - (a & 0x7fffu)) {
 			c = 0x8000u - (a & 0x7fffu);
