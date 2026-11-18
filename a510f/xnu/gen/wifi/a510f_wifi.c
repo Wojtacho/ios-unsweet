@@ -999,7 +999,20 @@ wifi_step2b(void)
 #define WLC_UP          2u
 #define WLC_GET_VAR     262u
 
-static uint8_t f2_buf[4096];            /* round 88: frames of 0xb40 bytes (good checksum) were dropped at 2048 */
+static uint8_t f2_buf[16384];           /* one frame, or a whole superframe (round 89: up to 0x1e20 bytes) */
+
+/*
+ * Rx superframes (glom): the firmware sends them although bus:rxglom is 0.
+ * First a descriptor frame (channel 3, SW header byte 1 bit 7) listing the
+ * subframe lengths (u16 each), then one superframe of their total length;
+ * its first tag holds the total, each subframe has its own SDPCM header.
+ * Subframes are queued here and handed out one by one by frame_read().
+ */
+static uint8_t glom_buf[16384];
+static uint16_t glom_desc[64];
+static uint32_t glom_desc_n;
+static uint32_t glom_off[64], glom_len[64], glom_i, glom_n;
+static unsigned glom_supers, glom_subs;
 static uint8_t tx_seq;
 static uint8_t tx_max;
 static bool have_credit;
@@ -1063,8 +1076,29 @@ sdio_wait(uint32_t want, uint32_t ms)
 
 /* read one frame into f2_buf; its length (0: none), channel and data offset */
 static uint32_t
+frame_parse_sw(uint32_t len, uint32_t *chan, uint32_t *doff)
+{
+	uint32_t w0 = 0, w1 = 0;
+	memcpy(&w0, f2_buf + 4, 4);
+	memcpy(&w1, f2_buf + 8, 4);
+	*chan = (w0 >> 8) & 0xfu;
+	*doff = w0 >> 24;
+	tx_max = (uint8_t)(w1 >> 8);            /* the firmware's tx credit: we may send up to sequence tx_max */
+	have_credit = true;
+	return len;
+}
+
+static uint32_t
 frame_read(uint32_t *chan, uint32_t *doff)
 {
+again:
+	if (glom_i < glom_n) {
+		/* the next subframe of the last superframe */
+		uint32_t o = glom_off[glom_i], l = glom_len[glom_i];
+		glom_i++;
+		memcpy(f2_buf, glom_buf + o, l);
+		return frame_parse_sw(l, chan, doff);
+	}
 	if (f2_read(f2_buf, 4) != 0) {
 		return 0;
 	}
@@ -1100,20 +1134,57 @@ frame_read(uint32_t *chan, uint32_t *doff)
 	if (rest > 0 && f2_read(f2_buf + 4, rest) != 0) {
 		return 0;
 	}
-	uint32_t w0 = 0, w1 = 0;
+	uint32_t w0 = 0;
 	memcpy(&w0, f2_buf + 4, 4);
-	memcpy(&w1, f2_buf + 8, 4);
-	*chan = (w0 >> 8) & 0xfu;
-	if (len > 1600u || *chan == 3u) {
-		static unsigned big;
-		if (big++ < 6) {
-			printf("A510F WIFI: frame of %u bytes on channel %u (data offset %u)\n", len, *chan, w0 >> 24);
+	uint32_t ch = (w0 >> 8) & 0xfu, dof = w0 >> 24;
+	if (ch == 3u && (w0 & 0x8000u) != 0) {
+		/* a glom descriptor: remember the subframe lengths, read on */
+		(void)frame_parse_sw(len, chan, doff);
+		glom_desc_n = 0;
+		for (uint32_t o = dof; o + 2u <= len && glom_desc_n < 64u; o += 2u) {
+			uint16_t l = (uint16_t)(f2_buf[o] | (f2_buf[o + 1] << 8));
+			if (l == 0) {
+				break;
+			}
+			glom_desc[glom_desc_n++] = l;
+		}
+		goto again;
+	}
+	if (glom_desc_n > 0) {
+		/* the superframe: split it by the descriptor */
+		uint32_t total = 0;
+		for (uint32_t k = 0; k < glom_desc_n; k++) {
+			total += glom_desc[k];
+		}
+		uint32_t nd = glom_desc_n;
+		glom_desc_n = 0;
+		if (total == len || ch == 3u) {
+			memcpy(glom_buf, f2_buf, len);
+			glom_i = glom_n = 0;
+			for (uint32_t k = 0, o = 0; k < nd && o + 12u <= len; o += glom_desc[k], k++) {
+				uint32_t tl = (uint32_t)glom_buf[o] | ((uint32_t)glom_buf[o + 1] << 8);
+				uint32_t l = tl < glom_desc[k] ? tl : glom_desc[k];
+				if (o + l > len) {
+					l = len - o;
+				}
+				if (l >= 12u) {
+					glom_off[glom_n] = o;
+					glom_len[glom_n] = l;
+					glom_n++;
+				}
+			}
+			if (glom_supers++ < 4) {
+				printf("A510F WIFI: superframe of %u bytes (descriptor total %u, channel %u): %u subframes\n",
+				    len, total, ch, glom_n);
+			}
+			glom_subs += glom_n;
+			goto again;
+		}
+		if (glom_supers < 4) {
+			printf("A510F WIFI: superframe length %u does not match its descriptor (%u), channel %u\n", len, total, ch);
 		}
 	}
-	*doff = w0 >> 24;
-	tx_max = (uint8_t)(w1 >> 8);            /* the firmware's tx credit: we may send up to sequence tx_max */
-	have_credit = true;
-	return len;
+	return frame_parse_sw(len, chan, doff);
 }
 
 /*
@@ -2015,7 +2086,8 @@ wif_service(void)
 			uint64_t abs = 0;
 			nanoseconds_to_absolutetime(30ull * NSEC_PER_SEC, &abs);
 			next_log = now + abs;
-			printf("A510F WIFI: en0: %u frames in, %u out, %u dropped\n", wif_rx, wif_tx, wif_drop);
+			printf("A510F WIFI: en0: %u frames in, %u out, %u dropped; %u superframes (%u subframes)\n", wif_rx, wif_tx,
+			    wif_drop, glom_supers, glom_subs);
 		}
 		if (!busy) {
 			IOSleep(2);
