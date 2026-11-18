@@ -377,13 +377,30 @@ wifi_step2a(void)
 	/* EROM: component (CIA, CIB), then master port / address descriptors, EOT 0xf */
 	uint32_t a = erom, core = 0, rev = 0, base = 0, wrap = 0;
 	int ncores = 0;
+	{
+		/* round 71: round 70 found no cores: the raw table first */
+		uint32_t raw[16];
+		int er = 0;
+		for (int k = 0; k < 16; k++) {
+			raw[k] = 0;
+			er |= bp_read32(erom + 4u * (uint32_t)k, &raw[k]);
+		}
+		printf("A510F WIFI: EROM (%d): %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x\n",
+		    er, raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], raw[8], raw[9], raw[10], raw[11], raw[12],
+		    raw[13], raw[14], raw[15]);
+	}
 	for (int k = 0; k < 400; k++) {
 		uint32_t v = 0;
-		if (bp_read32(a, &v) != 0) {
+		int er = bp_read32(a, &v);
+		if (er != 0) {
+			printf("A510F WIFI: EROM read at 0x%x failed (%d) after %d words\n", a, er, k);
 			break;
 		}
 		a += 4;
 		uint32_t type = v & 0xfu;
+		if (type == 0xfu) {
+			printf("A510F WIFI: EROM end at word %d\n", k);
+		}
 		if (type == 0xfu || type == 0x1u) {
 			if (core != 0) {
 				printf("A510F WIFI: core 0x%03x rev %u base 0x%08x wrap 0x%08x\n", core, rev, base, wrap);
