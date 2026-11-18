@@ -688,8 +688,8 @@ bp_write_mem(uint32_t addr, const uint8_t *buf, uint32_t len)
 	uint32_t off = 0;
 	while (off < len) {
 		uint32_t a = addr + off, c = len - off;
-		if (c > 64u) {
-			c = 64u;
+		if (c > 512u) {
+			c = 512u;               /* round 85: 512-byte CMD53s (the FIFO holds 64 x 8 bytes) */
 		}
 		if (c > 0x8000u - (a & 0x7fffu)) {
 			c = 0x8000u - (a & 0x7fffu);
@@ -713,8 +713,8 @@ bp_read_mem(uint32_t addr, uint8_t *buf, uint32_t len)
 	uint32_t off = 0;
 	while (off < len) {
 		uint32_t a = addr + off, c = len - off;
-		if (c > 64u) {
-			c = 64u;
+		if (c > 512u) {
+			c = 512u;               /* round 85: 512-byte CMD53s (the FIFO holds 64 x 8 bytes) */
 		}
 		if (c > 0x8000u - (a & 0x7fffu)) {
 			c = 0x8000u - (a & 0x7fffu);
@@ -1315,10 +1315,13 @@ fw_set_u32(uint32_t cmd, uint32_t v)
 }
 
 /* read frames for up to ms, events to wifi_event; stop when *flag becomes non-zero */
+static ifnet_t wif;
+static void wif_deliver(const uint8_t *f, uint32_t len);
+
 static void
 events_poll(uint32_t ms, const int *flag)
 {
-	for (uint32_t t = 0; t < ms && (flag == NULL || *flag == 0); t += 10) {
+	for (uint32_t t = 0; t < ms && (flag == NULL || *flag == 0); t += 2) {
 		for (int f = 0; f < 8; f++) {
 			uint32_t ch = 0, doff = 0, fl = frame_read(&ch, &doff);
 			if (fl == 0) {
@@ -1326,9 +1329,14 @@ events_poll(uint32_t ms, const int *flag)
 			}
 			if (ch == 1) {
 				wifi_event(f2_buf, fl, doff);
+			} else if (ch == 2 && wif != NULL && fl > doff + 4u) {
+				uint32_t at = doff + 4u + (uint32_t)f2_buf[doff + 3] * 4u;
+				if (at < fl) {
+					wif_deliver(f2_buf + at, fl - at);      /* round 85: data read while waiting for credit */
+				}
 			}
 		}
-		IOSleep(10);
+		IOSleep(2);
 	}
 }
 
@@ -1425,8 +1433,8 @@ static int
 data_send(const uint8_t *eth, uint32_t len)
 {
 	/* the firmware's credit: (tx_max - tx_seq) must be 1..127 */
-	for (int t = 0; t < 50 && (!have_credit || (uint8_t)(tx_max - tx_seq) == 0 || ((uint8_t)(tx_max - tx_seq) & 0x80u)); t++) {
-		events_poll(10, NULL);
+	for (int t = 0; t < 250 && (!have_credit || (uint8_t)(tx_max - tx_seq) == 0 || ((uint8_t)(tx_max - tx_seq) & 0x80u)); t++) {
+		events_poll(2, NULL);
 	}
 	uint32_t total = 12u + 4u + len;
 	if (total > sizeof(f2_buf)) {
@@ -1663,7 +1671,7 @@ wifi_step5(void)
  * (IPv4 attach, up, address, default route); a DNS query to the router's DNS
  * server through a kernel UDP socket tests the whole path.
  */
-#define TXQ             32u
+#define TXQ             128u
 
 static struct {
 	uint16_t len;
@@ -2161,6 +2169,43 @@ wifi_step1(void)
 	eid = cmd53_read(1, 0x8000, id, 4);
 	v = (uint32_t)id[0] | ((uint32_t)id[1] << 8) | ((uint32_t)id[2] << 16) | ((uint32_t)id[3] << 24);
 	printf("A510F WIFI: chipid by CMD53, 4-bit (%d) 0x%08x\n", eid, v);
+	/*
+	 * Round 85: the card clock was ciu/510 (~200 kHz, ~45 KB/s): too slow once
+	 * iOS uses en0 (round 84: 1973 frames dropped). Try divider 4 (ciu/8,
+	 * ~12.5 MHz), then 16; keep the first that reads the chip id 8 times right.
+	 */
+	{
+		static const uint32_t divs[] = {4u, 16u};
+		uint32_t good = 255u;
+		for (unsigned d = 0; d < 2 && good == 255u; d++) {
+			wr(w.mmc, W_CLKENA, 0);
+			(void)clk_update();
+			wr(w.mmc, W_CLKDIV, divs[d]);
+			(void)clk_update();
+			wr(w.mmc, W_CLKENA, 1);
+			(void)clk_update();
+			int okc = 0;
+			for (int k = 0; k < 8; k++) {
+				uint8_t b[4] = {0, 0, 0, 0};
+				if (cmd53_read(1, 0x8000, b, 4) == 0 && memcmp(b, &v, 4) == 0) {
+					okc++;
+				}
+			}
+			printf("A510F WIFI: card clock divider %u: %d of 8 chip id reads right\n", divs[d], okc);
+			if (okc == 8) {
+				good = divs[d];
+			}
+		}
+		if (good == 255u) {
+			wr(w.mmc, W_CLKENA, 0);
+			(void)clk_update();
+			wr(w.mmc, W_CLKDIV, 255);
+			(void)clk_update();
+			wr(w.mmc, W_CLKENA, 1);
+			(void)clk_update();
+		}
+		printf("A510F WIFI: card clock divider %u\n", good);
+	}
 	printf("A510F WIFI: step 1 done\n");
 	wifi_step2a();
 	wifi_step2b();
