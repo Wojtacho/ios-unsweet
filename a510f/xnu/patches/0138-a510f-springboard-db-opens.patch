@@ -1,7 +1,7 @@
 diff --git a/bsd/vfs/vfs_vnops.c b/bsd/vfs/vfs_vnops.c
 --- a/bsd/vfs/vfs_vnops.c
 +++ b/bsd/vfs/vfs_vnops.c
-@@ -751,5 +751,18 @@
+@@ -751,5 +751,23 @@
  	}
  
  out:
@@ -11,8 +11,13 @@ diff --git a/bsd/vfs/vfs_vnops.c b/bsd/vfs/vfs_vnops.c
 +		static int told;
 +		char pb[512];
 +		int pl = sizeof(pb);
-+		if (told < 60 && vn_getpath(ndp->ni_vp, pb, &pl) == 0 && (strstr(pb, ".db") != NULL || strstr(pb, ".sqlite") != NULL ||
-+		    strstr(pb, "orrupt") != NULL)) {
++		bool hit = false;
++		if (told < 60 && vn_getpath(ndp->ni_vp, pb, &pl) == 0) {
++			for (const char *q = pb; *q != 0 && !hit; q++) {
++				hit = !strncmp(q, ".db", 3) || !strncmp(q, ".sqlite", 7) || !strncmp(q, "orrupt", 6);
++			}
++		}
++		if (hit) {
 +			told++;
 +			printf("A510F OPEN: SpringBoard %s fmode 0x%x\n", pb, *fmodep);
 +		}
