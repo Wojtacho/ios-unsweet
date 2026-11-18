@@ -1604,3 +1604,22 @@ Wi-Fi rounds 76-78 (2026-11-18, midday):
   with tx credit, tested by an in-kernel DHCP exchange.
 Next: an ifnet for iOS (BSD interface KPI), IP from DHCP, default route,
 DNS; then Safari.
+
+Wi-Fi rounds 79-82 (2026-11-18, afternoon):
+- Round 79: data path (SDPCM channel 2, BCDC data header 0x20, tx credit
+  from the received SW header) tested by an in-kernel DHCP exchange: ACK
+  192.168.0.70/24, gateway 192.168.0.1, DNS 79.135.160.6, lease 3600 s.
+- Round 80/81: en0 (ifnet_allocate/ifnet_attach, Ethernet family, XNU's
+  ether_demux/ether_frameout; tx queue from wif_output, rx to ifnet_input,
+  both on the Wi-Fi thread which owns SDIO), IPv4 attach + address + default
+  route set from the kernel (sock_ioctl SIOCPROTOATTACH/SIOCSIFFLAGS/
+  SIOCAIFADDR, RTM_ADD on a routing socket). Needed IFF_RUNNING (else
+  ENETDOWN). BPF attached + taps. DNS over Wi-Fi through a kernel UDP
+  socket: apple.com = 17.253.144.10 (round 81).
+- IOKit stand-ins IOEthernetController/IOEthernetInterface (in
+  SweetMali.cpp, a510f_net_publish) with configd's properties. configd did
+  not adopt en0 (only lo0 in SWEET NET logs); /private/var/preferences is
+  empty (no SystemConfiguration preferences ever written). Round 82 starts
+  Wi-Fi 10 s after boot (a510fwifi=10) so en0 exists before configd.
+- Open: F1 register reads get data CRC errors since the firmware runs;
+  SDIO clock is still ciu/510 (~45 KB/s): raise it for real use.
