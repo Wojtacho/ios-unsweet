@@ -999,7 +999,7 @@ wifi_step2b(void)
 #define WLC_UP          2u
 #define WLC_GET_VAR     262u
 
-static uint8_t f2_buf[2048];
+static uint8_t f2_buf[4096];            /* round 88: frames of 0xb40 bytes (good checksum) were dropped at 2048 */
 static uint8_t tx_seq;
 static uint8_t tx_max;
 static bool have_credit;
@@ -1104,6 +1104,12 @@ frame_read(uint32_t *chan, uint32_t *doff)
 	memcpy(&w0, f2_buf + 4, 4);
 	memcpy(&w1, f2_buf + 8, 4);
 	*chan = (w0 >> 8) & 0xfu;
+	if (len > 1600u || *chan == 3u) {
+		static unsigned big;
+		if (big++ < 6) {
+			printf("A510F WIFI: frame of %u bytes on channel %u (data offset %u)\n", len, *chan, w0 >> 24);
+		}
+	}
 	*doff = w0 >> 24;
 	tx_max = (uint8_t)(w1 >> 8);            /* the firmware's tx credit: we may send up to sequence tx_max */
 	have_credit = true;
@@ -1410,6 +1416,11 @@ wifi_step4(void)
 		mask[want[i] / 8] |= (uint8_t)(1u << (want[i] % 8));
 	}
 	int e2 = fw_setvar("event_msgs", mask, 16);
+	{
+		uint32_t zero = 0;      /* no rx superframes (glom): one frame per read, as frame_read expects */
+		int eg = fw_setvar("bus:rxglom", &zero, 4);
+		printf("A510F WIFI: bus:rxglom 0 -> %d\n", eg);
+	}
 	printf("A510F WIFI: event mask get %d set %d\n", e, e2);
 
 	/* escan: version 1, action START, sync id, then scan params (any BSS, active, defaults, all channels) */
