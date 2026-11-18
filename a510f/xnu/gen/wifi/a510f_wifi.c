@@ -353,6 +353,8 @@ extern int a510f_mmc_read(const char *part, uint64_t lba, uint32_t nsect, void *
 #define CC_BASE         0x18000000u
 #define CORE_CR4        0x83eu
 #define CORE_SDIO       0x829u
+#define WRAP_IOCTL_EARLY        0x408u  /* AI wrapper registers (see step 2b) */
+#define WRAP_RESETCTL_EARLY     0x800u
 
 static struct {
 	uint32_t cr4_base, cr4_wrap, sdio_base, sdio_wrap, ram_size;
@@ -443,6 +445,39 @@ wifi_step2a(void)
 			} else if ((stype == 2 || stype == 3) && wrap == 0) {
 				wrap = v & 0xfffff000u;
 			}
+		}
+	}
+	/*
+	 * Round 72: the EROM pointer (0x1810a000) read like wrapper registers.
+	 * Map the 16 wrapper slots (IOCTL, RESET_CTL) and core bases (+0, +4),
+	 * then, if the scan found no CR4, try the layout brcmfmac logs show for
+	 * this family (4339 / 4359 / 43456: CR4 0x18002000 wrap 0x18102000,
+	 * 802.11 0x18001000 wrap 0x18101000, SDIO 0x18004000 wrap 0x18104000),
+	 * kept only if the CR4's corecap reads as a plausible bank count.
+	 */
+	for (uint32_t n = 0; n < 16; n += 4) {
+		uint32_t io[4], rc[4], c0[4], c4[4];
+		for (uint32_t j = 0; j < 4; j++) {
+			io[j] = rc[j] = c0[j] = c4[j] = 0xdeadbeefu;
+			(void)bp_read32(0x18100000u + (n + j) * 0x1000u + WRAP_IOCTL_EARLY, &io[j]);
+			(void)bp_read32(0x18100000u + (n + j) * 0x1000u + WRAP_RESETCTL_EARLY, &rc[j]);
+			(void)bp_read32(0x18000000u + (n + j) * 0x1000u, &c0[j]);
+			(void)bp_read32(0x18000000u + (n + j) * 0x1000u + 4u, &c4[j]);
+		}
+		printf("A510F WIFI: slots %2u-%2u: io %x %x %x %x, reset %x %x %x %x, core+0 %x %x %x %x, core+4 %x %x %x %x\n",
+		    n, n + 3, io[0], io[1], io[2], io[3], rc[0], rc[1], rc[2], rc[3], c0[0], c0[1], c0[2], c0[3], c4[0], c4[1], c4[2], c4[3]);
+	}
+	if (w2.cr4_base == 0) {
+		uint32_t cap = 0;
+		(void)bp_read32(0x18002004u, &cap);
+		uint32_t banks = (cap & 0xfu) + ((cap >> 4) & 0xfu);
+		printf("A510F WIFI: guess CR4 at 0x18002000: corecap 0x%x (%u banks)\n", cap, banks);
+		if (banks >= 1u && banks <= 16u && cap != 0xffffffffu) {
+			w2.cr4_base = 0x18002000u;
+			w2.cr4_wrap = 0x18102000u;
+			w2.d11_wrap = 0x18101000u;
+			w2.sdio_base = 0x18004000u;
+			w2.sdio_wrap = 0x18104000u;
 		}
 	}
 	printf("A510F WIFI: %d cores; ARM CR4 at 0x%x (wrap 0x%x), SDIO core at 0x%x (wrap 0x%x)\n", ncores, w2.cr4_base, w2.cr4_wrap,
