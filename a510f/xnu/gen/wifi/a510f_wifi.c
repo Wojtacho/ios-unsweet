@@ -194,6 +194,7 @@ cmd52(unsigned fn, uint32_t addr, bool write, uint8_t data, uint8_t *out)
 
 /* CMD53 opcode: incrementing address (backplane), or fixed (the function 2 FIFO reads) */
 static bool w_fixed;
+static uint32_t w_dcrc, w_dcrc_soft;       /* data CRC errors on reads; reads taken after two agreed (round 77) */
 
 /* CMD53 byte mode read of n (<= 512) bytes of function fn at addr */
 static int
@@ -233,6 +234,17 @@ cmd53_read(unsigned fn, uint32_t addr, uint8_t *buf, uint32_t n)
 		}
 		if (s & I_RXDR) {
 			wr(w.mmc, W_RINTSTS, I_RXDR);
+		}
+		if ((s & (I_CMD_ERR | I_DATA_ERR)) == I_DCRC && got >= n) {
+			/* round 77: data CRC only, all bytes in: the caller may compare repeated reads */
+			w_dcrc++;
+			if (w_dcrc <= 6) {
+				printf("A510F WIFI: CMD53 fn %u addr 0x%x x%u: data CRC error (%u so far), status 0x%x\n", fn, addr, n, w_dcrc,
+				    rd(w.mmc, W_STATUS));
+			}
+			(void)wait_clear(W_STATUS, 1u << 9, 100);
+			wr(w.mmc, W_RINTSTS, 0xffffffffu);
+			return EBADMSG;
 		}
 		if (s & (I_CMD_ERR | I_DATA_ERR)) {
 			printf("A510F WIFI: CMD53 fn %u addr 0x%x x%u: rintsts 0x%x, %u bytes, r5 0x%x status 0x%x\n", fn, addr, n, s, got,
@@ -328,10 +340,25 @@ bp_read32(uint32_t addr, uint32_t *v)
 {
 	uint8_t b[4] = {0, 0, 0, 0};
 	int e = bp_window(addr);
-	if (e == 0) {
+	uint32_t prev = 0;
+	bool have_prev = false;
+	for (int tries = 0; e == 0 || e == EBADMSG; tries++) {
 		e = cmd53_read(1, (addr & 0x7fffu) | 0x8000u, b, 4);
+		*v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+		if (e != EBADMSG) {
+			break;
+		}
+		/* data CRC error: two reads that agree are taken (round 77) */
+		if (have_prev && prev == *v) {
+			w_dcrc_soft++;
+			return 0;
+		}
+		prev = *v;
+		have_prev = true;
+		if (tries >= 3) {
+			break;
+		}
 	}
-	*v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
 	return e;
 }
 
@@ -948,6 +975,9 @@ f2_read(uint8_t *buf, uint32_t len)
 	for (uint32_t off = 0; e == 0 && off < len; off += 512u) {
 		uint32_t c = len - off < 512u ? len - off : 512u;
 		e = cmd53_read(2, F2_ADDR, buf + off, c);
+		if (e == EBADMSG) {
+			e = 0;                  /* data CRC: a FIFO cannot be read twice; the frame header has its own check */
+		}
 	}
 	w_fixed = false;
 	return e;
@@ -1033,10 +1063,7 @@ fw_dcmd(uint32_t cmd, bool set, uint8_t *data, uint32_t len, uint32_t outmax, ui
 		return e;
 	}
 	for (int tries = 0; tries < 20; tries++) {
-		uint32_t st = sdio_wait(0x40u, 500);
-		if (!(st & 0x40u)) {
-			continue;
-		}
+		(void)sdio_wait(0x40u, 500);    /* round 77: read a frame even without the frame bit (intstatus reads may fail) */
 		for (int f = 0; f < 8; f++) {
 			uint32_t ch = 0, doff = 0, fl = frame_read(&ch, &doff);
 			if (fl == 0) {
@@ -1091,6 +1118,33 @@ wifi_step3(void)
 		printf("A510F WIFI: step 3 skipped (function 2 not ready)\n");
 		return;
 	}
+	/*
+	 * Round 77: since the firmware runs, 4-byte reads of the SDIO core come
+	 * with data CRC errors (round 76). Compare the 4-bit and 1-bit bus and
+	 * keep the cleaner one.
+	 */
+	{
+		uint32_t before = w_dcrc, x = 0;
+		for (int i = 0; i < 4; i++) {
+			(void)bp_read32(w2.sdio_base + 0x20, &x);
+		}
+		uint32_t crc4 = w_dcrc - before;
+		uint8_t bic = 0;
+		(void)cmd52(0, 0x07, false, 0, &bic);
+		(void)cmd52(0, 0x07, true, (uint8_t)(bic & ~3u), NULL);
+		wr(w.mmc, W_CTYPE, 0);
+		before = w_dcrc;
+		for (int i = 0; i < 4; i++) {
+			(void)bp_read32(w2.sdio_base + 0x20, &x);
+		}
+		uint32_t crc1 = w_dcrc - before;
+		if (crc1 > crc4) {
+			(void)cmd52(0, 0x07, true, (uint8_t)((bic & ~3u) | 2u), NULL);
+			wr(w.mmc, W_CTYPE, 1);
+		}
+		printf("A510F WIFI: data CRC errors over 4 reads: 4-bit %u, 1-bit %u; using %s (intstatus 0x%x)\n", crc4, crc1,
+		    crc1 > crc4 ? "4-bit" : "1-bit", x);
+	}
 	uint32_t st = sdio_wait(0x80u, 3000);
 	printf("A510F WIFI: step 3: intstatus seen 0x%x\n", st);
 	uint8_t v[256];
@@ -1111,7 +1165,7 @@ wifi_step3(void)
 	printf("A510F WIFI: MAC %02x:%02x:%02x:%02x:%02x:%02x (%d)\n", v[0], v[1], v[2], v[3], v[4], v[5], e);
 	e = fw_dcmd(WLC_UP, true, NULL, 0, 0, &fst);
 	printf("A510F WIFI: WLC_UP %d (status %u)\n", e, fst);
-	printf("A510F WIFI: step 3 done\n");
+	printf("A510F WIFI: step 3 done (data CRC errors %u, reads taken after two agreed %u)\n", w_dcrc, w_dcrc_soft);
 }
 
 static void
