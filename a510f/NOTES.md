@@ -1696,3 +1696,19 @@ this phone): 0x19, 0x1c, 0x28, 0x33+.
   each newly shown buffer cleared; stops and clears when the display goes
   off (a510f_bootscreen_display from SweetFramebuffer). Logo scale: to be
   matched to iOS's logo from round 92's boot shots (auto.py logo FONT SIZE).
+
+## 2026-11-18 (late): paused, resume here
+
+On the phone (TWRP): BOOT = round 92 (E:\Claude\a510f-ios-boot-r92.tar,
+kernel run 44381947045), sweetgl = round 92 (folder held-clear fix, run
+44369589485, region sha d46bee0f...), OTA logo = iOS's own ProgressUI
+apple-logo@3x~iphone.png at 169x206 (auto.py logoimg; never in git).
+Building when paused: round 93 (8d030bf): logo centred, HFS defrag-on-open
+off (0139), duetexpertd refused (boot-arg experiment) + its opens logged.
+Next: flash round 93, run scripts/round92.txt as round 93 (boot shots),
+check: SpringBoard exits gone with duetexpertd off? (all round 92 exits are
+ATXInformationStore: _configureDatabase, addEngagementRecordForWidget via
+logWidgetDidAppear); then the folder screenshots (fix untested: SpringBoard
+was restarting at the folder step); logo size/position at the hand-off.
+Round 92: Wi-Fi 25 MHz (no CCCR high speed), 0 data CRC errors; crashing
+processes 44 -> 17 with the Spotlight block.
