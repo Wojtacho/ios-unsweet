@@ -1583,3 +1583,24 @@ gen/wifi/a510f_wifi.c; boot-arg a510fwifi=200 runs it 200 s after boot):
   Round 75 checks/rewrites the first 4 KiB.
 - Step 3 code (SDPCM/BCDC over F2, mailbox FWREADY, WLC_GET_VERSION, ver,
   cur_etheraddr, WLC_UP) is in, not reached yet.
+
+Wi-Fi rounds 76-78 (2026-11-18, midday):
+- Round 76: firmware boots. Needed: HT requested before the download
+  (CHIPCLKCSR 0x10, as brcmfmac clkctl CLK_AVAIL), 100 ms after the CR4 halt
+  (the first 4 KiB written right after it were lost), FORCE_HT (0x02) after
+  releasing the CR4 (ioctl 0x1). Then HT in 25 ms (csr 0xe1), last RAM word
+  = sdpcm_shared 0x200494, F2 ready in 50 ms. Whole image + NVRAM verified.
+- Since the firmware runs, F1 4-byte reads of the SDIO core registers
+  (intstatus 0xc020, mailbox 0xc04c) get data CRC errors in 1- and 4-bit
+  mode (cause open). Worked around: frames are polled on F2 directly.
+- Round 77: firmware "wl0: Aug 25 2017 10:37:50 version 7.120.8 (C0
+  Station/P2P feature) FWID 01-8f356674", WLC_GET_VERSION 2, MAC
+  02:a5:10:f0:0b:3c (our NVRAM), WLC_UP OK.
+- Round 78: escan found 5 networks (the user's 5 GHz network at -61 dBm,
+  channel 42); join with the firmware supplicant (INFRA 1, AUTH 0, WSEC 4,
+  sup_wpa 1, WPA_AUTH 0x80, WSEC_PMK passphrase, SET_SSID): AUTH event 3
+  status 0, PSK_SUP event 46 status 6 (keyed): connected.
+- Round 79 (building): data path on SDPCM channel 2 (BCDC data header 0x20)
+  with tx credit, tested by an in-kernel DHCP exchange.
+Next: an ifnet for iOS (BSD interface KPI), IP from DHCP, default route,
+DNS; then Safari.
