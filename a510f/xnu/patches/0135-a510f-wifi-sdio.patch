@@ -27,7 +27,7 @@ diff --git a/bsd/dev/a510f_wifi.c b/bsd/dev/a510f_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/a510f_wifi.c
-@@ -0,0 +1,431 @@
+@@ -0,0 +1,467 @@
 +/*
 + * A510F Wi-Fi, step 1: Broadcom BCM43454 on SDIO.
 + *
@@ -240,7 +240,7 @@ new file mode 100644
 +		return EBUSY;
 +	}
 +	uint32_t got = 0, s = 0;
-+	uint64_t end = after_ms(200);
++	uint64_t end = after_ms(1000);
 +	volatile uint8_t *fifo = (volatile uint8_t *)(w.mmc + w.data_off);
 +	for (;;) {
 +		s = rd(w.mmc, W_RINTSTS);
@@ -259,14 +259,16 @@ new file mode 100644
 +			wr(w.mmc, W_RINTSTS, I_RXDR);
 +		}
 +		if (s & (I_CMD_ERR | I_DATA_ERR)) {
-+			printf("A510F WIFI: CMD53 fn %u addr 0x%x x%u: rintsts 0x%x, %u bytes\n", fn, addr, n, s, got);
++			printf("A510F WIFI: CMD53 fn %u addr 0x%x x%u: rintsts 0x%x, %u bytes, r5 0x%x status 0x%x\n", fn, addr, n, s, got,
++			    rd(w.mmc, W_RESP0), rd(w.mmc, W_STATUS));
 +			return EIO;
 +		}
 +		if ((s & I_DATA_OVER) && got >= n) {
 +			return 0;
 +		}
 +		if (mach_absolute_time() > end) {
-+			printf("A510F WIFI: CMD53 fn %u addr 0x%x x%u timed out: rintsts 0x%x, %u bytes\n", fn, addr, n, s, got);
++			printf("A510F WIFI: CMD53 fn %u addr 0x%x x%u timed out: rintsts 0x%x, %u bytes, r5 0x%x status 0x%x\n", fn, addr, n, s,
++			    got, rd(w.mmc, W_RESP0), rd(w.mmc, W_STATUS));
 +			return ETIMEDOUT;
 +		}
 +	}
@@ -379,14 +381,26 @@ new file mode 100644
 +	    ecc, cccr[0], cccr[1], cccr[2], cccr[3], cccr[4], cccr[5], cccr[6], cccr[7], cccr[8], cccr[9], cccr[10], cccr[11],
 +	    cccr[12], cccr[13], cccr[14], cccr[15], cccr[16], cccr[17], cccr[18], cccr[19]);
 +
-+	/* 7. 4-bit bus */
-+	uint8_t bic = 0;
-+	if (cmd52(0, 0x07, false, 0, &bic) == 0 && cmd52(0, 0x07, true, (uint8_t)((bic & ~3u) | 2u), NULL) == 0) {
-+		wr(w.mmc, W_CTYPE, 1);
++	/* 7. CIS (function 0): manufacturer / card id tuple (0x20), with CMD52 only */
++	{
++		uint32_t cis = (uint32_t)cccr[9] | ((uint32_t)cccr[10] << 8) | ((uint32_t)cccr[11] << 16);
++		uint32_t a = cis;
++		for (int t = 0; t < 32 && a < cis + 512; t++) {
++			uint8_t code = 0, link = 0;
++			if (cmd52(0, a, false, 0, &code) != 0 || code == 0xff) {
++				break;
++			}
++			(void)cmd52(0, a + 1, false, 0, &link);
++			if (code == 0x20 && link >= 4) {
++				uint8_t m[4] = {0, 0, 0, 0};
++				for (unsigned b = 0; b < 4; b++) {
++					(void)cmd52(0, a + 2 + b, false, 0, &m[b]);
++				}
++				printf("A510F WIFI: CIS at 0x%x: manufacturer 0x%02x%02x, card 0x%02x%02x\n", cis, m[1], m[0], m[3], m[2]);
++			}
++			a += 2u + link;
++		}
 +	}
-+	uint8_t chk = 0;
-+	int ebw = cmd52(0, 0x07, false, 0, &chk);
-+	printf("A510F WIFI: bus interface 0x%x -> 0x%x (%d), 4-bit\n", bic, chk, ebw);
 +
 +	/* 8. function 1 on, block size 64 */
 +	(void)cmd52(0, 0x02, true, 0x02, NULL);
@@ -424,11 +438,33 @@ new file mode 100644
 +	(void)cmd52(1, 0x1000a, true, 0x00, NULL);
 +	(void)cmd52(1, 0x1000b, true, 0x00, NULL);
 +	(void)cmd52(1, 0x1000c, true, 0x18, NULL);
++	/* 10a. the chip id byte by byte (CMD52 into the window, no 4-byte flag) */
++	uint8_t cb[4] = {0, 0, 0, 0};
++	int e52 = 0;
++	for (unsigned b = 0; b < 4; b++) {
++		e52 |= cmd52(1, b, false, 0, &cb[b]);
++	}
++	uint32_t v = (uint32_t)cb[0] | ((uint32_t)cb[1] << 8) | ((uint32_t)cb[2] << 16) | ((uint32_t)cb[3] << 24);
++	printf("A510F WIFI: chipid by CMD52 (%d) 0x%08x: chip 0x%x (%u) rev %u, package %u, %u cores\n",
++	    e52, v, v & 0xffffu, v & 0xffffu, (v >> 16) & 0xfu, (v >> 20) & 0xfu, (v >> 24) & 0xfu);
++	/* 10b. the same with CMD53 (4 bytes, 4-byte access flag), 1-bit bus */
 +	uint8_t id[4] = {0, 0, 0, 0};
 +	int eid = cmd53_read(1, 0x8000, id, 4);
-+	uint32_t v = (uint32_t)id[0] | ((uint32_t)id[1] << 8) | ((uint32_t)id[2] << 16) | ((uint32_t)id[3] << 24);
-+	printf("A510F WIFI: chipid (%d) 0x%08x: chip 0x%x (%u) rev %u, package %u, %u cores\n",
-+	    eid, v, v & 0xffffu, v & 0xffffu, (v >> 16) & 0xfu, (v >> 20) & 0xfu, (v >> 24) & 0xfu);
++	v = (uint32_t)id[0] | ((uint32_t)id[1] << 8) | ((uint32_t)id[2] << 16) | ((uint32_t)id[3] << 24);
++	printf("A510F WIFI: chipid by CMD53, 1-bit (%d) 0x%08x\n", eid, v);
++
++	/* 11. 4-bit bus, then CMD53 again */
++	uint8_t bic = 0;
++	if (cmd52(0, 0x07, false, 0, &bic) == 0 && cmd52(0, 0x07, true, (uint8_t)((bic & ~3u) | 2u), NULL) == 0) {
++		wr(w.mmc, W_CTYPE, 1);
++	}
++	uint8_t chk = 0;
++	int ebw = cmd52(0, 0x07, false, 0, &chk);
++	printf("A510F WIFI: bus interface 0x%x -> 0x%x (%d), 4-bit\n", bic, chk, ebw);
++	id[0] = id[1] = id[2] = id[3] = 0;
++	eid = cmd53_read(1, 0x8000, id, 4);
++	v = (uint32_t)id[0] | ((uint32_t)id[1] << 8) | ((uint32_t)id[2] << 16) | ((uint32_t)id[3] << 24);
++	printf("A510F WIFI: chipid by CMD53, 4-bit (%d) 0x%08x\n", eid, v);
 +	printf("A510F WIFI: step 1 done\n");
 +}
 +
