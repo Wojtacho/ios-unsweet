@@ -36,7 +36,14 @@ kt = tl.index('touch_thread(__unused void *arg, __unused wait_result_t w)')
 assert tl[kt - 1] == 'static void', tl[kt - 1]
 kl = tl.index('\tunsigned lows = 0;') + 2      # keys_poll() in touch_thread's loop (another loop calls it too)
 assert tl[kl - 1] == '\tfor (;;) {' and tl[kl - 2] == '\tunsigned lows = 0;', tl[kl - 2:kl]
+kp = tl.index('keys_poll(void)')
+kn = kp + tl[kp:].index('\t\t\tsweet_input_note();') + 1           # after the key event in keys_poll()
+assert tl[kn] == '\t\t}', tl[kn]
 inserts = [
+    (kn, ['\t\t\tif (now && a510f_keys[i].key == 3) {',
+          '\t\t\t\textern void a510f_vibrate(uint32_t ms);',
+          '\t\t\t\ta510f_vibrate(80);              /* Home down: a click, like the iPhone 8\'s Home button */',
+          '\t\t\t}']),
     (kt - 1, vib),                                                      # the motor code before touch_thread()
     (kl + 1, ['\t\tvib_poll();']),
     (k + 2, ['\t{', '\t\textern void a510f_wifi_start(void);   /* bsd/dev/a510f_wifi.c */', '\t\ta510f_wifi_start();', '\t}']),

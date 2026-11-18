@@ -12,7 +12,18 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 --- a/bsd/dev/a510f_touch.c
 +++ b/bsd/dev/a510f_touch.c
-@@ -996,6 +996,66 @@
+@@ -656,6 +656,10 @@
+ 			printf("A510F KEYS: %s %s\n", a510f_keys[i].name, now ? "down" : "up");
+ 			sweet_hid_key(a510f_keys[i].key, now);
+ 			sweet_input_note();
++			if (now && a510f_keys[i].key == 3) {
++				extern void a510f_vibrate(uint32_t ms);
++				a510f_vibrate(80);              /* Home down: a click, like the iPhone 8's Home button */
++			}
+ 		}
+ 		key_pending[i] = now;
+ 	}
+@@ -996,6 +1000,67 @@
  	}
  }
  
@@ -21,7 +32,8 @@ diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 + * (register 0x4F, "VDD_MOTOR_3P3", board revisions 3-7). a510f_vibrate(ms)
 + * asks for a buzz (at most 2 s); the touch thread, which owns the PMIC bus,
 + * switches the LDO on (0xFC: [7:6]=11 on, 0x3C = 3.3 V, as LDO33) and off
-+ * again. A 150 ms buzz when touch polling starts tests the motor at boot.
++ * again. A 400 ms buzz when touch polling starts tests the motor at boot; Home
++ * down gives an 80 ms click.
 + * Boot-arg a510fvib=0: off.
 + */
 +#define PMIC_REG_L34    0x4F
@@ -52,7 +64,7 @@ diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 +		PE_parse_boot_argn("a510fvib", &v, sizeof(v));
 +		enabled = v != 0;
 +		if (enabled) {
-+			a510f_vibrate(150);     /* motor test: a short buzz as touch polling starts */
++			a510f_vibrate(400);     /* motor test: a buzz as touch polling starts */
 +		}
 +	}
 +	if (!enabled) {
@@ -79,7 +91,7 @@ diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
  static void
  touch_thread(__unused void *arg, __unused wait_result_t w)
  {
-@@ -1093,6 +1153,7 @@
+@@ -1093,6 +1158,7 @@
  	unsigned lows = 0;
  	for (;;) {
  		keys_poll();
@@ -87,7 +99,7 @@ diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
  		if (attn_low()) {
  			zt_poll_once();
  			if (++lows == 1 || lows % 500 == 0) {
-@@ -1334,6 +1395,10 @@
+@@ -1334,6 +1400,10 @@
  		extern void a510f_bg_start(void);     /* osfmk/arm64/a510f_prof.c */
  		a510f_bg_start();
  	}
