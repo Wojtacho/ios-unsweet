@@ -71,7 +71,7 @@ diff --git a/bsd/dev/a510f_wifi.c b/bsd/dev/a510f_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/a510f_wifi.c
-@@ -0,0 +1,704 @@
+@@ -0,0 +1,973 @@
 +/*
 + * A510F Wi-Fi, step 1: Broadcom BCM43454 on SDIO.
 + *
@@ -430,6 +430,8 @@ new file mode 100644
 +
 +static struct {
 +	uint32_t cr4_base, cr4_wrap, sdio_base, sdio_wrap, ram_size;
++	uint32_t d11_wrap;                      /* 802.11 core (0x812) wrapper: PHY held in reset while the ARM is halted */
++	int fw_ok;                              /* blob sum matched */
 +	uint8_t *blob;
 +	uint32_t fw_len, nv_len;
 +	char ssid[33];
@@ -466,6 +468,9 @@ new file mode 100644
 +				if (core == CORE_SDIO && w2.sdio_base == 0) {
 +					w2.sdio_base = base;
 +					w2.sdio_wrap = wrap;
++				}
++				if (core == 0x812u && w2.d11_wrap == 0) {
++					w2.d11_wrap = wrap;
 +				}
 +				ncores++;
 +			}
@@ -532,6 +537,7 @@ new file mode 100644
 +		}
 +		printf("A510F WIFI: firmware %u bytes, NVRAM %u bytes, sum 0x%x (%s)\n", w2.fw_len, w2.nv_len, sum,
 +		    sum == want ? "OK" : "BAD");
++		w2.fw_ok = sum == want && w2.fw_len > 4;
 +	} else {
 +		printf("A510F WIFI: no firmware blob (read %d)\n", e);
 +	}
@@ -551,6 +557,268 @@ new file mode 100644
 +		kfree_data(sec, 512);
 +	}
 +	printf("A510F WIFI: step 2a done\n");
++}
++
++/*
++ * Step 2b: firmware download and start (brcmfmac chip.c / sdio.c for an ARM
++ * CR4 chip): halt the CR4 (wrapper IOCTL 0x408 CPUHALT 0x20, RESET_CTL 0x800),
++ * hold the 802.11 PHY in reset, write the firmware to RAM at 0x198000 and the
++ * NVRAM (key=value strings, NUL-separated, 4-byte padded, then the length
++ * token (~words << 16 | words)) to the end of RAM, the reset vector (the
++ * firmware's first word) to address 0, release the CR4, request the HT clock,
++ * enable function 2 and read what the firmware says (mailbox, sdpcm_shared).
++ */
++#define WRAP_IOCTL      0x408u
++#define WRAP_RESETCTL   0x800u
++#define IOCTL_CLK       0x1u
++#define IOCTL_FGC       0x2u
++#define CR4_CPUHALT     0x20u
++#define RAM_BASE        0x198000u
++
++extern void delay(int usec);
++
++static void
++core_disable(uint32_t wrap, uint32_t pre, uint32_t reset)
++{
++	uint32_t v = 0;
++	(void)bp_read32(wrap + WRAP_RESETCTL, &v);
++	if (!(v & 1u)) {
++		(void)bp_write32(wrap + WRAP_IOCTL, pre | IOCTL_FGC | IOCTL_CLK);
++		(void)bp_read32(wrap + WRAP_IOCTL, &v);
++		(void)bp_write32(wrap + WRAP_RESETCTL, 1);
++		delay(20);
++		for (int i = 0; i < 30; i++) {
++			(void)bp_read32(wrap + WRAP_RESETCTL, &v);
++			if (v == 1u) {
++				break;
++			}
++			delay(10);
++		}
++	}
++	(void)bp_write32(wrap + WRAP_IOCTL, reset | IOCTL_FGC | IOCTL_CLK);
++	(void)bp_read32(wrap + WRAP_IOCTL, &v);
++}
++
++static void
++core_reset(uint32_t wrap, uint32_t pre, uint32_t reset, uint32_t post)
++{
++	uint32_t v = 0;
++	core_disable(wrap, pre, reset);
++	for (int i = 0; i < 50; i++) {
++		(void)bp_read32(wrap + WRAP_RESETCTL, &v);
++		if (!(v & 1u)) {
++			break;
++		}
++		(void)bp_write32(wrap + WRAP_RESETCTL, 0);
++		delay(50);
++	}
++	(void)bp_write32(wrap + WRAP_IOCTL, post | IOCTL_CLK);
++	(void)bp_read32(wrap + WRAP_IOCTL, &v);
++}
++
++/* chip memory: CMD53 writes of up to 64 bytes, never across a 32 KiB window */
++static int
++bp_write_mem(uint32_t addr, const uint8_t *buf, uint32_t len)
++{
++	uint32_t off = 0;
++	while (off < len) {
++		uint32_t a = addr + off, c = len - off;
++		if (c > 64u) {
++			c = 64u;
++		}
++		if (c > 0x8000u - (a & 0x7fffu)) {
++			c = 0x8000u - (a & 0x7fffu);
++		}
++		int e = bp_window(a);
++		if (e == 0) {
++			e = cmd53_write(1, (a & 0x7fffu) | 0x8000u, buf + off, c);
++		}
++		if (e != 0) {
++			printf("A510F WIFI: memory write at 0x%x failed (%d) after %u bytes\n", a, e, off);
++			return e;
++		}
++		off += c;
++	}
++	return 0;
++}
++
++static int
++bp_read_mem(uint32_t addr, uint8_t *buf, uint32_t len)
++{
++	uint32_t off = 0;
++	while (off < len) {
++		uint32_t a = addr + off, c = len - off;
++		if (c > 64u) {
++			c = 64u;
++		}
++		if (c > 0x8000u - (a & 0x7fffu)) {
++			c = 0x8000u - (a & 0x7fffu);
++		}
++		int e = bp_window(a);
++		if (e == 0) {
++			e = cmd53_read(1, (a & 0x7fffu) | 0x8000u, buf + off, c);
++		}
++		if (e != 0) {
++			return e;
++		}
++		off += c;
++	}
++	return 0;
++}
++
++/* the NVRAM text as the firmware wants it; macaddr replaced (a locally administered address) */
++static uint8_t *
++nvram_build(const uint8_t *txt, uint32_t n, uint32_t *out_len)
++{
++	uint32_t cap = n + 64u;
++	uint8_t *o = kalloc_data(cap, Z_WAITOK | Z_ZERO);
++	if (o == NULL) {
++		return NULL;
++	}
++	uint32_t p = 0, i = 0;
++	while (i < n) {
++		uint32_t s = i, e = i;
++		while (e < n && txt[e] != '\n') {
++			e++;
++		}
++		i = e + 1;
++		while (s < e && (txt[s] == ' ' || txt[s] == '\t')) {
++			s++;
++		}
++		while (e > s && (txt[e - 1] == '\r' || txt[e - 1] == ' ' || txt[e - 1] == '\t')) {
++			e--;
++		}
++		if (e == s || txt[s] == '#') {
++			continue;
++		}
++		bool eq = false;
++		for (uint32_t k = s; k < e; k++) {
++			eq |= txt[k] == '=';
++		}
++		if (!eq) {
++			continue;
++		}
++		const char *mac = "macaddr=02:a5:10:f0:0b:3c";
++		if (e - s > 8 && memcmp(txt + s, "macaddr=", 8) == 0) {
++			size_t ml = strlen(mac);
++			if (p + ml + 1 < cap) {
++				memcpy(o + p, mac, ml);
++				p += (uint32_t)ml + 1u;
++			}
++			continue;
++		}
++		if (p + (e - s) + 1 < cap) {
++			memcpy(o + p, txt + s, e - s);
++			p += (e - s) + 1u;
++		}
++	}
++	p += 1;                                 /* final NUL */
++	p = (p + 3u) & ~3u;
++	uint32_t words = p / 4u, token = (~words << 16) | (words & 0xffffu);
++	if (p + 4u > cap) {
++		kfree_data(o, cap);
++		return NULL;
++	}
++	memcpy(o + p, &token, 4);
++	*out_len = p + 4u;
++	return o;
++}
++
++static void
++wifi_step2b(void)
++{
++	if (w2.cr4_wrap == 0 || w2.sdio_base == 0 || w2.ram_size == 0 || !w2.fw_ok) {
++		printf("A510F WIFI: step 2b skipped (cr4 wrap 0x%x, sdio 0x%x, ram %u, firmware %d)\n", w2.cr4_wrap, w2.sdio_base,
++		    w2.ram_size, w2.fw_ok);
++		return;
++	}
++	uint64_t t0 = mach_absolute_time();
++	/* halt the ARM (out of reset, clock on, CPUHALT), PHY in reset */
++	uint32_t ioctl = 0;
++	(void)bp_read32(w2.cr4_wrap + WRAP_IOCTL, &ioctl);
++	core_reset(w2.cr4_wrap, ioctl & CR4_CPUHALT, CR4_CPUHALT, CR4_CPUHALT);
++	if (w2.d11_wrap != 0) {
++		core_disable(w2.d11_wrap, 0x8u | 0x4u, 0x4u);
++	}
++	(void)bp_read32(w2.cr4_wrap + WRAP_IOCTL, &ioctl);
++	printf("A510F WIFI: CR4 halted: ioctl 0x%x\n", ioctl);
++
++	/* firmware */
++	const uint8_t *fw = w2.blob + 512;
++	int e = bp_write_mem(RAM_BASE, fw, w2.fw_len);
++	uint8_t chk[64];
++	int bad = 0;
++	if (e == 0) {
++		uint32_t at[3] = {0, w2.fw_len / 2u & ~63u, (w2.fw_len - 64u) & ~3u};
++		for (int k = 0; k < 3; k++) {
++			if (bp_read_mem(RAM_BASE + at[k], chk, 64) != 0 || memcmp(chk, fw + at[k], 64) != 0) {
++				bad |= 1 << k;
++			}
++		}
++	}
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++	printf("A510F WIFI: firmware %u bytes written (%d) in %llu ms, read-back spots %s (0x%x)\n", w2.fw_len, e,
++	    ns / 1000000ull, bad ? "DIFFER" : "match", bad);
++	if (e != 0 || bad) {
++		return;
++	}
++
++	/* NVRAM at the end of RAM */
++	uint32_t fw_pad = (w2.fw_len + 511u) & ~511u, nvl = 0;
++	uint8_t *nv = nvram_build(w2.blob + 512 + fw_pad, w2.nv_len, &nvl);
++	if (nv == NULL) {
++		printf("A510F WIFI: NVRAM build failed\n");
++		return;
++	}
++	uint32_t nva = RAM_BASE + w2.ram_size - nvl;
++	e = bp_write_mem(nva, nv, nvl);
++	printf("A510F WIFI: NVRAM %u bytes at 0x%x (%d)\n", nvl, nva, e);
++	kfree_data(nv, w2.nv_len + 64u);
++	if (e != 0) {
++		return;
++	}
++
++	/* clear SDIO core interrupts, reset vector to address 0, CPU on */
++	uint32_t rstvec = 0;
++	memcpy(&rstvec, fw, 4);
++	(void)bp_write32(w2.sdio_base + 0x20, 0xffffffffu);
++	e = bp_write32(0, rstvec);
++	core_reset(w2.cr4_wrap, CR4_CPUHALT, 0, 0);
++	(void)bp_read32(w2.cr4_wrap + WRAP_IOCTL, &ioctl);
++	printf("A510F WIFI: reset vector 0x%08x (%d), CR4 released: ioctl 0x%x\n", rstvec, e, ioctl);
++
++	/* HT clock (HT_AVAIL_REQ 0x10, wait HT_AVAIL 0x80) */
++	(void)cmd52(1, 0x1000e, true, 0x10, NULL);
++	uint8_t csr = 0;
++	int ms = 0;
++	for (; ms < 1000; ms += 5) {
++		(void)cmd52(1, 0x1000e, false, 0, &csr);
++		if ((csr & 0xc0u) == 0xc0u) {
++			break;
++		}
++		IOSleep(5);
++	}
++	printf("A510F WIFI: HT clock csr 0x%x after %d ms\n", csr, ms);
++
++	/* function 2 */
++	uint8_t ioen = 0, iordy = 0;
++	(void)cmd52(0, 0x02, false, 0, &ioen);
++	(void)cmd52(0, 0x02, true, (uint8_t)(ioen | 0x04u), NULL);
++	for (ms = 0; ms < 3000; ms += 10) {
++		(void)cmd52(0, 0x03, false, 0, &iordy);
++		if (iordy & 0x04u) {
++			break;
++		}
++		IOSleep(10);
++	}
++	uint32_t mb = 0, shared = 0, inst = 0;
++	(void)bp_read32(w2.sdio_base + 0x4c, &mb);
++	(void)bp_read32(w2.sdio_base + 0x20, &inst);
++	(void)bp_read32(RAM_BASE + w2.ram_size - 4u, &shared);
++	printf("A510F WIFI: function 2 ready 0x%x after %d ms; mailbox 0x%x (fw ready %d, version %u), intstatus 0x%x, "
++	    "sdpcm_shared 0x%x\n", iordy, ms, mb, (mb & 0xau) != 0, (mb >> 16) & 0xffu, inst, shared);
++	printf("A510F WIFI: step 2b done\n");
 +}
 +
 +static void
@@ -747,6 +1015,7 @@ new file mode 100644
 +	printf("A510F WIFI: chipid by CMD53, 4-bit (%d) 0x%08x\n", eid, v);
 +	printf("A510F WIFI: step 1 done\n");
 +	wifi_step2a();
++	wifi_step2b();
 +}
 +
 +static void
