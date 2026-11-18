@@ -31,30 +31,6 @@ index 68612db..281011b 100644
 +		}
 +	}
 +	size_t blen = strlen(base);
-+	/*
-+	 * Round 92 (RAM/CPU): Spotlight index extensions (Maps, Mail, Books, TV,
-+	 * Tips, Notes, Podcasts, ...) abort (SIGABRT) on every launch here and are
-+	 * relaunched again and again. Refused unless a510fspotlight=1. The
-+	 * Spotlight search UI itself stays.
-+	 */
-+	{
-+		static int allow = -1;
-+		if (allow < 0) {
-+			allow = 0;
-+			PE_parse_boot_argn("a510fspotlight", &allow, sizeof(allow));
-+		}
-+		bool spot = false, ext = false;
-+		for (const char *c = base; *c; c++) {
-+			spot = spot || strncmp(c, "Spotlight", 9) == 0;
-+			ext = ext || strncmp(c, "Extension", 9) == 0 || strncmp(c, "Indexer", 7) == 0 || strncmp(c, "Importer", 8) == 0;
-+		}
-+		if (!allow && spot && ext) {
-+			if (logged++ < 20) {
-+				printf("A510F NOEXEC: %s refused (Spotlight index extension)\n", base);
-+			}
-+			return EPERM;
-+		}
-+	}
 +	const char *entry = spec;
 +	for (;;) {
 +		size_t n = 0;
@@ -125,6 +101,30 @@ index 68612db..281011b 100644
 +		}
 +	}
 +	size_t blen = strlen(base);
++	/*
++	 * Round 92 (RAM/CPU): Spotlight index extensions (Maps, Mail, Books, TV,
++	 * Tips, Notes, Podcasts, ...) abort (SIGABRT) on every launch here and are
++	 * relaunched again and again. Refused unless a510fspotlight=1. The
++	 * Spotlight search UI itself stays.
++	 */
++	{
++		static int allow = -1;
++		if (allow < 0) {
++			allow = 0;
++			PE_parse_boot_argn("a510fspotlight", &allow, sizeof(allow));
++		}
++		bool spot = false, ext = false;
++		for (const char *c = base; *c; c++) {
++			spot = spot || strncmp(c, "Spotlight", 9) == 0;
++			ext = ext || strncmp(c, "Extension", 9) == 0 || strncmp(c, "Indexer", 7) == 0 || strncmp(c, "Importer", 8) == 0;
++		}
++		if (!allow && spot && ext) {
++			if (logged++ < 20) {
++				printf("A510F NOEXEC: %s refused (Spotlight index extension)\n", base);
++			}
++			return EPERM;
++		}
++	}
 +	for (const char *e = list; *e;) {
 +		size_t n = 0;
 +		while (e[n] && e[n] != ',') {
