@@ -1214,7 +1214,7 @@ index 0000000..ad48a94
 +		return;
 +	}
 +	bs.drawn_logo = true;
-+	uint32_t x0 = (bs.w - bs.lw) / 2, y0 = bs.h / 2 - 40 - bs.lh / 2;
++	uint32_t x0 = (bs.w - bs.lw) / 2, y0 = (bs.h - bs.lh) / 2;  /* centred, as iOS draws its logo (round 93) */
 +	for (uint32_t y = 0; y < bs.lh && y0 + y < bs.h; y++) {
 +		volatile uint32_t *row = bs.fb + (uint64_t)(y0 + y) * bs.stride + x0;
 +		const uint8_t *a = bs.logo + (uint64_t)y * bs.lw;

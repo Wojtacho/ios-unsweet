@@ -1,0 +1,12 @@
+diff --git a/bsd/sweet_hfs/core/hfs_vnops.c b/bsd/sweet_hfs/core/hfs_vnops.c
+--- a/bsd/sweet_hfs/core/hfs_vnops.c
++++ b/bsd/sweet_hfs/core/hfs_vnops.c
+@@ -599,7 +599,7 @@
+ 	 * That field is initially set to 20MB.
+ 	 */
+ 	fp = VTOF(vp);
+-	if (fp->ff_blocks &&
++	if (0 && fp->ff_blocks &&	/* A510F: no defragment on open (round 90: hfs_clonefile cluster_write ERANGE mid-copy) */
+ 	    fp->ff_extents[7].blockCount != 0 &&
+ 	    fp->ff_size <= hfsmp->hfs_defrag_max) { 
+ 		

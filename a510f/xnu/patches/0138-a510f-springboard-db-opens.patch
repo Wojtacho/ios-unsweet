@@ -7,7 +7,7 @@ diff --git a/bsd/vfs/vfs_vnops.c b/bsd/vfs/vfs_vnops.c
  
 +#if defined(__arm64__)
 +	/* A510F: SpringBoard exit(1)s on SQLITE_CORRUPT (ProactiveSupport, rounds 86-90): which databases it opens */
-+	if (vp != NULLVP && !strcmp(current_proc()->p_comm, "SpringBoard")) {
++	if (vp != NULLVP && (!strcmp(current_proc()->p_comm, "SpringBoard") || !strcmp(current_proc()->p_comm, "duetexpertd"))) {
 +		static int told;
 +		char pb[512];
 +		int pl = sizeof(pb);
@@ -19,7 +19,7 @@ diff --git a/bsd/vfs/vfs_vnops.c b/bsd/vfs/vfs_vnops.c
 +		}
 +		if (hit) {
 +			told++;
-+			printf("A510F OPEN: SpringBoard %s fmode 0x%x\n", pb, fmode);
++			printf("A510F OPEN: %s %s fmode 0x%x\n", current_proc()->p_comm, pb, fmode);
 +		}
 +	}
 +#endif
