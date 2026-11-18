@@ -2092,9 +2092,9 @@ wif_service(void)
 			nanoseconds_to_absolutetime(30ull * NSEC_PER_SEC, &abs);
 			next_log = now + abs;
 			static uint64_t last_rx, last_tx;
-			printf("A510F WIFI: en0: %u frames in, %u out, %u dropped; %u superframes (%u subframes); last 30 s: %llu KB in (%llu KB/s), %llu KB out\n",
+			printf("A510F WIFI: en0: %u frames in, %u out, %u dropped; %u superframes (%u subframes); last 30 s: %llu KB in (%llu KB/s), %llu KB out; data CRC errors %u\n",
 			    wif_rx, wif_tx, wif_drop, glom_supers, glom_subs, (wif_rx_bytes - last_rx) >> 10,
-			    ((wif_rx_bytes - last_rx) >> 10) / 30, (wif_tx_bytes - last_tx) >> 10);
+			    ((wif_rx_bytes - last_rx) >> 10) / 30, (wif_tx_bytes - last_tx) >> 10, w_dcrc);
 			last_rx = wif_rx_bytes;
 			last_tx = wif_tx_bytes;
 		}
@@ -2316,35 +2316,65 @@ wifi_step1(void)
 	v = (uint32_t)id[0] | ((uint32_t)id[1] << 8) | ((uint32_t)id[2] << 16) | ((uint32_t)id[3] << 24);
 	printf("A510F WIFI: chipid by CMD53, 4-bit (%d) 0x%08x\n", eid, v);
 	/*
-	 * Round 85: the card clock was ciu/510 (~200 kHz, ~45 KB/s): too slow once
-	 * iOS uses en0 (round 84: 1973 frames dropped). Try divider 4 (ciu/8,
-	 * ~12.5 MHz), then 16; keep the first that reads the chip id 8 times right.
+	 * Card clock (ciu = 100 MHz after the CLKSEL /4). Round 85: divider 4
+	 * (ciu/8 = 12.5 MHz) with our guessed timing (drive 0, sample 2).
+	 * Round 92: Samsung's device tree runs this slot high speed with
+	 * samsung,dw-mshc-sdr-timing <3 0 2 1> (ciu /4, drive phase 2, sample
+	 * phase 1). Try 50 MHz (divider 1, CCCR EHS), then 25 MHz, then 12.5
+	 * MHz, Samsung's timing first; keep the first pair that reads the chip
+	 * id 8 times right and a 32-byte block twice the same without a data
+	 * CRC error.
 	 */
 	{
-		static const uint32_t divs[] = {4u, 16u};
+		uint8_t shs = 0;
+		int eh = cmd52(0, 0x13, false, 0, &shs);
+		bool hs = eh == 0 && (shs & 1u) != 0;
+		if (hs) {
+			(void)cmd52(0, 0x13, true, (uint8_t)(shs | 2u), NULL);      /* EHS: high-speed timing on the card */
+		}
+		printf("A510F WIFI: CCCR bus speed 0x%x (%d): high speed %s\n", shs, eh, hs ? "supported, enabled" : "not supported");
+		static const struct {
+			uint32_t div, clksel;
+		} tries[] = {
+			{1u, (3u << 24) | (2u << 16) | 1u}, {2u, (3u << 24) | (2u << 16) | 1u}, {2u, (3u << 24) | 2u},
+			{4u, (3u << 24) | (2u << 16) | 1u}, {4u, (3u << 24) | 2u}, {16u, (3u << 24) | 2u},
+		};
 		uint32_t good = 255u;
-		for (unsigned d = 0; d < 2 && good == 255u; d++) {
+		for (unsigned d = 0; d < sizeof(tries) / sizeof(tries[0]) && good == 255u; d++) {
+			if (tries[d].div == 1u && !hs) {
+				continue;
+			}
 			wr(w.mmc, W_CLKENA, 0);
 			(void)clk_update();
-			wr(w.mmc, W_CLKDIV, divs[d]);
+			wr(w.mmc, W_CLKSEL, tries[d].clksel);
+			wr(w.mmc, W_CLKDIV, tries[d].div);
 			(void)clk_update();
 			wr(w.mmc, W_CLKENA, 1);
 			(void)clk_update();
-			int okc = 0;
+			int okc = 0, okb = 0;
 			for (int k = 0; k < 8; k++) {
 				uint8_t b[4] = {0, 0, 0, 0};
 				if (cmd53_read(1, 0x8000, b, 4) == 0 && memcmp(b, &v, 4) == 0) {
 					okc++;
 				}
 			}
-			printf("A510F WIFI: card clock divider %u: %d of 8 chip id reads right\n", divs[d], okc);
-			if (okc == 8) {
-				good = divs[d];
+			static uint8_t blk[2][32];         /* chipcommon 0x00-0x1f: id, caps, control, bist, otp: steady */
+			for (int k = 0; k < 2; k++) {
+				if (cmd53_read(1, 0x8000, blk[k], 32) == 0) {
+					okb++;
+				}
+			}
+			bool same = okb == 2 && memcmp(blk[0], blk[1], 32) == 0;
+			printf("A510F WIFI: card clock divider %u (%u MHz) clksel 0x%x: %d of 8 chip id reads right, 32-byte reads %s\n",
+			    tries[d].div, 100u / (2u * tries[d].div), tries[d].clksel, okc, same ? "agree" : "fail");
+			if (okc == 8 && same) {
+				good = tries[d].div;
 			}
 		}
 		if (good == 255u) {
 			wr(w.mmc, W_CLKENA, 0);
 			(void)clk_update();
+			wr(w.mmc, W_CLKSEL, (3u << 24) | 2u);
 			wr(w.mmc, W_CLKDIV, 255);
 			(void)clk_update();
 			wr(w.mmc, W_CLKENA, 1);
