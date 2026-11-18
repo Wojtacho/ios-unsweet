@@ -2011,7 +2011,7 @@ index 6f8dba3..6228adb 100644
  	if (error) {
  		return error;
  	}
-@@ -986,9 +1337,982 @@ sweet_mmc_init(void)
+@@ -986,9 +1337,988 @@ sweet_mmc_init(void)
  	printf("SWEET MMC: \"%s\": first LBA %llu, %llu MiB, %s\n",
  	    sm.name, sm.first_lba, sm.nsect * MMC_SECTOR >> 20,
  	    sm.writable ? "read-write" : "read-only");
@@ -2710,6 +2710,12 @@ index 6f8dba3..6228adb 100644
 +auto_recovery(void)
 +{
 +	printf("SWEET AUTO: rebooting into recovery\n");
++	{
++		/* round 90: dirty buffers and the HFS journal to disk first (SpringBoard databases came back corrupt) */
++		struct sync_args;
++		extern int sync(struct proc *p, struct sync_args *uap, int32_t *retval);
++		(void)sync(NULL, NULL, NULL);
++	}
 +	IOSleep(3000);                  /* the log thread flushes every 2 s */
 +	au.stop = true;
 +	vm_offset_t pmu = ml_io_map(A510F_PMU_PA, 0x1000);

@@ -113,7 +113,7 @@ diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
 diff --git a/bsd/dev/sweet_mmc.c b/bsd/dev/sweet_mmc.c
 --- a/bsd/dev/sweet_mmc.c
 +++ b/bsd/dev/sweet_mmc.c
-@@ -2236,6 +2236,40 @@
+@@ -2242,6 +2242,40 @@
  	printf("SWEET MMC: no boot logo (error %d)\n", error);
  }
  
