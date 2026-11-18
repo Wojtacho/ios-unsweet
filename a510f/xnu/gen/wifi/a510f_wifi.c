@@ -468,10 +468,31 @@ wifi_step2a(void)
 		    n, n + 3, io[0], io[1], io[2], io[3], rc[0], rc[1], rc[2], rc[3], c0[0], c0[1], c0[2], c0[3], c4[0], c4[1], c4[2], c4[3]);
 	}
 	if (w2.cr4_base == 0) {
-		uint32_t cap = 0;
+		/* round 73: the window registers as the card has them, the EROM pointer byte by byte */
+		uint8_t sl = 0, sm_ = 0, sh_ = 0, ep[4] = {0, 0, 0, 0};
+		(void)bp_window(0x1810a000u);
+		(void)cmd52(1, 0x1000a, false, 0, &sl);
+		(void)cmd52(1, 0x1000b, false, 0, &sm_);
+		(void)cmd52(1, 0x1000c, false, 0, &sh_);
+		(void)bp_window(CC_BASE);
+		for (unsigned b = 0; b < 4; b++) {
+			(void)cmd52(1, 0xfcu + b, false, 0, &ep[b]);
+		}
+		printf("A510F WIFI: window for 0x1810a000 reads back %02x %02x %02x; EROM pointer by CMD52 %02x%02x%02x%02x\n",
+		    sh_, sm_, sl, ep[3], ep[2], ep[1], ep[0]);
+		/*
+		 * The CR4's registers read 0 while its clock is off: halt it the way
+		 * brcmfmac's set_passive does (reset with CPUHALT, clock on) at the
+		 * family's wrapper, then read corecap.
+		 */
+		extern void a510f_wifi_cr4_halt(uint32_t wrap);
+		a510f_wifi_cr4_halt(0x18102000u);
+		uint32_t cap = 0, io = 0, rc = 0;
 		(void)bp_read32(0x18002004u, &cap);
+		(void)bp_read32(0x18102000u + WRAP_IOCTL_EARLY, &io);
+		(void)bp_read32(0x18102000u + WRAP_RESETCTL_EARLY, &rc);
 		uint32_t banks = (cap & 0xfu) + ((cap >> 4) & 0xfu);
-		printf("A510F WIFI: guess CR4 at 0x18002000: corecap 0x%x (%u banks)\n", cap, banks);
+		printf("A510F WIFI: CR4 at 0x18002000 after halt (ioctl 0x%x reset 0x%x): corecap 0x%x (%u banks)\n", io, rc, cap, banks);
 		if (banks >= 1u && banks <= 16u && cap != 0xffffffffu) {
 			w2.cr4_base = 0x18002000u;
 			w2.cr4_wrap = 0x18102000u;
@@ -592,6 +613,17 @@ core_reset(uint32_t wrap, uint32_t pre, uint32_t reset, uint32_t post)
 	}
 	(void)bp_write32(wrap + WRAP_IOCTL, post | IOCTL_CLK);
 	(void)bp_read32(wrap + WRAP_IOCTL, &v);
+}
+
+/* brcmfmac set_passive for the CR4: reset with CPUHALT, clock on (its registers read 0 while the clock is off) */
+void a510f_wifi_cr4_halt(uint32_t wrap);
+
+void
+a510f_wifi_cr4_halt(uint32_t wrap)
+{
+	uint32_t io = 0;
+	(void)bp_read32(wrap + WRAP_IOCTL, &io);
+	core_reset(wrap, io & CR4_CPUHALT, CR4_CPUHALT, CR4_CPUHALT);
 }
 
 /* chip memory: CMD53 writes of up to 64 bytes, never across a 32 KiB window */
