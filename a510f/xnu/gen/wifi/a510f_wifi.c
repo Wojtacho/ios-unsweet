@@ -681,7 +681,28 @@ a510f_wifi_cr4_halt(uint32_t wrap)
 	core_reset(wrap, io & CR4_CPUHALT, CR4_CPUHALT, CR4_CPUHALT);
 }
 
-/* chip memory: CMD53 writes of up to 64 bytes, never across a 32 KiB window */
+/* the card clock divider in use (step 1 picks it); clk_slower() steps it down: 4 -> 8 -> 16 -> 32 -> 255 */
+static uint32_t w_clkdiv = 255u;
+
+static bool
+clk_slower(void)
+{
+	uint32_t next = w_clkdiv < 32u ? w_clkdiv * 2u : 255u;
+	if (w_clkdiv >= 255u) {
+		return false;
+	}
+	wr(w.mmc, W_CLKENA, 0);
+	(void)clk_update();
+	wr(w.mmc, W_CLKDIV, next);
+	(void)clk_update();
+	wr(w.mmc, W_CLKENA, 1);
+	(void)clk_update();
+	printf("A510F WIFI: card clock divider %u -> %u (write errors)\n", w_clkdiv, next);
+	w_clkdiv = next;
+	return true;
+}
+
+/* chip memory: CMD53 writes of up to 512 bytes, never across a 32 KiB window */
 static int
 bp_write_mem(uint32_t addr, const uint8_t *buf, uint32_t len)
 {
@@ -694,9 +715,19 @@ bp_write_mem(uint32_t addr, const uint8_t *buf, uint32_t len)
 		if (c > 0x8000u - (a & 0x7fffu)) {
 			c = 0x8000u - (a & 0x7fffu);
 		}
-		int e = bp_window(a);
-		if (e == 0) {
-			e = cmd53_write(1, (a & 0x7fffu) | 0x8000u, buf + off, c);
+		int e = EIO;
+		/*
+		 * Round 86: at divider 4 the first 512-byte write got a CRC error
+		 * (round 85; reads were fine). Retry, then slow the card clock a step.
+		 */
+		for (int tries = 0; tries < 12 && e != 0; tries++) {
+			e = bp_window(a);
+			if (e == 0) {
+				e = cmd53_write(1, (a & 0x7fffu) | 0x8000u, buf + off, c);
+			}
+			if (e != 0 && (tries % 3) == 2 && !clk_slower()) {
+				break;
+			}
 		}
 		if (e != 0) {
 			printf("A510F WIFI: memory write at 0x%x failed (%d) after %u bytes\n", a, e, off);
@@ -981,6 +1012,9 @@ f2_write(const uint8_t *buf, uint32_t len)
 	for (uint32_t off = 0; e == 0 && off < len; off += 512u) {
 		uint32_t c = len - off < 512u ? len - off : 512u;
 		e = cmd53_write(2, F2_ADDR, buf + off, c);
+		if (e != 0 && clk_slower()) {
+			e = cmd53_write(2, F2_ADDR, buf + off, c);      /* round 86: once more, a step slower */
+		}
 	}
 	return e;
 }
@@ -2204,6 +2238,7 @@ wifi_step1(void)
 			wr(w.mmc, W_CLKENA, 1);
 			(void)clk_update();
 		}
+		w_clkdiv = good;
 		printf("A510F WIFI: card clock divider %u\n", good);
 	}
 	printf("A510F WIFI: step 1 done\n");
