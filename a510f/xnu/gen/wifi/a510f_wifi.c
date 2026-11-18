@@ -41,6 +41,8 @@
 #include <net/route.h>
 #include <net/bpf.h>
 #include <netinet/in.h>
+#include <sys/vnode.h>
+#include <sys/uio.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern void IOSleep(unsigned int milliseconds);
@@ -1818,6 +1820,7 @@ static LCK_GRP_DECLARE(wif_grp, "a510f_wifi");
 static LCK_MTX_DECLARE(wif_lock, &wif_grp);
 static ifnet_t wif;
 static volatile uint32_t wif_rx, wif_tx, wif_drop;
+static uint64_t wif_rx_bytes, wif_tx_bytes;      /* round 91: throughput in the 30 s log line */
 
 static errno_t
 wif_output(ifnet_t ifp, mbuf_t m)
@@ -1863,6 +1866,7 @@ wif_deliver(const uint8_t *f, uint32_t len)
 	st.bytes_in = len;
 	(void)ifnet_input(wif, m, &st);
 	wif_rx++;
+	wif_rx_bytes += len;
 }
 
 static int
@@ -2060,6 +2064,7 @@ wif_service(void)
 		while (txq_tail != txq_head) {
 			unsigned t = txq_tail;
 			(void)data_send(txq[t].b, txq[t].len);
+			wif_tx_bytes += txq[t].len;
 			lck_mtx_lock(&wif_lock);
 			txq_tail = (t + 1u) % TXQ;
 			lck_mtx_unlock(&wif_lock);
@@ -2086,8 +2091,12 @@ wif_service(void)
 			uint64_t abs = 0;
 			nanoseconds_to_absolutetime(30ull * NSEC_PER_SEC, &abs);
 			next_log = now + abs;
-			printf("A510F WIFI: en0: %u frames in, %u out, %u dropped; %u superframes (%u subframes)\n", wif_rx, wif_tx,
-			    wif_drop, glom_supers, glom_subs);
+			static uint64_t last_rx, last_tx;
+			printf("A510F WIFI: en0: %u frames in, %u out, %u dropped; %u superframes (%u subframes); last 30 s: %llu KB in (%llu KB/s), %llu KB out\n",
+			    wif_rx, wif_tx, wif_drop, glom_supers, glom_subs, (wif_rx_bytes - last_rx) >> 10,
+			    ((wif_rx_bytes - last_rx) >> 10) / 30, (wif_tx_bytes - last_tx) >> 10);
+			last_rx = wif_rx_bytes;
+			last_tx = wif_tx_bytes;
 		}
 		if (!busy) {
 			IOSleep(2);
@@ -2357,6 +2366,38 @@ static void
 wifi_thread(__unused void *arg, __unused wait_result_t wr_)
 {
 	IOSleep((unsigned)w.after_s * 1000u);
+	{
+		/*
+		 * Round 91, boot-arg a510fatxreset=1 (one round only, user approved):
+		 * delete the corrupt app-suggestion database. SpringBoard's
+		 * ATXInformationStore hits SQLITE_CORRUPT on it and ProactiveSupport
+		 * exit(1)s SpringBoard (rounds 86-90, a restart loop by round 90).
+		 * iOS creates a new one. Runs after the Wi-Fi delay (SpringBoard
+		 * runs by then; it reopens the path after its next restart).
+		 */
+		int reset = 0;
+		PE_parse_boot_argn("a510fatxreset", &reset, sizeof(reset));
+		if (reset) {
+			extern int unlink1(vfs_context_t, vnode_t, user_addr_t, enum uio_seg, int);
+			static const char *const files[] = {
+				"/private/var/mobile/Library/DuetExpertCenter/_ATXInfoSuggestionStore.db",
+				"/private/var/mobile/Library/DuetExpertCenter/_ATXInfoSuggestionStore.db-wal",
+				"/private/var/mobile/Library/DuetExpertCenter/_ATXInfoSuggestionStore.db-shm",
+			};
+			for (int t = 0; t < 30; t++) {
+				vnode_t vp = NULLVP;
+				if (vnode_lookup("/private/var/mobile/Library", 0, &vp, vfs_context_kernel()) == 0) {
+					vnode_put(vp);
+					break;
+				}
+				IOSleep(1000);  /* the data volume is not there yet */
+			}
+			for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+				int e = unlink1(vfs_context_kernel(), NULLVP, CAST_USER_ADDR_T(files[i]), UIO_SYSSPACE, 0);
+				printf("A510F ATX: delete %s -> %d\n", files[i], e);
+			}
+		}
+	}
 	printf("A510F WIFI: step 1 (SDIO bring-up, chip id) at %d s\n", w.after_s);
 	wifi_step1();
 	thread_terminate(current_thread());

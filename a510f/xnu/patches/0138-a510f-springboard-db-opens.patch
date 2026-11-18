@@ -1,27 +1,28 @@
 diff --git a/bsd/vfs/vfs_vnops.c b/bsd/vfs/vfs_vnops.c
 --- a/bsd/vfs/vfs_vnops.c
 +++ b/bsd/vfs/vfs_vnops.c
-@@ -751,5 +751,23 @@
+@@ -697,6 +697,24 @@
+ 		fmode &= ~O_TRUNC;
  	}
  
- out:
 +#if defined(__arm64__)
-+	/* A510F: SpringBoard exit(1)s on SQLITE_CORRUPT (ProactiveSupport, round 89): which databases it opens */
-+	if (error == 0 && ndp->ni_vp != NULLVP && !strcmp(current_proc()->p_comm, "SpringBoard")) {
++	/* A510F: SpringBoard exit(1)s on SQLITE_CORRUPT (ProactiveSupport, rounds 86-90): which databases it opens */
++	if (vp != NULLVP && !strcmp(current_proc()->p_comm, "SpringBoard")) {
 +		static int told;
 +		char pb[512];
 +		int pl = sizeof(pb);
 +		bool hit = false;
-+		if (told < 60 && vn_getpath(ndp->ni_vp, pb, &pl) == 0) {
++		if (told < 60 && vn_getpath(vp, pb, &pl) == 0) {
 +			for (const char *q = pb; *q != 0 && !hit; q++) {
 +				hit = !strncmp(q, ".db", 3) || !strncmp(q, ".sqlite", 7) || !strncmp(q, "orrupt", 6);
 +			}
 +		}
 +		if (hit) {
 +			told++;
-+			printf("A510F OPEN: SpringBoard %s fmode 0x%x\n", pb, *fmodep);
++			printf("A510F OPEN: SpringBoard %s fmode 0x%x\n", pb, fmode);
 +		}
 +	}
 +#endif
- 	return error;
- }
+ 	*fmodep = fmode;
+ 	return 0;
+ 
