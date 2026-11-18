@@ -577,6 +577,7 @@ rep("""			if (off != fFB->fPowerOff) {
 			}""", """			if (off != fFB->fPowerOff) {
 				fFB->fPowerOff = off;
 				fFB->fFadeStep = 0;
+				a510f_bootscreen_display(off);  /* round 92: the boot screen stops and clears */
 				/*
 				 * A510F: on wake, wait for CoreAnimation's new frame (the
 				 * lock screen) instead of showing the one from before
@@ -1063,7 +1064,8 @@ rep("""	if (!fConsolePaused) {
 		a510f_bootscreen_done();""")
 rep("""extern "C" void sweet_surface_stats(uint64_t *bytes, uint32_t *count);     /* SweetSurface.cpp */""",
     """extern "C" void sweet_surface_stats(uint64_t *bytes, uint32_t *count);     /* SweetSurface.cpp */
-extern "C" void a510f_bootscreen_done(void);                               /* bsd/dev/a510f_touch.c */""")
+extern "C" void a510f_bootscreen_done(void);                               /* bsd/dev/a510f_touch.c */
+extern "C" void a510f_bootscreen_display(int off);                         /* bsd/dev/a510f_touch.c */""")
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
 print('ok bootscreen done')
 

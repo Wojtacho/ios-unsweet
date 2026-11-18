@@ -3,8 +3,8 @@
  * (register 0x4F, "VDD_MOTOR_3P3", board revisions 3-7). a510f_vibrate(ms)
  * asks for a buzz (at most 2 s); the touch thread, which owns the PMIC bus,
  * switches the LDO on (0xFC: [7:6]=11 on, 0x3C = 3.3 V, as LDO33) and off
- * again. A 400 ms buzz when touch polling starts tests the motor at boot; Home
- * down gives an 80 ms click.
+ * again. Home down gives an 80 ms click (round 92: no buzz at boot any more,
+ * user request).
  * Boot-arg a510fvib=0: off.
  */
 #define PMIC_REG_L34    0x4F
@@ -34,9 +34,6 @@ vib_poll(void)
 		int v = 1;
 		PE_parse_boot_argn("a510fvib", &v, sizeof(v));
 		enabled = v != 0;
-		if (enabled) {
-			a510f_vibrate(400);     /* motor test: a buzz as touch polling starts */
-		}
 	}
 	if (!enabled) {
 		return;
