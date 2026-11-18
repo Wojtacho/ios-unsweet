@@ -158,7 +158,7 @@ diff --git a/bsd/dev/a510f_wifi.c b/bsd/dev/a510f_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/a510f_wifi.c
-@@ -0,0 +1,1057 @@
+@@ -0,0 +1,1280 @@
 +/*
 + * A510F Wi-Fi, step 1: Broadcom BCM43454 on SDIO.
 + *
@@ -353,7 +353,10 @@ new file mode 100644
 +	return e;
 +}
 +
-+/* CMD53 byte mode read of n (<= 64) bytes of function fn at addr, incrementing */
++/* CMD53 opcode: incrementing address (backplane), or fixed (the function 2 FIFO reads) */
++static bool w_fixed;
++
++/* CMD53 byte mode read of n (<= 512) bytes of function fn at addr */
 +static int
 +cmd53_read(unsigned fn, uint32_t addr, uint8_t *buf, uint32_t n)
 +{
@@ -367,7 +370,7 @@ new file mode 100644
 +	wr(w.mmc, W_RINTSTS, 0xffffffffu);
 +	wr(w.mmc, W_BLKSIZ, n);
 +	wr(w.mmc, W_BYTCNT, n);
-+	uint32_t arg = ((fn & 7u) << 28) | (1u << 26) | ((addr & 0x1ffffu) << 9) | (n & 0x1ffu);
++	uint32_t arg = ((fn & 7u) << 28) | (w_fixed ? 0u : (1u << 26)) | ((addr & 0x1ffffu) << 9) | (n & 0x1ffu);
 +	wr(w.mmc, W_CMDARG, arg);
 +	wr(w.mmc, W_CMD, 53 | C_RESP_EXP | C_RESP_CRC | C_DAT_EXP | C_PRV_WAIT | C_START | C_USE_HOLD);
 +	if (!wait_clear(W_CMD, C_START, 100)) {
@@ -422,7 +425,7 @@ new file mode 100644
 +	wr(w.mmc, W_RINTSTS, 0xffffffffu);
 +	wr(w.mmc, W_BLKSIZ, n);
 +	wr(w.mmc, W_BYTCNT, n);
-+	uint32_t arg = (1u << 31) | ((fn & 7u) << 28) | (1u << 26) | ((addr & 0x1ffffu) << 9) | (n & 0x1ffu);
++	uint32_t arg = (1u << 31) | ((fn & 7u) << 28) | (w_fixed ? 0u : (1u << 26)) | ((addr & 0x1ffffu) << 9) | (n & 0x1ffu);
 +	wr(w.mmc, W_CMDARG, arg);
 +	wr(w.mmc, W_CMD, 53 | C_RESP_EXP | C_RESP_CRC | C_DAT_EXP | C_DAT_WR | C_PRV_WAIT | C_START | C_USE_HOLD);
 +	if (!wait_clear(W_CMD, C_START, 100)) {
@@ -521,6 +524,7 @@ new file mode 100644
 +	uint32_t cr4_base, cr4_wrap, sdio_base, sdio_wrap, ram_size;
 +	uint32_t d11_wrap;                      /* 802.11 core (0x812) wrapper: PHY held in reset while the ARM is halted */
 +	int fw_ok;                              /* blob sum matched */
++	int f2_ready;                           /* step 2b: function 2 came up */
 +	uint8_t *blob;
 +	uint32_t fw_len, nv_len;
 +	char ssid[33];
@@ -616,18 +620,25 @@ new file mode 100644
 +	 * 802.11 0x18001000 wrap 0x18101000, SDIO 0x18004000 wrap 0x18104000),
 +	 * kept only if the CR4's corecap reads as a plausible bank count.
 +	 */
-+	for (uint32_t n = 0; n < 16; n += 4) {
-+		uint32_t io[4], rc[4], c0[4], c4[4];
-+		for (uint32_t j = 0; j < 4; j++) {
-+			io[j] = rc[j] = c0[j] = c4[j] = 0xdeadbeefu;
-+			(void)bp_read32(0x18100000u + (n + j) * 0x1000u + WRAP_IOCTL_EARLY, &io[j]);
-+			(void)bp_read32(0x18100000u + (n + j) * 0x1000u + WRAP_RESETCTL_EARLY, &rc[j]);
-+			(void)bp_read32(0x18000000u + (n + j) * 0x1000u, &c0[j]);
-+			(void)bp_read32(0x18000000u + (n + j) * 0x1000u + 4u, &c4[j]);
++	/*
++	 * Round 74: wrappers only. Round 73 read the 802.11 core's own registers
++	 * while it was in reset (wrapper reset 1): the backplane hung (CMD53
++	 * timeout) and every later read returned 0. A core's registers are read
++	 * only once its wrapper shows it clocked and out of reset.
++	 */
++	uint32_t wio[8], wrc[8];
++	int sdio_slot = -1;
++	for (uint32_t n = 0; n < 8; n++) {
++		wio[n] = wrc[n] = 0xdeadbeefu;
++		(void)bp_read32(0x18100000u + n * 0x1000u + WRAP_IOCTL_EARLY, &wio[n]);
++		(void)bp_read32(0x18100000u + n * 0x1000u + WRAP_RESETCTL_EARLY, &wrc[n]);
++		if (n >= 3 && sdio_slot < 0 && (wio[n] & 1u) && !(wrc[n] & 1u) && wio[n] != 0xffffffffu) {
++			sdio_slot = (int)n;             /* clocked, out of reset: the SDIO core runs (we are talking through it) */
 +		}
-+		printf("A510F WIFI: slots %2u-%2u: io %x %x %x %x, reset %x %x %x %x, core+0 %x %x %x %x, core+4 %x %x %x %x\n",
-+		    n, n + 3, io[0], io[1], io[2], io[3], rc[0], rc[1], rc[2], rc[3], c0[0], c0[1], c0[2], c0[3], c4[0], c4[1], c4[2], c4[3]);
 +	}
++	printf("A510F WIFI: wrappers 0-7: io %x %x %x %x %x %x %x %x, reset %x %x %x %x %x %x %x %x; SDIO guess slot %d\n",
++	    wio[0], wio[1], wio[2], wio[3], wio[4], wio[5], wio[6], wio[7], wrc[0], wrc[1], wrc[2], wrc[3], wrc[4], wrc[5], wrc[6], wrc[7],
++	    sdio_slot);
 +	if (w2.cr4_base == 0) {
 +		/* round 73: the window registers as the card has them, the EROM pointer byte by byte */
 +		uint8_t sl = 0, sm_ = 0, sh_ = 0, ep[4] = {0, 0, 0, 0};
@@ -658,8 +669,9 @@ new file mode 100644
 +			w2.cr4_base = 0x18002000u;
 +			w2.cr4_wrap = 0x18102000u;
 +			w2.d11_wrap = 0x18101000u;
-+			w2.sdio_base = 0x18004000u;
-+			w2.sdio_wrap = 0x18104000u;
++			uint32_t sn = sdio_slot >= 0 ? (uint32_t)sdio_slot : 4u;
++			w2.sdio_base = 0x18000000u + sn * 0x1000u;
++			w2.sdio_wrap = 0x18100000u + sn * 0x1000u;
 +		}
 +	}
 +	printf("A510F WIFI: %d cores; ARM CR4 at 0x%x (wrap 0x%x), SDIO core at 0x%x (wrap 0x%x)\n", ncores, w2.cr4_base, w2.cr4_wrap,
@@ -972,7 +984,8 @@ new file mode 100644
 +	}
 +	printf("A510F WIFI: HT clock csr 0x%x after %d ms\n", csr, ms);
 +
-+	/* function 2 */
++	/* function 2 (brcmfmac firmware_callback: protocol version to the device first, interrupt mask after) */
++	(void)bp_write32(w2.sdio_base + 0x48, 4u << 16);   /* tosbmailboxdata = SDPCM_PROT_VERSION << 16 */
 +	uint8_t ioen = 0, iordy = 0;
 +	(void)cmd52(0, 0x02, false, 0, &ioen);
 +	(void)cmd52(0, 0x02, true, (uint8_t)(ioen | 0x04u), NULL);
@@ -983,6 +996,10 @@ new file mode 100644
 +		}
 +		IOSleep(10);
 +	}
++	(void)bp_write32(w2.sdio_base + 0x24, 0x200000f0u);        /* hostintmask: I_HMB_SW_MASK | I_CHIPACTIVE */
++	(void)cmd52(0, 0x210, true, 0x00, NULL);                /* function 2 block size 512 (FBR2) */
++	(void)cmd52(0, 0x211, true, 0x02, NULL);
++	w2.f2_ready = (iordy & 0x04u) != 0;
 +	uint32_t mb = 0, shared = 0, inst = 0;
 +	(void)bp_read32(w2.sdio_base + 0x4c, &mb);
 +	(void)bp_read32(w2.sdio_base + 0x20, &inst);
@@ -990,6 +1007,211 @@ new file mode 100644
 +	printf("A510F WIFI: function 2 ready 0x%x after %d ms; mailbox 0x%x (fw ready %d, version %u), intstatus 0x%x, "
 +	    "sdpcm_shared 0x%x\n", iordy, ms, mb, (mb & 0xau) != 0, (mb >> 16) & 0xffu, inst, shared);
 +	printf("A510F WIFI: step 2b done\n");
++}
++
++/*
++ * Step 3: talk to the firmware (brcmfmac sdio.c / bcdc.c). Frames on
++ * function 2 through the ChipCommon window (address 0x8000 = cc base | 4-byte
++ * flag): writes incrementing, reads from the fixed FIFO address. A frame is
++ * a hardware header (LE16 length, LE16 ~length), an SDPCM header (LE32: seq
++ * [7:0], channel [11:8], next length [23:16], data offset [31:24]; LE32:
++ * flow control [7:0], max tx seq [15:8]) and, on the control channel (0), a
++ * BCDC header (LE32 cmd, len, flags (request id << 16 | SET 2 | ERROR 1),
++ * status) with the payload after it. Intstatus (SDIO core +0x20): bit 6 a
++ * frame waits, bit 7 the mailbox (+0x4c) has news; write-1-to-clear.
++ */
++#define F2_ADDR         0x8000u
++#define WLC_GET_VERSION 1u
++#define WLC_UP          2u
++#define WLC_GET_VAR     262u
++
++static uint8_t f2_buf[2048];
++static uint8_t tx_seq;
++static uint16_t req_id;
++
++static int
++f2_write(const uint8_t *buf, uint32_t len)
++{
++	int e = bp_window(CC_BASE);
++	for (uint32_t off = 0; e == 0 && off < len; off += 512u) {
++		uint32_t c = len - off < 512u ? len - off : 512u;
++		e = cmd53_write(2, F2_ADDR, buf + off, c);
++	}
++	return e;
++}
++
++static int
++f2_read(uint8_t *buf, uint32_t len)
++{
++	int e = bp_window(CC_BASE);
++	w_fixed = true;
++	for (uint32_t off = 0; e == 0 && off < len; off += 512u) {
++		uint32_t c = len - off < 512u ? len - off : 512u;
++		e = cmd53_read(2, F2_ADDR, buf + off, c);
++	}
++	w_fixed = false;
++	return e;
++}
++
++/* wait for intstatus bits (and clear them); the mailbox is read and acknowledged when bit 7 comes */
++static uint32_t
++sdio_wait(uint32_t want, uint32_t ms)
++{
++	uint32_t got = 0;
++	for (uint32_t t = 0; t <= ms; t += 2) {
++		uint32_t st = 0;
++		if (bp_read32(w2.sdio_base + 0x20, &st) == 0 && (st & 0x200000f0u) != 0) {
++			(void)bp_write32(w2.sdio_base + 0x20, st & 0x200000f0u);
++			if (st & 0x80u) {
++				uint32_t mb = 0;
++				(void)bp_read32(w2.sdio_base + 0x4c, &mb);
++				(void)bp_write32(w2.sdio_base + 0x40, 0x2u);    /* SMB_INT_ACK */
++				printf("A510F WIFI: mailbox 0x%x (%s%s%s), protocol %u\n", mb, (mb & 0x8u) ? "firmware ready " : "",
++				    (mb & 0x2u) ? "device ready " : "", (mb & 0x10u) ? "FIRMWARE HALTED " : "", (mb >> 16) & 0xffu);
++			}
++			got |= st;
++			if (got & want) {
++				return got;
++			}
++		}
++		IOSleep(2);
++	}
++	return got;
++}
++
++/* read one frame into f2_buf; its length (0: none), channel and data offset */
++static uint32_t
++frame_read(uint32_t *chan, uint32_t *doff)
++{
++	if (f2_read(f2_buf, 4) != 0) {
++		return 0;
++	}
++	uint32_t len = (uint32_t)f2_buf[0] | ((uint32_t)f2_buf[1] << 8);
++	uint32_t chk = (uint32_t)f2_buf[2] | ((uint32_t)f2_buf[3] << 8);
++	if (len == 0 || ((len ^ chk) & 0xffffu) != 0xffffu || len < 12u || len > sizeof(f2_buf)) {
++		if (len != 0) {
++			printf("A510F WIFI: bad frame header len 0x%x chk 0x%x\n", len, chk);
++		}
++		return 0;
++	}
++	uint32_t rest = ((len + 3u) & ~3u) - 4u;
++	if (rest > 0 && f2_read(f2_buf + 4, rest) != 0) {
++		return 0;
++	}
++	uint32_t w0 = 0;
++	memcpy(&w0, f2_buf + 4, 4);
++	*chan = (w0 >> 8) & 0xfu;
++	*doff = w0 >> 24;
++	return len;
++}
++
++/* one BCDC command on the control channel; the reply payload (up to outmax bytes) back into data */
++static int
++fw_dcmd(uint32_t cmd, bool set, uint8_t *data, uint32_t len, uint32_t outmax, uint32_t *status)
++{
++	uint32_t total = 12u + 16u + (len > outmax ? len : outmax);
++	if (total > sizeof(f2_buf)) {
++		return EINVAL;
++	}
++	bzero(f2_buf, sizeof(f2_buf));
++	uint16_t l16 = (uint16_t)total, c16 = (uint16_t)~l16;
++	memcpy(f2_buf, &l16, 2);
++	memcpy(f2_buf + 2, &c16, 2);
++	uint32_t w0 = (uint32_t)tx_seq++ | (0u << 8) | (12u << 24);
++	memcpy(f2_buf + 4, &w0, 4);
++	uint32_t id = ++req_id, flags = (id << 16) | (set ? 2u : 0u);
++	uint32_t blen = len > outmax ? len : outmax;
++	memcpy(f2_buf + 12, &cmd, 4);
++	memcpy(f2_buf + 16, &blen, 4);
++	memcpy(f2_buf + 20, &flags, 4);
++	if (len > 0) {
++		memcpy(f2_buf + 28, data, len);
++	}
++	int e = f2_write(f2_buf, (total + 3u) & ~3u);
++	if (e != 0) {
++		printf("A510F WIFI: dcmd %u send failed (%d)\n", cmd, e);
++		return e;
++	}
++	for (int tries = 0; tries < 20; tries++) {
++		uint32_t st = sdio_wait(0x40u, 500);
++		if (!(st & 0x40u)) {
++			continue;
++		}
++		for (int f = 0; f < 8; f++) {
++			uint32_t ch = 0, doff = 0, fl = frame_read(&ch, &doff);
++			if (fl == 0) {
++				break;
++			}
++			if (ch != 0) {
++				printf("A510F WIFI: frame on channel %u, %u bytes (not control)\n", ch, fl);
++				continue;
++			}
++			uint32_t rflags = 0, rstat = 0;
++			memcpy(&rflags, f2_buf + doff + 8, 4);
++			memcpy(&rstat, f2_buf + doff + 12, 4);
++			if ((rflags >> 16) != (id & 0xffffu)) {
++				continue;
++			}
++			if (status != NULL) {
++				*status = (rflags & 1u) ? rstat : 0;
++			}
++			uint32_t pl = fl > doff + 16u ? fl - doff - 16u : 0;
++			if (outmax > 0 && data != NULL) {
++				memcpy(data, f2_buf + doff + 16, pl < outmax ? pl : outmax);
++			}
++			return (rflags & 1u) ? EIO : 0;
++		}
++	}
++	printf("A510F WIFI: dcmd %u: no reply\n", cmd);
++	return ETIMEDOUT;
++}
++
++static int
++fw_getvar(const char *name, uint8_t *out, uint32_t outlen)
++{
++	uint8_t req[256];
++	size_t nl = strlen(name) + 1;
++	if (nl > sizeof(req) || outlen > sizeof(req)) {
++		return EINVAL;
++	}
++	bzero(req, sizeof(req));
++	memcpy(req, name, nl);
++	uint32_t st = 0;
++	int e = fw_dcmd(WLC_GET_VAR, false, req, (uint32_t)nl, outlen > nl ? outlen : (uint32_t)nl, &st);
++	if (e == 0) {
++		memcpy(out, req, outlen);
++	}
++	return e != 0 ? e : (int)st;
++}
++
++static void
++wifi_step3(void)
++{
++	if (!w2.f2_ready) {
++		printf("A510F WIFI: step 3 skipped (function 2 not ready)\n");
++		return;
++	}
++	uint32_t st = sdio_wait(0x80u, 3000);
++	printf("A510F WIFI: step 3: intstatus seen 0x%x\n", st);
++	uint8_t v[256];
++	uint32_t ver = 0, fst = 0;
++	int e = fw_dcmd(WLC_GET_VERSION, false, (uint8_t *)&ver, 0, 4, &fst);
++	printf("A510F WIFI: WLC_GET_VERSION %d: %u (status %u)\n", e, ver, fst);
++	bzero(v, sizeof(v));
++	e = fw_getvar("ver", v, 200);
++	v[199] = 0;
++	for (int i = 0; i < 200; i++) {
++		if (v[i] == '\n' || v[i] == '\r') {
++			v[i] = ' ';
++		}
++	}
++	printf("A510F WIFI: firmware \"%s\" (%d)\n", (const char *)v, e);
++	bzero(v, sizeof(v));
++	e = fw_getvar("cur_etheraddr", v, 6);
++	printf("A510F WIFI: MAC %02x:%02x:%02x:%02x:%02x:%02x (%d)\n", v[0], v[1], v[2], v[3], v[4], v[5], e);
++	e = fw_dcmd(WLC_UP, true, NULL, 0, 0, &fst);
++	printf("A510F WIFI: WLC_UP %d (status %u)\n", e, fst);
++	printf("A510F WIFI: step 3 done\n");
 +}
 +
 +static void
@@ -1187,6 +1409,7 @@ new file mode 100644
 +	printf("A510F WIFI: step 1 done\n");
 +	wifi_step2a();
 +	wifi_step2b();
++	wifi_step3();
 +}
 +
 +static void
