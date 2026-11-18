@@ -1665,3 +1665,34 @@ capture_backdrop (0x188318a64) fills that buffer only when the group's
 +0x1b0 equals the renderer's pass id and for the last item of the group.
 GL texture functions still NULL in tex_fragment_shaders (0x1d5b48a10 on
 this phone): 0x19, 0x1c, 0x28, 0x33+.
+
+## 2026-11-18 (evening): rounds 89-92
+
+- SpringBoard exit(1) = ProactiveSupport -[_PASSqliteDefaultErrorHandler
+  _handle_SQLITE_CORRUPT:...] (placeCorruptionMarker unless in-memory, then
+  _abortDueToSqliteError -> exit). Round 90: a restart loop from
+  -[ATXInformationStore _configureDatabase] (AppPredictionClient):
+  /private/var/mobile/Library/DuetExpertCenter/_ATXInfoSuggestionStore.db.
+  Round 91 deleted it once (user approved; boot-arg a510fatxreset=1, kernel
+  unlink1 in the Wi-Fi thread, all -> 0); iOS recreated it, SpringBoard still
+  exit(1)s twice per run (down from 11). No corruption marker was ever
+  opened (0138 logs opens with "orrupt"): maybe an in-memory database. Round
+  92 prints 30 frames for exit() callers (0043) to find the caller.
+  Offline reads of the data volume are stale (journal not replayed).
+- The autopilot's reset into recovery had no sync: 0110 now calls sync()
+  first (round 90).
+- Wi-Fi: rx superframes (glom descriptor + superframe) handled (round 90:
+  1844 superframes, 4376 subframes; they were dropped before). Round 91: 234
+  KB/s peak, Safari loads Google over HTTPS (screenshot 02211). Round 92
+  tries 50 MHz (CCCR EHS) / 25 / 12.5 MHz with Samsung's sdr timing <3 0 2
+  1> (CLKSEL drive 2 sample 1), logs data CRC errors per 30 s.
+- RAM/CPU (round 92): the kernel refuses Spotlight index extensions (name
+  has "Spotlight" and Extension/Indexer/Importer); a510fspotlight=1 allows.
+  Boot-args are at 582 of 607 bytes (tools/mkpayload.py BOOT_LINE_LENGTH).
+- Folders (round 92, sweetgl): held transparent clears (round 29) ran after
+  copies/blits into the cleared texture and wiped captured backdrops; now a
+  held clear runs before any copy/blit into a non-variable-blur texture.
+- Boot screen (round 92, user list): no boot buzz; logo only, no custom bar;
+  each newly shown buffer cleared; stops and clears when the display goes
+  off (a510f_bootscreen_display from SweetFramebuffer). Logo scale: to be
+  matched to iOS's logo from round 92's boot shots (auto.py logo FONT SIZE).
