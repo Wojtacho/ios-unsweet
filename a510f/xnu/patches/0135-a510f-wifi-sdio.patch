@@ -158,7 +158,7 @@ diff --git a/bsd/dev/a510f_wifi.c b/bsd/dev/a510f_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/a510f_wifi.c
-@@ -0,0 +1,1305 @@
+@@ -0,0 +1,1341 @@
 +/*
 + * A510F Wi-Fi, step 1: Broadcom BCM43454 on SDIO.
 + *
@@ -925,6 +925,24 @@ new file mode 100644
 +	}
 +	(void)bp_read32(w2.cr4_wrap + WRAP_IOCTL, &ioctl);
 +	printf("A510F WIFI: CR4 halted: ioctl 0x%x\n", ioctl);
++	/*
++	 * Round 76: brcmfmac downloads with the HT clock on (clkctl CLK_AVAIL:
++	 * CHIPCLKCSR = HT_AVAIL_REQ, wait HT_AVAIL); round 75 never asked for it.
++	 * And the first 4 KiB written right after the halt were lost: settle.
++	 */
++	{
++		uint8_t csr = 0;
++		int we = cmd52(1, 0x1000e, true, 0x10, NULL), hms = 0;
++		for (; hms < 1000; hms += 5) {
++			(void)cmd52(1, 0x1000e, false, 0, &csr);
++			if (csr & 0x80u) {
++				break;
++			}
++			IOSleep(5);
++		}
++		printf("A510F WIFI: HT for the download: write %d, csr 0x%x after %d ms\n", we, csr, hms);
++	}
++	IOSleep(100);
 +
 +	/* firmware */
 +	const uint8_t *fw = w2.blob + 512;
@@ -950,7 +968,7 @@ new file mode 100644
 +	 */
 +	if (e == 0) {
 +		int nbad = 0, fixed = 0;
-+		for (uint32_t off = 0; off < 4096u && off < w2.fw_len; off += 64u) {
++		for (uint32_t off = 0; off < w2.fw_len; off += 64u) {         /* round 76: the whole image */
 +			uint32_t c = w2.fw_len - off < 64u ? w2.fw_len - off : 64u;
 +			if (bp_read_mem(RAM_BASE + off, chk, c) == 0 && memcmp(chk, fw + off, c) == 0) {
 +				continue;
@@ -965,7 +983,7 @@ new file mode 100644
 +				fixed++;
 +			}
 +		}
-+		printf("A510F WIFI: first 4 KiB: %d blocks differed, %d fixed by a rewrite\n", nbad, fixed);
++		printf("A510F WIFI: firmware check: %d blocks differed, %d fixed by a rewrite\n", nbad, fixed);
 +		bad = nbad != fixed;
 +	}
 +	if (e != 0 || bad) {
@@ -981,6 +999,21 @@ new file mode 100644
 +	}
 +	uint32_t nva = RAM_BASE + w2.ram_size - nvl;
 +	e = bp_write_mem(nva, nv, nvl);
++	{
++		/* round 76: read the NVRAM back; its last word is the length token */
++		int nbad = 0;
++		for (uint32_t off = 0; e == 0 && off < nvl; off += 64u) {
++			uint32_t c = nvl - off < 64u ? nvl - off : 64u;
++			if (bp_read_mem(nva + off, chk, c) != 0 || memcmp(chk, nv + off, c) != 0) {
++				nbad++;
++				(void)bp_write_mem(nva + off, nv + off, c);
++			}
++		}
++		uint32_t tok = 0, want = 0;
++		(void)bp_read32(RAM_BASE + w2.ram_size - 4u, &tok);
++		memcpy(&want, nv + nvl - 4u, 4);
++		printf("A510F WIFI: NVRAM check: %d blocks rewritten; last word 0x%x (token 0x%x)\n", nbad, tok, want);
++	}
 +	printf("A510F WIFI: NVRAM %u bytes at 0x%x (%d)\n", nvl, nva, e);
 +	kfree_data(nv, w2.nv_len + 64u);
 +	if (e != 0) {
@@ -996,18 +1029,21 @@ new file mode 100644
 +	(void)bp_read32(w2.cr4_wrap + WRAP_IOCTL, &ioctl);
 +	printf("A510F WIFI: reset vector 0x%08x (%d), CR4 released: ioctl 0x%x\n", rstvec, e, ioctl);
 +
-+	/* HT clock (HT_AVAIL_REQ 0x10, wait HT_AVAIL 0x80) */
-+	(void)cmd52(1, 0x1000e, true, 0x10, NULL);
++	/* brcmfmac firmware_callback: force HT on the backplane (FORCE_HT 0x02), then F2 */
++	int hw = cmd52(1, 0x1000e, true, 0x02, NULL);
 +	uint8_t csr = 0;
 +	int ms = 0;
 +	for (; ms < 1000; ms += 5) {
 +		(void)cmd52(1, 0x1000e, false, 0, &csr);
-+		if ((csr & 0xc0u) == 0xc0u) {
++		if (csr & 0x80u) {
 +			break;
 +		}
 +		IOSleep(5);
 +	}
-+	printf("A510F WIFI: HT clock csr 0x%x after %d ms\n", csr, ms);
++	uint32_t sh0 = 0;
++	(void)bp_read32(RAM_BASE + w2.ram_size - 4u, &sh0);
++	printf("A510F WIFI: FORCE_HT write %d, csr 0x%x after %d ms; last RAM word 0x%x (sdpcm_shared once the firmware runs)\n",
++	    hw, csr, ms, sh0);
 +
 +	/* function 2 (brcmfmac firmware_callback: protocol version to the device first, interrupt mask after) */
 +	(void)bp_write32(w2.sdio_base + 0x48, 4u << 16);   /* tosbmailboxdata = SDPCM_PROT_VERSION << 16 */
