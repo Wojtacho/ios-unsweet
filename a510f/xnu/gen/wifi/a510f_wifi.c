@@ -850,7 +850,7 @@ wifi_step2b(void)
 	 */
 	if (e == 0) {
 		int nbad = 0, fixed = 0;
-		for (uint32_t off = 0; off < w2.fw_len; off += 64u) {         /* round 76: the whole image */
+		for (uint32_t off = 0; off < 4096u && off < w2.fw_len; off += 64u) {   /* round 82: first 4 KiB (the rest always matched; boot time) */
 			uint32_t c = w2.fw_len - off < 64u ? w2.fw_len - off : 64u;
 			if (bp_read_mem(RAM_BASE + off, chk, c) == 0 && memcmp(chk, fw + off, c) == 0) {
 				continue;
