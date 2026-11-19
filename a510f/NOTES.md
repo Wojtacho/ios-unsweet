@@ -1729,3 +1729,19 @@ processes 44 -> 17 with the Spotlight block.
   SQLite's own corruption reports; ATX store deleted once more
   (a510fatxreset=1, user approved; remove next round). User wants the
   permanent fix for the corruption, not auto-deleting.
+
+Round 94 results (2026-11-19): boot 30 s shorter (no IORTC wait); logo + bar
+from the first shot, bar finishes and fades at the early display-off. 0
+SpringBoard exits (fresh ATX store). The open folder panel is back (sweetgl
+held-clear fix); the folder icon square is still missing. SQLite's reports
+(SWEETSQL lines): "unixShmMap-write(...applicationState.db-shm) - No space
+left on device" / "database or disk is full": the iOS volume header says
+70557 of 3782656 4 KiB blocks free (1.9%), under HFS's reserve for uid 501.
+/private/var/tmp 917 MB = ~66 com.apple.posterkit.provider.path.* copies of
+13.8 MB (poster extensions killed by check-in timeouts never clean up);
+coresymbolicationd cache 284 MB (ReportCrash symbolicating every crash);
+diagnostics 599 MB. hfsremote's on-disk chunk cache (twrp-write/hfscache)
+made offline reads stale: move it aside before reading.
+Round 95 (93847d7): per-boot cleanup (a510fclean, cl_thread in
+a510f_wifi.c), ReportCrash refused, XNU meter never drawn. User asked for
+SD card storage next.
