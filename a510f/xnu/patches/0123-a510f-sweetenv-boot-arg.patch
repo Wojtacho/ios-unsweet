@@ -2,7 +2,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index 68612db..281011b 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -445,6 +445,148 @@ exec_add_user_string(struct image_params *imgp, user_addr_t str, int seg, boolea
+@@ -445,6 +445,167 @@ exec_add_user_string(struct image_params *imgp, user_addr_t str, int seg, boolea
  	return error;
  }
  
@@ -20,6 +20,25 @@ index 68612db..281011b 100644
 +	static int state;       /* 0 not parsed, 1 none, 2 set */
 +	if (state == 0) {
 +		state = PE_parse_boot_argn("sweetenv", spec, sizeof(spec)) && spec[0] ? 2 : 1;
++		/*
++		 * Round 94 (diagnostic): a510fsbsql=1 also loads sweetgl into SpringBoard
++		 * with SWEETGL_SQLLOG=1 (SQLite's error reports to the log). Built in: the
++		 * boot-args line (607 bytes) has no room for a second sweetenv entry.
++		 */
++		int sbsql = 0;
++		PE_parse_boot_argn("a510fsbsql", &sbsql, sizeof(sbsql));
++		if (sbsql) {
++			static const char sb[] = "SpringBoard:DYLD_INSERT_LIBRARIES=/usr/standalone/update/ramdisk/arm64SURamDisk.dmg,"
++			    "SWEETGL_SQLLOG=1";
++			size_t have = state == 2 ? strlen(spec) : 0;
++			if (have + 1 + sizeof(sb) < sizeof(spec)) {
++				if (have > 0) {
++					spec[have++] = ';';
++				}
++				memcpy(spec + have, sb, sizeof(sb));
++				state = 2;
++			}
++		}
 +	}
 +	if (state != 2) {
 +		return 0;
@@ -151,7 +170,7 @@ index 68612db..281011b 100644
  /*
   * dyld is now passed the executable path as a getenv-like variable
   * in the same fashion as the stack_guard and malloc_entropy keys.
-@@ -5741,6 +5880,17 @@ exec_extract_strings(struct image_params *imgp)
+@@ -5741,6 +5899,17 @@ exec_extract_strings(struct image_params *imgp)
  		imgp->ip_envc++;
  	}
  

@@ -2078,3 +2078,52 @@ pend_clear_before_copy(GLint dest, const char *what)
 	}
 	if (nat_fb(GL_READ_FRAMEBUFFER)) {"""),
 ])
+
+# Round 94 (SpringBoard exit(1) on SQLITE_CORRUPT, ProactiveSupport): SQLite's
+# own reports ("database corruption at line N of [...]", extended codes, WAL
+# recovery notices with paths). In SpringBoard with SWEETGL_SQLLOG=1 (kernel
+# boot-arg a510fsbsql=1 inserts this library there) only this is installed.
+edit('sweetgl.c', [
+    ("""__attribute__((constructor)) static void
+sweetgl_load(void)
+{
+	if (strcmp(getprogname(), "SpringBoard") == 0) {""", """#include <dlfcn.h>
+
+static void
+sgl_sql_log(void *arg, int code, const char *msg)
+{
+	static int n;
+	(void)arg;
+	if (n++ < 400) {
+		fprintf(stderr, "SWEETSQL %d (%d): %s\\n", code, code & 0xff, msg ? msg : "(null)");
+	}
+}
+
+/* 1: SQLite logging installed (SpringBoard, SWEETGL_SQLLOG=1): nothing else runs here */
+static int
+sgl_sqllog_install(void)
+{
+	const char *e = getenv("SWEETGL_SQLLOG");
+	if (e == NULL || e[0] != '1') {
+		return 0;
+	}
+	void *h = dlopen("/usr/lib/libsqlite3.dylib", RTLD_NOLOAD | RTLD_LAZY);
+	if (h == NULL) {
+		h = dlopen("/usr/lib/libsqlite3.dylib", RTLD_LAZY);
+	}
+	int (*cfg)(int, ...) = h ? (int (*)(int, ...))dlsym(h, "sqlite3_config") : NULL;
+	int r = cfg ? cfg(16 /* SQLITE_CONFIG_LOG */, sgl_sql_log, NULL) : -1;
+	fprintf(stderr, "SWEETSQL: SQLite log callback in %s: %d (0 = installed, 21 = SQLite was already initialised)\\n",
+	    getprogname(), r);
+	return 1;
+}
+
+__attribute__((constructor)) static void
+sweetgl_load(void)
+{
+	if (strcmp(getprogname(), "SpringBoard") == 0) {
+		if (sgl_sqllog_install()) {
+			return;
+		}"""),
+])
+
