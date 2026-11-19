@@ -1745,3 +1745,10 @@ made offline reads stale: move it aside before reading.
 Round 95 (93847d7): per-boot cleanup (a510fclean, cl_thread in
 a510f_wifi.c), ReportCrash refused, XNU meter never drawn. User asked for
 SD card storage next.
+Round 95 results: cleanup at 3.1 s into the root mount: 199 posterkit copies
+(kept 2) = 2293 files, 661 MB, + coresymbolicationd 284 MB; volume free
+1.009 GiB (7%). No SWEETSQL disk-full lines, 0 SpringBoard exits,
+ReportCrash refused. Boot screen: logo + our bar only (no XNU meter line),
+black after the early display-off. Next: SD card (dwmmc2 0x13560000 SPI 247,
+gpr4-0..6 func 2 at FSYS pinctrl +0x80, card detect gpa3-1, clocks 204/210/
+215/216, sdr timing <3 0 2 0>); folder icon square; switcher background.
