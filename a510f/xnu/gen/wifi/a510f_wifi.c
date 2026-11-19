@@ -2765,8 +2765,8 @@ sd_probe(void)
 	for (int i = 0; i < 2; i++) {
 		uint8_t v = 0;
 		int e = a510f_pmic_op(regs[i], 0, &v);
-		printf("A510F SD: PMIC 0x%x = 0x%x (%d)%s\n", regs[i], v, e, e == 0 && (v & 0xc0u) != 0xc0u ? ": off, switching on" : "");
-		if (e == 0 && (v & 0xc0u) != 0xc0u) {
+		printf("A510F SD: PMIC 0x%x = 0x%x (%d)%s\n", regs[i], v, e, e == 0 && (v & 0xc0u) == 0 ? ": off, switching on" : "");
+		if (e == 0 && (v & 0xc0u) == 0) {
 			uint8_t on = 0xe8;              /* [7:6] on, 0x28 = 2.8 V (1.8 V + 40 x 25 mV) */
 			(void)a510f_pmic_op(regs[i], 1, &on);
 			IOSleep(20);
@@ -2782,6 +2782,16 @@ sd_probe(void)
 	field(sd.top, TOP_EN_SCLK_FSYS, 2, 1, 1);
 	field(sd.fsys, FSYS_EN_ACLK0, 9, 1, 1);
 	field(sd.fsys, FSYS_EN_SCLK, 7, 1, 1);
+	{
+		/* round 97: mmc2 answered 0 to every read with its own gates on: the FSYS1 path */
+		uint32_t v0 = rd(sd.mmc, W_VERID), a1 = rd(sd.fsys, 0x804), a2 = rd(sd.fsys, 0x808), pc = rd(sd.fsys, 0x900);
+		field(sd.fsys, 0x804, 1, 1, 1);         /* aclk_xiu_d_fsys1 */
+		field(sd.fsys, 0x808, 4, 1, 1);         /* aclk_upsizer_fsys1_to_fsys0 */
+		field(sd.fsys, 0x808, 7, 1, 1);         /* aclk_upsizer_dma_fsys1 */
+		IOSleep(1);
+		printf("A510F SD: fsys en_aclk1 0x%x en_aclk2 0x%x en_pclk 0x%x: verid 0x%x -> 0x%x\n", a1, a2, pc, v0,
+		    rd(sd.mmc, W_VERID));
+	}
 	for (unsigned pin = 0; pin < 7; pin++) {
 		if (pin == 2) {
 			continue;               /* gpr4-2: the controller's own card detect, unused */
