@@ -155,7 +155,7 @@ diff --git a/bsd/dev/a510f_wifi.c b/bsd/dev/a510f_wifi.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/a510f_wifi.c
-@@ -0,0 +1,2453 @@
+@@ -0,0 +1,2668 @@
 +/*
 + * A510F Wi-Fi, step 1: Broadcom BCM43454 on SDIO.
 + *
@@ -201,6 +201,8 @@ new file mode 100644
 +#include <netinet/in.h>
 +#include <sys/vnode.h>
 +#include <sys/uio.h>
++#include <sys/dirent.h>
++#include <sys/vnode_if.h>
 +
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 +extern void IOSleep(unsigned int milliseconds);
@@ -2550,6 +2552,211 @@ new file mode 100644
 +	wifi_step6();
 +}
 +
++
++/*
++ * Round 95 (user approved): the iOS volume was 98% full (269 MB free: below
++ * HFS's reserve for the mobile user, so SQLite got ENOSPC on its -shm files
++ * and SpringBoard exit(1)ed). Causes: PosterKit copies the wallpaper
++ * descriptor into /private/var/tmp/com.apple.posterkit.provider.path.* for
++ * each poster extension launch and the extensions here are killed (check-in
++ * timeout) before they clean up: ~66 copies of 13.8 MB; and the crash
++ * symbolication cache (284 MB, ReportCrash is now refused). At every boot,
++ * as soon as the root volume is there (before the poster extensions start):
++ * the files of all but the 2 newest posterkit copies, and the
++ * coresymbolicationd cache, are deleted. Directories stay (empty).
++ * Boot-arg a510fclean=0: off.
++ */
++#define CL_MAXENT 256
++static struct {
++	unsigned files, dirs;
++	uint64_t bytes;
++} cl;
++
++/* the entries of directory path: names (CL_MAXENT x 256) and types; their count */
++static unsigned
++cl_list(const char *path, char *names, uint8_t *types)
++{
++	vfs_context_t ctx = vfs_context_kernel();
++	vnode_t dvp = NULLVP;
++	if (vnode_lookup(path, 0, &dvp, ctx) != 0) {
++		return 0;
++	}
++	unsigned n = 0;
++	if (vnode_vtype(dvp) == VDIR) {
++		char *buf = kalloc_data(8192, Z_WAITOK);
++		uio_t uio = uio_create(1, 0, UIO_SYSSPACE, UIO_READ);
++		off_t off = 0;
++		int eof = 0;
++		while (buf != NULL && uio != NULL && !eof && n < CL_MAXENT) {
++			int nd = 0;
++			uio_reset(uio, off, UIO_SYSSPACE, UIO_READ);
++			uio_addiov(uio, CAST_USER_ADDR_T(buf), 8192);
++			if (VNOP_READDIR(dvp, uio, VNODE_READDIR_EXTENDED, &eof, &nd, ctx) != 0) {
++				break;
++			}
++			size_t got = 8192 - (size_t)uio_resid(uio);
++			if (got == 0) {
++				break;
++			}
++			for (size_t o = 0; o + offsetof(struct direntry, d_name) < got && n < CL_MAXENT;) {
++				struct direntry *de = (struct direntry *)(buf + o);
++				if (de->d_reclen == 0) {
++					break;
++				}
++				size_t nl = de->d_namlen;
++				bool dot = (nl == 1 && de->d_name[0] == '.') || (nl == 2 && de->d_name[0] == '.' && de->d_name[1] == '.');
++				if (!dot && nl > 0 && nl < 255) {
++					memcpy(names + n * 256, de->d_name, nl);
++					names[n * 256 + nl] = 0;
++					types[n] = de->d_type;
++					n++;
++				}
++				o += de->d_reclen;
++			}
++			off = uio_offset(uio);
++		}
++		if (uio != NULL) {
++			uio_free(uio);
++		}
++		if (buf != NULL) {
++			kfree_data(buf, 8192);
++		}
++	}
++	vnode_put(dvp);
++	return n;
++}
++
++static void
++cl_unlink(const char *path)
++{
++	extern int unlink1(vfs_context_t, vnode_t, user_addr_t, enum uio_seg, int);
++	vfs_context_t ctx = vfs_context_kernel();
++	vnode_t vp = NULLVP;
++	off_t size = 0;
++	if (vnode_lookup(path, 0, &vp, ctx) == 0) {
++		(void)vnode_size(vp, &size, ctx);
++		vnode_put(vp);
++	}
++	if (unlink1(ctx, NULLVP, CAST_USER_ADDR_T(path), UIO_SYSSPACE, 0) == 0) {
++		cl.files++;
++		cl.bytes += (uint64_t)size;
++	}
++}
++
++/* delete every regular file under path */
++static void
++cl_rm_files(const char *path, int depth)
++{
++	if (depth > 8) {
++		return;
++	}
++	char *names = kalloc_data(CL_MAXENT * 256, Z_WAITOK);
++	uint8_t *types = kalloc_data(CL_MAXENT, Z_WAITOK);
++	char *child = kalloc_data(MAXPATHLEN, Z_WAITOK);
++	if (names != NULL && types != NULL && child != NULL) {
++		unsigned n = cl_list(path, names, types);
++		for (unsigned i = 0; i < n; i++) {
++			snprintf(child, MAXPATHLEN, "%s/%s", path, names + i * 256);
++			if (types[i] == DT_DIR) {
++				cl.dirs++;
++				cl_rm_files(child, depth + 1);
++			} else {
++				cl_unlink(child);
++			}
++		}
++	}
++	if (names != NULL) {
++		kfree_data(names, CL_MAXENT * 256);
++	}
++	if (types != NULL) {
++		kfree_data(types, CL_MAXENT);
++	}
++	if (child != NULL) {
++		kfree_data(child, MAXPATHLEN);
++	}
++}
++
++static void
++cl_thread(__unused void *arg, __unused wait_result_t wr_)
++{
++	extern vnode_t rootvnode;
++	vfs_context_t ctx = vfs_context_kernel();
++	for (int t = 0; t < 600; t++) {         /* up to 60 s for the root volume */
++		vnode_t vp = NULLVP;
++		if (rootvnode != NULLVP && vnode_lookup("/private/var/tmp", 0, &vp, ctx) == 0) {
++			vnode_put(vp);
++			break;
++		}
++		IOSleep(100);
++	}
++	uint64_t t0 = mach_absolute_time();
++	static const char tmp[] = "/private/var/tmp", pre[] = "com.apple.posterkit.provider.path.";
++	char *names = kalloc_data(CL_MAXENT * 256, Z_WAITOK);
++	uint8_t *types = kalloc_data(CL_MAXENT, Z_WAITOK);
++	char *child = kalloc_data(MAXPATHLEN, Z_WAITOK);
++	unsigned copies = 0, kept = 0;
++	if (names != NULL && types != NULL && child != NULL) {
++		unsigned n = cl_list(tmp, names, types);
++		/* the 2 newest copies stay (one may belong to a poster that is starting) */
++		int64_t newest[2] = {-1, -1};
++		int keep[2] = {-1, -1};
++		for (unsigned i = 0; i < n; i++) {
++			if (types[i] != DT_DIR || strncmp(names + i * 256, pre, sizeof(pre) - 1) != 0) {
++				continue;
++			}
++			copies++;
++			snprintf(child, MAXPATHLEN, "%s/%s", tmp, names + i * 256);
++			vnode_t vp = NULLVP;
++			int64_t m = 0;
++			if (vnode_lookup(child, 0, &vp, ctx) == 0) {
++				struct vnode_attr va;
++				VATTR_INIT(&va);
++				VATTR_WANTED(&va, va_modify_time);
++				if (vnode_getattr(vp, &va, ctx) == 0) {
++					m = va.va_modify_time.tv_sec;
++				}
++				vnode_put(vp);
++			}
++			if (m > newest[0]) {
++				newest[1] = newest[0];
++				keep[1] = keep[0];
++				newest[0] = m;
++				keep[0] = (int)i;
++			} else if (m > newest[1]) {
++				newest[1] = m;
++				keep[1] = (int)i;
++			}
++		}
++		for (unsigned i = 0; i < n; i++) {
++			if (types[i] != DT_DIR || strncmp(names + i * 256, pre, sizeof(pre) - 1) != 0) {
++				continue;
++			}
++			if ((int)i == keep[0] || (int)i == keep[1]) {
++				kept++;
++				continue;
++			}
++			snprintf(child, MAXPATHLEN, "%s/%s", tmp, names + i * 256);
++			cl_rm_files(child, 0);
++		}
++	}
++	if (names != NULL) {
++		kfree_data(names, CL_MAXENT * 256);
++	}
++	if (types != NULL) {
++		kfree_data(types, CL_MAXENT);
++	}
++	if (child != NULL) {
++		kfree_data(child, MAXPATHLEN);
++	}
++	unsigned pf = cl.files;
++	uint64_t pb = cl.bytes;
++	cl_rm_files("/private/var/root/Library/Caches/com.apple.coresymbolicationd", 0);
++	uint64_t abs = mach_absolute_time() - t0, ns = 0;
++	absolutetime_to_nanoseconds(abs, &ns);
++	printf("A510F CLEAN: posterkit temp copies %u (kept %u): %u files, %llu MB; coresymbolicationd: %u files, %llu MB; %llu ms\n",
++	    copies, kept, pf, pb >> 20, cl.files - pf, (cl.bytes - pb) >> 20, ns / 1000000);
++}
++
 +static void
 +wifi_thread(__unused void *arg, __unused wait_result_t wr_)
 +{
@@ -2594,6 +2801,14 @@ new file mode 100644
 +void
 +a510f_wifi_start(void)
 +{
++	{
++		int on = 1;
++		thread_t ct;
++		PE_parse_boot_argn("a510fclean", &on, sizeof(on));
++		if (on && kernel_thread_start(cl_thread, NULL, &ct) == KERN_SUCCESS) {
++			thread_deallocate(ct);
++		}
++	}
 +	w.after_s = 0;
 +	PE_parse_boot_argn("a510fwifi", &w.after_s, sizeof(w.after_s));
 +	if (w.after_s <= 0) {

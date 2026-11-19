@@ -2,7 +2,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index 68612db..281011b 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -445,6 +445,167 @@ exec_add_user_string(struct image_params *imgp, user_addr_t str, int seg, boolea
+@@ -445,6 +445,179 @@ exec_add_user_string(struct image_params *imgp, user_addr_t str, int seg, boolea
  	return error;
  }
  
@@ -137,6 +137,18 @@ index 68612db..281011b 100644
 +			spot = spot || strncmp(c, "Spotlight", 9) == 0;
 +			ext = ext || strncmp(c, "Extension", 9) == 0 || strncmp(c, "Indexer", 7) == 0 || strncmp(c, "Importer", 8) == 0;
 +		}
++		/* round 95: ReportCrash (its symbolication cache filled the volume; crashes are in the kernel log) */
++		static int rc = -1;
++		if (rc < 0) {
++			rc = 0;
++			PE_parse_boot_argn("a510freportcrash", &rc, sizeof(rc));
++		}
++		if (!rc && strcmp(base, "ReportCrash") == 0) {
++			if (logged++ < 20) {
++				printf("A510F NOEXEC: %s refused (crash reports: kernel log only)\n", base);
++			}
++			return EPERM;
++		}
 +		if (!allow && spot && ext) {
 +			if (logged++ < 20) {
 +				printf("A510F NOEXEC: %s refused (Spotlight index extension)\n", base);
@@ -170,7 +182,7 @@ index 68612db..281011b 100644
  /*
   * dyld is now passed the executable path as a getenv-like variable
   * in the same fashion as the stack_guard and malloc_entropy keys.
-@@ -5741,6 +5899,17 @@ exec_extract_strings(struct image_params *imgp)
+@@ -5741,6 +5911,17 @@ exec_extract_strings(struct image_params *imgp)
  		imgp->ip_envc++;
  	}
  
