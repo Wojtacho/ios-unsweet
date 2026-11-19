@@ -51,6 +51,7 @@ extern void IOSleep(unsigned int milliseconds);
 extern kern_return_t thread_terminate(thread_t);
 
 void a510f_wifi_start(void);
+int a510f_pmic_op(uint8_t reg, int write, uint8_t *val);     /* a510f_touch.c (vib_touch.inc) */
 
 #define CMU_TOP_PA      0x10010000u
 #define CMU_FSYS_PA     0x13730000u
@@ -2604,6 +2605,331 @@ cl_thread(__unused void *arg, __unused wait_result_t wr_)
 	    copies, kept, pf, pb >> 20, cl.files - pf, (cl.bytes - pb) >> 20, ns / 1000000);
 }
 
+
+/*
+ * Round 96: SD card probe, read only (user: "SD card storage"). DW-MMC 2 at
+ * 0x13560000 (SPI 247), pins gpr4-0..6 function 2 (FSYS pinctrl +0x80),
+ * card detect gpa3-1 (ALIVE pinctrl 0x139B0000 +0x60), clocks CMU_TOP
+ * 0x228/0x628 (copied from mmc0) + EN_SCLK_TOP_FSYS bit 2, CMU_FSYS
+ * EN_ACLK0 bit 9 and EN_SCLK bit 7; power S2MPU03 LDO26 (vmmc 2.8 V, reg
+ * 0x47) and LDO2 (vqmmc, reg 0x2c), both "boot-on". Samsung's sdr timing
+ * <3 0 2 0>: CLKSEL ciu /4, drive 2, sample 0. SD start-up (CMD0, CMD8,
+ * ACMD41, CMD2, CMD3, CMD9, CMD7, ACMD6 4-bit, 25 MHz), then sector 0 (MBR)
+ * and the first partition's boot sector: the file system. Nothing written to
+ * the card. Boot-arg a510fsd=0: off; a510fsd=N: N s after start (default 15).
+ */
+#define SD_PA           0x13560000u
+#define PIN_ALIVE_PA    0x139B0000u
+#define TOP_MUX_FSYS2   0x228
+#define TOP_DIV_FSYS2   0x628
+#define C_RESP_LONG     (1u << 7)
+static struct {
+	vm_offset_t mmc, top, fsys, pfsys, palive;
+	uint32_t data_off, fifo_bytes, rca;
+	uint64_t sectors;
+	bool sdhc;
+} sd;
+
+static int
+sd_wait_clear(uint32_t off, uint32_t bits, uint32_t ms)
+{
+	uint64_t end = after_ms(ms);
+	while (rd(sd.mmc, off) & bits) {
+		if (mach_absolute_time() > end) {
+			return ETIMEDOUT;
+		}
+	}
+	return 0;
+}
+
+static int
+sd_clk(uint32_t div)
+{
+	wr(sd.mmc, W_CLKENA, 0);
+	wr(sd.mmc, W_CMD, C_START | C_UPD_CLK | C_PRV_WAIT);
+	int e = sd_wait_clear(W_CMD, C_START, 100);
+	wr(sd.mmc, W_CLKDIV, div);
+	wr(sd.mmc, W_CMD, C_START | C_UPD_CLK | C_PRV_WAIT);
+	e |= sd_wait_clear(W_CMD, C_START, 100);
+	wr(sd.mmc, W_CLKENA, 1);
+	wr(sd.mmc, W_CMD, C_START | C_UPD_CLK | C_PRV_WAIT);
+	e |= sd_wait_clear(W_CMD, C_START, 100);
+	return e;
+}
+
+/* one command; resp[0..3] = RESP0..3 when given; ETIMEDOUT (no response), EIO (CRC/response error) */
+static int
+sd_cmd(uint32_t c, uint32_t arg, uint32_t *resp)
+{
+	wr(sd.mmc, W_RINTSTS, I_CMD_DONE | I_CMD_ERR);
+	wr(sd.mmc, W_CMDARG, arg);
+	wr(sd.mmc, W_CMD, c | C_START | C_USE_HOLD);
+	if (sd_wait_clear(W_CMD, C_START, 100) != 0) {
+		return EBUSY;
+	}
+	uint64_t end = after_ms(500);
+	uint32_t st;
+	while (!((st = rd(sd.mmc, W_RINTSTS)) & (I_CMD_DONE | I_HLE))) {
+		if (mach_absolute_time() > end) {
+			return ETIMEDOUT;
+		}
+	}
+	wr(sd.mmc, W_RINTSTS, st & (I_CMD_DONE | I_CMD_ERR));
+	if (resp != NULL) {
+		for (int i = 0; i < 4; i++) {
+			resp[i] = rd(sd.mmc, W_RESP0 + 4u * (uint32_t)i);
+		}
+	}
+	if (st & I_RTO) {
+		return ETIMEDOUT;
+	}
+	return (st & I_CMD_ERR) ? EIO : 0;
+}
+
+/* CMD17: one 512-byte block (PIO) */
+static int
+sd_read_block(uint32_t lba, uint8_t *buf)
+{
+	if (sd_wait_clear(W_STATUS, 1u << 9, 500) != 0) {
+		return EBUSY;
+	}
+	wr(sd.mmc, W_CTRL, rd(sd.mmc, W_CTRL) | 2u);           /* FIFO reset */
+	if (sd_wait_clear(W_CTRL, 2u, 100) != 0) {
+		return EBUSY;
+	}
+	wr(sd.mmc, W_RINTSTS, 0xffffffffu);
+	wr(sd.mmc, W_BLKSIZ, 512);
+	wr(sd.mmc, W_BYTCNT, 512);
+	wr(sd.mmc, W_CMDARG, sd.sdhc ? lba : lba * 512u);
+	wr(sd.mmc, W_CMD, 17 | C_RESP_EXP | C_RESP_CRC | C_DAT_EXP | C_PRV_WAIT | C_START | C_USE_HOLD);
+	if (sd_wait_clear(W_CMD, C_START, 100) != 0) {
+		return EBUSY;
+	}
+	uint32_t got = 0, st = 0;
+	uint64_t end = after_ms(1000);
+	volatile uint8_t *fifo = (volatile uint8_t *)(sd.mmc + sd.data_off);
+	for (;;) {
+		st = rd(sd.mmc, W_RINTSTS);
+		uint32_t cnt = (rd(sd.mmc, W_STATUS) >> 17) & 0x1fffu;
+		while (cnt-- > 0 && got < 512u) {
+			uint32_t v[2] = {0, 0};
+			v[0] = *(volatile uint32_t *)fifo;
+			if (sd.fifo_bytes == 8) {
+				v[1] = *(volatile uint32_t *)(fifo + 4);
+			}
+			for (uint32_t k = 0; k < sd.fifo_bytes && got < 512u; k++) {
+				buf[got++] = ((uint8_t *)v)[k];
+			}
+		}
+		if (st & I_RXDR) {
+			wr(sd.mmc, W_RINTSTS, I_RXDR);
+		}
+		if (st & (I_CMD_ERR | I_DATA_ERR)) {
+			printf("A510F SD: read %u: rintsts 0x%x, %u bytes\n", lba, st, got);
+			return EIO;
+		}
+		if ((st & I_DATA_OVER) && got >= 512u) {
+			return 0;
+		}
+		if (mach_absolute_time() > end) {
+			printf("A510F SD: read %u timed out: rintsts 0x%x, %u bytes\n", lba, st, got);
+			return ETIMEDOUT;
+		}
+	}
+}
+
+static uint32_t
+le32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void
+sd_probe(void)
+{
+	sd.mmc = ml_io_map(SD_PA, 0x2000);
+	sd.top = ml_io_map(CMU_TOP_PA, 0x1000);
+	sd.fsys = ml_io_map(CMU_FSYS_PA, 0x1000);
+	sd.pfsys = ml_io_map(PIN_FSYS_PA, 0x1000);
+	sd.palive = ml_io_map(PIN_ALIVE_PA, 0x1000);
+	if (!sd.mmc || !sd.top || !sd.fsys || !sd.pfsys || !sd.palive) {
+		printf("A510F SD: no mappings\n");
+		return;
+	}
+	/* 0. card detect (gpa3-1: read only, the pin keeps its function) */
+	uint32_t cdcon = rd(sd.palive, 0x60), cddat = rd(sd.palive, 0x64);
+	printf("A510F SD: card detect gpa3-1 con 0x%x level %u (gpa3 dat 0x%x)\n", (cdcon >> 4) & 0xfu, (cddat >> 1) & 1u, cddat);
+
+	/* 1. power: LDO26 (vmmc) and LDO2 (vqmmc) on at 2.8 V if they are off */
+	static const uint8_t regs[2] = {0x47, 0x2c};
+	for (int i = 0; i < 2; i++) {
+		uint8_t v = 0;
+		int e = a510f_pmic_op(regs[i], 0, &v);
+		printf("A510F SD: PMIC 0x%x = 0x%x (%d)%s\n", regs[i], v, e, e == 0 && (v & 0xc0u) != 0xc0u ? ": off, switching on" : "");
+		if (e == 0 && (v & 0xc0u) != 0xc0u) {
+			uint8_t on = 0xe8;              /* [7:6] on, 0x28 = 2.8 V (1.8 V + 40 x 25 mV) */
+			(void)a510f_pmic_op(regs[i], 1, &on);
+			IOSleep(20);
+		}
+	}
+
+	/* 2. clocks (as mmc0's), pins gpr4-0..6 function 2, pulls off (external), drive 2 */
+	printf("A510F SD: before: top mux 0x%x div 0x%x en 0x%x, fsys aclk0 0x%x sclk 0x%x, gpr4 con 0x%x\n",
+	    rd(sd.top, TOP_MUX_FSYS2), rd(sd.top, TOP_DIV_FSYS2), rd(sd.top, TOP_EN_SCLK_FSYS), rd(sd.fsys, FSYS_EN_ACLK0),
+	    rd(sd.fsys, FSYS_EN_SCLK), rd(sd.pfsys, 0x80));
+	wr(sd.top, TOP_MUX_FSYS2, rd(sd.top, TOP_MUX_FSYS0));
+	wr(sd.top, TOP_DIV_FSYS2, rd(sd.top, TOP_DIV_FSYS0));
+	field(sd.top, TOP_EN_SCLK_FSYS, 2, 1, 1);
+	field(sd.fsys, FSYS_EN_ACLK0, 9, 1, 1);
+	field(sd.fsys, FSYS_EN_SCLK, 7, 1, 1);
+	for (unsigned pin = 0; pin < 7; pin++) {
+		if (pin == 2) {
+			continue;               /* gpr4-2: the controller's own card detect, unused */
+		}
+		field(sd.pfsys, 0x80, 4 * pin, 4, 2);
+		field(sd.pfsys, 0x88, 2 * pin, 2, 0);
+		field(sd.pfsys, 0x8c, 4 * pin, 4, 2);
+	}
+	IOSleep(2);
+
+	/* 3. controller */
+	uint32_t verid = rd(sd.mmc, W_VERID), hcon = rd(sd.mmc, W_HCON);
+	sd.data_off = (verid & 0xffffu) >= 0x240a ? 0x200 : 0x100;
+	sd.fifo_bytes = ((hcon >> 7) & 7u) == 2 ? 8 : 4;
+	printf("A510F SD: mmc2 verid 0x%x hcon 0x%x ctrl 0x%x\n", verid, hcon, rd(sd.mmc, W_CTRL));
+	wr(sd.mmc, W_CTRL, rd(sd.mmc, W_CTRL) | 7u);
+	if (sd_wait_clear(W_CTRL, 7u, 200) != 0) {
+		printf("A510F SD: controller reset stuck\n");
+		return;
+	}
+	wr(sd.mmc, W_PWREN, 1);
+	wr(sd.mmc, W_INTMASK, 0);
+	wr(sd.mmc, W_RINTSTS, 0xffffffffu);
+	wr(sd.mmc, W_TMOUT, 0xffffffffu);
+	wr(sd.mmc, W_FIFOTH, (2u << 28) | (31u << 16) | 32u);
+	wr(sd.mmc, W_CTYPE, 0);
+	wr(sd.mmc, W_CLKSEL, (3u << 24) | (2u << 16) | 0u);   /* Samsung sdr timing <3 0 2 0> */
+	wr(sd.mmc, W_CLKSRC, 0);
+	int ec = sd_clk(255);           /* ciu / 510: ~200 kHz for identification */
+	IOSleep(10);
+
+	/* 4. SD start-up */
+	uint32_t r[4] = {0, 0, 0, 0};
+	int e = sd_cmd(0 | C_SEND_INIT, 0, NULL);
+	IOSleep(2);
+	int e8 = sd_cmd(8 | C_RESP_EXP | C_RESP_CRC, 0x1aa, r);
+	printf("A510F SD: clock %d, CMD0 %d, CMD8 %d r7 0x%x\n", ec, e, e8, r[0]);
+	if (e8 == ETIMEDOUT && (cddat & 2u)) {
+		printf("A510F SD: no answer to CMD8: no card (or an old SD 1.x card)\n");
+	}
+	uint32_t ocr = 0;
+	int ea = ETIMEDOUT;
+	for (int t = 0; t < 100; t++) {
+		if (sd_cmd(55 | C_RESP_EXP | C_RESP_CRC, 0, r) != 0) {
+			ea = EIO;
+			break;
+		}
+		ea = sd_cmd(41 | C_RESP_EXP, (e8 == 0 ? 0x40000000u : 0) | 0x00ff8000u, r);     /* R3: no CRC */
+		ocr = r[0];
+		if (ea == 0 && (ocr & 0x80000000u)) {
+			break;
+		}
+		IOSleep(10);
+	}
+	if (!(ocr & 0x80000000u)) {
+		printf("A510F SD: ACMD41 %d ocr 0x%x: no card ready\n", ea, ocr);
+		return;
+	}
+	sd.sdhc = (ocr & 0x40000000u) != 0;
+	uint32_t cid[4] = {0, 0, 0, 0};
+	int e2 = sd_cmd(2 | C_RESP_EXP | C_RESP_LONG | C_RESP_CRC, 0, cid);
+	int e3 = sd_cmd(3 | C_RESP_EXP | C_RESP_CRC, 0, r);
+	sd.rca = r[0] >> 16;
+	uint32_t csd[4] = {0, 0, 0, 0};
+	int e9 = sd_cmd(9 | C_RESP_EXP | C_RESP_LONG | C_RESP_CRC, sd.rca << 16, csd);
+	/* RESP0..3 = CSD bits 31..0 .. 127..96 */
+	if ((csd[3] >> 30) == 1) {      /* CSD 2.0: C_SIZE = bits 69:48 */
+		uint32_t csize = ((csd[2] & 0x3fu) << 16) | (csd[1] >> 16);
+		sd.sectors = ((uint64_t)csize + 1) * 1024;
+	} else {                        /* CSD 1.0 */
+		uint32_t rbl = (csd[2] >> 16) & 0xfu;
+		uint32_t csize = ((csd[2] & 0x3ffu) << 2) | (csd[1] >> 30);
+		uint32_t mult = (csd[1] >> 15) & 7u;
+		sd.sectors = ((uint64_t)(csize + 1) << (mult + 2)) << rbl >> 9;
+	}
+	char name[6];
+	name[0] = (char)(cid[3] & 0xff);
+	name[1] = (char)(cid[2] >> 24);
+	name[2] = (char)(cid[2] >> 16);
+	name[3] = (char)(cid[2] >> 8);
+	name[4] = (char)(cid[2] & 0xff);
+	name[5] = 0;
+	for (int i = 0; i < 5; i++) {
+		if (name[i] < 0x20 || name[i] > 0x7e) {
+			name[i] = '?';
+		}
+	}
+	printf("A510F SD: card %s, %s, manufacturer 0x%x, %llu MiB (CMD2 %d CMD3 %d CMD9 %d, rca 0x%x)\n", name,
+	    sd.sdhc ? "SDHC/SDXC" : "SDSC", cid[3] >> 24, sd.sectors >> 11, e2, e3, e9, sd.rca);
+	int e7 = sd_cmd(7 | C_RESP_EXP | C_RESP_CRC, sd.rca << 16, r);
+	int e55 = sd_cmd(55 | C_RESP_EXP | C_RESP_CRC, sd.rca << 16, r);
+	int e6 = e55 == 0 ? sd_cmd(6 | C_RESP_EXP | C_RESP_CRC, 2, r) : e55;   /* ACMD6: 4-bit */
+	if (e6 == 0) {
+		wr(sd.mmc, W_CTYPE, 1);
+	}
+	int e16 = sd.sdhc ? 0 : sd_cmd(16 | C_RESP_EXP | C_RESP_CRC, 512, r);
+	int ek = sd_clk(2);             /* ciu / 4 = 25 MHz (default speed) */
+	printf("A510F SD: CMD7 %d, 4-bit %d, CMD16 %d, 25 MHz %d\n", e7, e6, e16, ek);
+
+	/* 5. what is on it: MBR (or GPT) and the first partition's boot sector */
+	static uint8_t b[512];
+	int er = sd_read_block(0, b);
+	if (er != 0) {
+		printf("A510F SD: sector 0: %d\n", er);
+		return;
+	}
+	printf("A510F SD: sector 0 signature 0x%02x%02x\n", b[511], b[510]);
+	uint32_t first = 0;
+	for (int i = 0; i < 4; i++) {
+		const uint8_t *pe = b + 446 + 16 * i;
+		if (pe[4] == 0) {
+			continue;
+		}
+		printf("A510F SD: partition %d type 0x%02x start %u size %u MiB\n", i + 1, pe[4], le32(pe + 8), le32(pe + 12) >> 11);
+		if (first == 0 && pe[4] != 0xee) {
+			first = le32(pe + 8);
+		}
+		if (pe[4] == 0xee) {
+			printf("A510F SD: GPT (protective MBR)\n");
+		}
+	}
+	if (first == 0 && b[510] == 0x55 && b[511] == 0xaa && (memcmp(b + 3, "EXFAT   ", 8) == 0 || memcmp(b + 82, "FAT32   ", 8) == 0)) {
+		first = 0;          /* no partition table: the file system starts at sector 0 */
+		printf("A510F SD: no partition table (superfloppy)\n");
+	} else if (first != 0 && sd_read_block(first, b) != 0) {
+		return;
+	}
+	const char *fs = memcmp(b + 3, "EXFAT   ", 8) == 0 ? "exFAT" : memcmp(b + 82, "FAT32   ", 8) == 0 ? "FAT32" :
+	    memcmp(b + 54, "FAT16   ", 8) == 0 ? "FAT16" : memcmp(b + 3, "NTFS    ", 8) == 0 ? "NTFS" : "unknown";
+	if (strcmp(fs, "unknown") == 0 && sd_read_block(first + 2, b) == 0 && ((b[0] == 'H' && b[1] == '+') || (b[0] == 'H' && b[1] == 'X'))) {
+		fs = "HFS+";
+	}
+	printf("A510F SD: file system at sector %u: %s\n", first, fs);
+}
+
+static void
+sd_thread(__unused void *arg, __unused wait_result_t wr_)
+{
+	int after = 15;
+	PE_parse_boot_argn("a510fsd", &after, sizeof(after));
+	if (after <= 0) {
+		return;
+	}
+	IOSleep((unsigned)after * 1000u);
+	printf("A510F SD: probe at %d s\n", after);
+	sd_probe();
+}
+
 static void
 wifi_thread(__unused void *arg, __unused wait_result_t wr_)
 {
@@ -2654,6 +2980,12 @@ a510f_wifi_start(void)
 		PE_parse_boot_argn("a510fclean", &on, sizeof(on));
 		if (on && kernel_thread_start(cl_thread, NULL, &ct) == KERN_SUCCESS) {
 			thread_deallocate(ct);
+		}
+	}
+	{
+		thread_t st;
+		if (kernel_thread_start(sd_thread, NULL, &st) == KERN_SUCCESS) {
+			thread_deallocate(st);
 		}
 	}
 	w.after_s = 0;

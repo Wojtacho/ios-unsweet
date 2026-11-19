@@ -26,9 +26,51 @@ a510f_vibrate(uint32_t ms)
 	vib_until = mach_absolute_time() + abs;
 }
 
+/*
+ * Round 96: PMIC register requests from other threads (the SD probe: LDO26
+ * vmmc, LDO2 vqmmc). The touch thread owns the PMIC bus, so it serves them
+ * here. a510f_pmic_op() waits up to 2 s; -1: not served.
+ */
+static volatile int pmic_req_reg = -1, pmic_req_write, pmic_req_err;
+static volatile uint8_t pmic_req_val;
+int a510f_pmic_op(uint8_t reg, int write, uint8_t *val);
+
+int
+a510f_pmic_op(uint8_t reg, int write, uint8_t *val)
+{
+	pmic_req_val = *val;
+	pmic_req_write = write;
+	pmic_req_err = -1;
+	pmic_req_reg = reg;
+	for (int t = 0; t < 200 && pmic_req_reg >= 0; t++) {
+		IOSleep(10);
+	}
+	if (pmic_req_reg >= 0) {
+		pmic_req_reg = -1;
+		return -1;
+	}
+	*val = pmic_req_val;
+	return pmic_req_err;
+}
+
+static void
+pmic_serve(void)
+{
+	int reg = pmic_req_reg;
+	if (reg < 0) {
+		return;
+	}
+	uint8_t v = pmic_req_val;
+	int e = pmic_req_write ? pmic_write((uint8_t)reg, v) : pmic_read((uint8_t)reg, &v);
+	pmic_req_val = v;
+	pmic_req_err = e;
+	pmic_req_reg = -1;
+}
+
 static void
 vib_poll(void)
 {
+	pmic_serve();
 	static int enabled = -1;
 	if (enabled < 0) {
 		int v = 1;
