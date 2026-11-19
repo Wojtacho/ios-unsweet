@@ -15,7 +15,7 @@ new file mode 100644
 index 0000000..ad48a94
 --- /dev/null
 +++ b/bsd/dev/a510f_touch.c
-@@ -0,0 +1,1579 @@
+@@ -0,0 +1,1621 @@
 +/*
 + * A510F (Galaxy A5 2016, Exynos 7580) touchscreen: Zinitix ZT7538 (BT532
 + * protocol) at 0x20 on the s3c2410-style I2C2 controller (0x13850000, pins
@@ -1151,10 +1151,12 @@ index 0000000..ad48a94
 +/*
 + * A510F boot screen (boot-arg sweetboot=1, round 50): no console text, the
 + * Apple logo on black until the GUI's first frame (SweetFramebuffer calls
-+ * a510f_bootscreen_done). Round 92 (user): no progress bar of ours any more
-+ * (only iOS's own), every buffer DECON shows is cleared first (a console
-+ * line could stay in the other one), and the boot screen stops and clears
-+ * when the display goes off (a510f_bootscreen_display).
++ * a510f_bootscreen_done). Round 92 (user): every buffer DECON shows is
++ * cleared first (a console line could stay in the other one). Round 94
++ * (user): the logo and an iOS-style bar from the start to the end of the
++ * boot (XNU's macOS-style meter stays off, 0140); if iOS turns the display
++ * off before its first frame, the bar runs to the end and the screen fades
++ * out instead of going black mid-boot.
 + *   logo: 8-bit coverage bitmap at the end of the OTA partition (sweet_mmc.c,
 + *         written from the PC by twrp-write/auto.py logo: the glyph U+F8FF of
 + *         the phone's own Helvetica, never in git), drawn white on black
@@ -1174,20 +1176,21 @@ index 0000000..ad48a94
 +	uint64_t last_floor_at;
 +	bool drawn_logo;
 +	volatile int off;                  /* the display went off before the GUI's first frame */
++	uint32_t fade;                     /* round 94: fade-out steps after an early display-off */
 +} bs;
 +
-+#define BS_BAR_W        420u
-+#define BS_BAR_H        8u
-+#define BS_BAR_TRACK    0xff3a3a3au
++#define BS_BAR_W        300u            /* iOS's boot bar: thin, under the logo */
++#define BS_BAR_H        6u
++#define BS_BAR_TRACK    0xff404040u
 +#define BS_BAR_FILL     0xffffffffu
 +
-+static __unused void
++static void
 +bs_bar(uint32_t pm)
 +{
 +	if (bs.fb == NULL) {
 +		return;
 +	}
-+	uint32_t x0 = (bs.w - BS_BAR_W) / 2, y0 = bs.h / 2 + 330;
++	uint32_t x0 = (bs.w - BS_BAR_W) / 2, y0 = bs.h / 2 + 300;
 +	uint32_t fill = BS_BAR_W * (pm > 1000 ? 1000 : pm) / 1000;
 +	for (uint32_t y = 0; y < BS_BAR_H; y++) {
 +		/* rounded ends: radius BS_BAR_H / 2 */
@@ -1239,6 +1242,24 @@ index 0000000..ad48a94
 +	}
 +}
 +
++/* round 94: scale every pixel of the boot screen by k/256 (fade-out) */
++static void
++bs_dim(uint32_t k)
++{
++	if (bs.fb == NULL) {
++		return;
++	}
++	uint32_t y0 = bs.h / 2 - 160, y1 = bs.h / 2 + 320;   /* the logo and the bar */
++	for (uint32_t y = y0; y < y1 && y < bs.h; y++) {
++		volatile uint32_t *row = bs.fb + (uint64_t)y * bs.stride;
++		for (uint32_t x = 0; x < bs.w; x++) {
++			uint32_t v = row[x] & 0xffu;
++			v = v * k / 256;
++			row[x] = 0xff000000u | (v << 16) | (v << 8) | v;
++		}
++	}
++}
++
 +static void
 +bs_thread(void *arg, wait_result_t wr)
 +{
@@ -1268,7 +1289,7 @@ index 0000000..ad48a94
 +	bs.fb = (volatile uint32_t *)va;
 +	uintptr_t cleared = 0;
 +	printf("A510F BOOT: boot screen %ux%u\n", bs.w, bs.h);
-+	while (!bs.done) {
++	while (!bs.done || (bs.off && bs.fade < 9)) {
 +		/* the shown buffer can change (double buffering): clear each new one once, then the logo */
 +		uintptr_t cur = sweet_fb_boot_canvas(&w, &h, &rb);
 +		if (cur != 0 && w == bs.w && h == bs.h && rb == bs.stride * 4) {
@@ -1278,17 +1299,38 @@ index 0000000..ad48a94
 +			bs_clear();
 +			cleared = (uintptr_t)bs.fb;
 +		}
++		if (bs.off) {
++			/* iOS turned the display off before its first frame: finish the bar, fade, stop */
++			if (bs.shown_pm < 1000) {
++				bs.shown_pm = MIN(bs.shown_pm + 60, 1000u);
++				bs_logo();
++				bs_bar(bs.shown_pm);
++				IOSleep(40);
++				continue;
++			}
++			if (bs.fade < 8) {
++				bs.fade++;
++				bs_dim(256 - 32 * bs.fade);
++				IOSleep(40);
++				continue;
++			}
++			bs_clear();
++			break;
++		}
 +		if (!bs.done) {
 +			bs_logo();
 +		}
-+		/* the milestones still move a counter (logged), nothing is drawn for it */
-+		if (bs.shown_pm < bs.floor_pm) {
-+			bs.shown_pm = bs.floor_pm;
++		/* toward the floor quickly, then creep: +1 permille per 150 ms, at most 60 past the floor */
++		uint32_t target = bs.floor_pm;
++		if (bs.shown_pm < target) {
++			bs.shown_pm += (target - bs.shown_pm + 7) / 8;
++		} else if (bs.shown_pm < target + 60 && bs.shown_pm < 980) {
++			bs.shown_pm++;
++		}
++		if (!bs.done) {
++			bs_bar(bs.shown_pm);
 +		}
 +		IOSleep(150);
-+	}
-+	if (bs.off) {
-+		bs_clear();     /* the display went off first: nothing of ours may show on wake */
 +	}
 +	printf("A510F BOOT: done at %u permille, %u programs%s\n", bs.shown_pm, bs.execs,
 +	    bs.off ? ", display off: cleared" : "");
@@ -1367,7 +1409,7 @@ index 0000000..ad48a94
 +a510f_bootscreen_display(int off)
 +{
 +	if (off && bs.on && !bs.done) {
-+		bs.off = 1;
++		bs.off = 1;     /* bs_thread runs the bar to the end, fades out, then stops */
 +		bs.done = 1;
 +	}
 +}

@@ -1,0 +1,19 @@
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -3188,6 +3188,15 @@
+ 	void    * new_buffer;
+ 	boolean_t stashBackbuffer;
+ 	int flags = vinfo.v_rotate;
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	{
++		/* A510F boot screen (round 94): its own iOS-style bar; the macOS meter stays off */
++		extern volatile int a510f_bootscreen_on;        /* bsd/dev/a510f_touch.c */
++		if (a510f_bootscreen_on) {
++			new_value = 0;
++		}
++	}
++#endif
+ 
+ 	stashBackbuffer = FALSE;
+ 	new_buffer = NULL;

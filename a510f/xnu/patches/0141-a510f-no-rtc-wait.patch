@@ -1,0 +1,22 @@
+diff --git a/iokit/Kernel/IOStartIOKit.cpp b/iokit/Kernel/IOStartIOKit.cpp
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -77,6 +77,16 @@
+ 	t.tv_sec = 30;
+ 	t.tv_nsec = 0;
+ 
+-// RTC is not present on this target
+-#ifndef BCM2837
++// RTC is not present on this target
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * A510F (round 94): no RTC driver publishes IORTC here, so this waited the
++	 * full 30 s on every boot (the calendar came up as "30"). The calendar is
++	 * set from the build time later (a510f_clock_floor). sweetrtcwait=1: wait.
++	 */
++	uint32_t sweet_rtc_wait = 0;
++	(void)PE_parse_boot_argn("sweetrtcwait", &sweet_rtc_wait, sizeof(sweet_rtc_wait));
++	if (sweet_rtc_wait)
++#endif
++#ifndef BCM2837
+ 	IOService::waitForService(

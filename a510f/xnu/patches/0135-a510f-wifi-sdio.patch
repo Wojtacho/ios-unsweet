@@ -96,7 +96,7 @@ diff --git a/bsd/dev/a510f_touch.c b/bsd/dev/a510f_touch.c
  		if (attn_low()) {
  			zt_poll_once();
  			if (++lows == 1 || lows % 500 == 0) {
-@@ -1368,6 +1431,10 @@
+@@ -1410,6 +1473,10 @@
  		extern void a510f_bg_start(void);     /* osfmk/arm64/a510f_prof.c */
  		a510f_bg_start();
  	}
