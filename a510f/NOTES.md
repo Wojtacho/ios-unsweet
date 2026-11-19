@@ -1752,3 +1752,17 @@ ReportCrash refused. Boot screen: logo + our bar only (no XNU meter line),
 black after the early display-off. Next: SD card (dwmmc2 0x13560000 SPI 247,
 gpr4-0..6 func 2 at FSYS pinctrl +0x80, card detect gpa3-1, clocks 204/210/
 215/216, sdr timing <3 0 2 0>); folder icon square; switcher background.
+
+## 2026-11-19 (evening): paused (user reinstalls the PC with CachyOS)
+
+On the phone (TWRP): BOOT round 96 (E:\Claude\a510f-ios-boot-r96.tar), sweetgl
+round 94 (region sha 735fbbc8...), OTA logo = iOS's own 169x206.
+Building when paused: round 97 (run 44555108423): SD probe with the FSYS1
+path gates (round 96: every mmc2 register read 0; LDO26 vmmc was off and
+was switched on; card detect gpa3-1 level 0 without a card). No SD card in
+the phone yet. Helper scripts (gh.py, rerunwait.py, joblog.py, dispatch.py,
+qcdis.py, psdis.py, bb.py, ...) copied to E:\Claude\twrp-write\ci-tools
+(not in git). Tools assume Windows paths (adb at W:\AdbPlatform,
+E:/ paths): adjust after the switch to Linux.
+Open: folder icon square, switcher background, SD card (block device +
+file system), Wi-Fi interrupts/DMA, remove a510fsbsql when no longer needed.
