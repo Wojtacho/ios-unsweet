@@ -2476,7 +2476,12 @@ cl_unlink(const char *path)
 	vnode_t vp = NULLVP;
 	off_t size = 0;
 	if (vnode_lookup(path, 0, &vp, ctx) == 0) {
-		(void)vnode_size(vp, &size, ctx);
+		struct vnode_attr va;
+		VATTR_INIT(&va);
+		VATTR_WANTED(&va, va_data_size);
+		if (vnode_getattr(vp, &va, ctx) == 0 && VATTR_IS_SUPPORTED(&va, va_data_size)) {
+			size = (off_t)va.va_data_size;
+		}
 		vnode_put(vp);
 	}
 	if (unlink1(ctx, NULLVP, CAST_USER_ADDR_T(path), UIO_SYSSPACE, 0) == 0) {
