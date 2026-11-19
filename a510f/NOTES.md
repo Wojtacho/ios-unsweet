@@ -1712,3 +1712,20 @@ logWidgetDidAppear); then the folder screenshots (fix untested: SpringBoard
 was restarting at the folder step); logo size/position at the hand-off.
 Round 92: Wi-Fi 25 MHz (no CCCR high speed), 0 data CRC errors; crashing
 processes 44 -> 17 with the Spotlight block.
+
+## 2026-11-19: rounds 93-94
+
+- Round 93: duetexpertd refused -> worse (18 SpringBoard exits: one SIGSEGV
+  at start, then exit(1) on every ATX store open: the store is corrupt on
+  disk). Reverted. Boot logo now iOS's own (169x206, centred at y 962).
+  XNU's progress meter (macOS style: MASTER.arm64.sweet is a macOS target)
+  drew the thin line under the logo and kept drawing after display-off.
+- Every boot waited 30 s in IOKitInitializeTime for IORTC (calendar came up
+  "30"): 0141 skips it (sweetrtcwait=1 restores).
+- Round 94 (d077d4a): 0141; 0140 XNU meter off; boot screen logo + 300x6
+  iOS-style bar from start to end, early display-off finishes the bar and
+  fades out; sweetgl in SpringBoard only registers SQLITE_CONFIG_LOG
+  (a510fsbsql=1, SWEETGL_SQLLOG=1; lines "SWEETSQL ..." in the log) to get
+  SQLite's own corruption reports; ATX store deleted once more
+  (a510fatxreset=1, user approved; remove next round). User wants the
+  permanent fix for the corruption, not auto-deleting.
