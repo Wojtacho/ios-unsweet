@@ -2286,6 +2286,10 @@ sgl_install_fmt_hook(void)
 # the colour is lost in the downscale steps. Each logged draw into a texture
 # is followed by a readback of what it wrote ("BDGL   -> tex ... now"), at
 # the centre and quarter points of its scissor box.
+# Round 104: round 103 found the step: the folder capture's first downscale
+# (program 61, screen -> 21x22) writes grey with alpha 0 (26262600) from a
+# screen holding the wallpaper: it samples nothing, then adds the material's
+# brightness. BDSH now also dumps the capture programs' samplers and shaders.
 edit('eagl.c', [
     ('''static unsigned char tex_rt[TEXSZ_MAX];         /* attached to a framebuffer (round 65 probe) */''',
      '''static unsigned char tex_rt[TEXSZ_MAX];         /* attached to a framebuffer (round 65 probe) */
@@ -2439,13 +2443,13 @@ sgl_bd_gl(GLenum mode, GLsizei count)
 	    nat_fb(GL_DRAW_FRAMEBUFFER) ? " native" : "", prog, mode, count, glIsEnabled(GL_BLEND), bs, bdst, eq, cm[0], cm[1],
 	    cm[2], cm[3], t0, s0, t0 < 8192 ? tex_last_draw[t0] : 0, t1, s1);
 	/* round 101: for a material draw, each sampler's unit and texture, and the fragment shader (once per program) */
-	static GLint shown_prog[8];
+	static GLint shown_prog[16];
 	static int nshown;
 	bool seen_prog = false;
 	for (int i = 0; i < nshown; i++) {
 		seen_prog |= shown_prog[i] == prog;
 	}
-	if (bd_what != 'd' || seen_prog || nshown >= 8 || prog <= 0) {
+	if (seen_prog || nshown >= 16 || prog <= 0) {      /* round 104: capture programs too */
 		return;
 	}
 	shown_prog[nshown++] = prog;
