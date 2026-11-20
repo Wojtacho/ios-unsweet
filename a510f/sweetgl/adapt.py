@@ -2517,3 +2517,139 @@ static void sgl_bd_copy(const char *what, GLint dest, GLint x, GLint y, GLsizei 
 		pend_clear_before_copy(nm, "blit");
 	}'''),
 ])
+
+# Round 102: the folder icon's frosted square. Round 101: its material draw
+# samples a 23x23 IOSurface (60 pt x 3 x backdrop scale 0.125) through a CPU
+# copy (kind 'c') holding ff000000. Surfaces whose row pitch is not a
+# multiple of 64 bytes cannot be imported, so bind_surface copied the CPU
+# memory into the bound texture on every bind, for rendering (attachImage)
+# and sampling alike: what the GPU rendered into such a surface was lost at
+# the next bind. Now each such surface gets one GPU resource (a shadow,
+# cached by id/size/format/base) that every bind shares; its CPU memory is
+# uploaded when the shadow is made and when the surface's seed moves (a CPU
+# writer). Also saves the re-copy on every bind. SWEETGL_SHADOW=0: old copy.
+edit('eagl.c', [
+    ('''/* The surface's pages as the storage of the texture bound to target. */
+static bool
+bind_surface(IOSurfaceRef s, GLenum target, GLenum format, GLenum type, uint32_t plane, const char *why)
+{''', '''/* round 102 (adapt.py): GPU shadows of surfaces that cannot be imported (pitch % 64) */
+struct shadow {
+	uint32_t id, seed, w, h;
+	enum pipe_format format;
+	uintptr_t base;
+	struct pipe_resource *res;
+	uint64_t used;
+};
+#define SHADOW_MAX 160
+static struct shadow shadows[SHADOW_MAX];
+static uint64_t shadow_clock;
+static int shadow_on = -1;
+
+static bool
+shadow_bind(IOSurfaceRef s, GLenum target, struct sgl_image *img, GLenum format, GLenum type, size_t w, size_t h,
+    size_t pitch, const char *why)
+{
+	if (shadow_on < 0) {
+		const char *e = getenv("SWEETGL_SHADOW");
+		shadow_on = !(e != NULL && e[0] == '0');
+	}
+	size_t bpe = IOSurfaceGetBytesPerElement(s);
+	const void *base = IOSurfaceGetBaseAddress(s);
+	if (!shadow_on || target != GL_TEXTURE_2D || img->format == PIPE_FORMAT_NONE || base == NULL || bpe == 0 ||
+	    pitch % bpe != 0 || w == 0 || h == 0 || w > 4096 || h > 4096) {
+		return false;
+	}
+	uint32_t id = IOSurfaceGetID(s), seed = IOSurfaceGetSeed(s);
+	int slot = -1, empty = -1, lru = -1;
+	for (int i = 0; i < SHADOW_MAX; i++) {
+		struct shadow *e = &shadows[i];
+		if (e->res == NULL) {
+			empty = empty < 0 ? i : empty;
+		} else if (e->id == id && e->w == w && e->h == h && e->format == img->format && e->base == (uintptr_t)base) {
+			slot = i;
+			break;
+		} else if (lru < 0 || e->used < shadows[lru].used) {
+			lru = i;
+		}
+	}
+	bool fresh = false;
+	if (slot < 0) {
+		struct pipe_screen *screen = sweetgl_screen();
+		struct pipe_resource templ = {
+			.target = PIPE_TEXTURE_2D,
+			.format = img->format,
+			.width0 = (uint32_t)w,
+			.height0 = (uint16_t)h,
+			.depth0 = 1,
+			.array_size = 1,
+			.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET,
+		};
+		struct pipe_resource *res = screen != NULL ? screen->resource_create(screen, &templ) : NULL;
+		if (res == NULL) {
+			return false;
+		}
+		slot = empty >= 0 ? empty : lru;
+		pipe_resource_reference(&shadows[slot].res, NULL);
+		shadows[slot] = (struct shadow){id, seed, (uint32_t)w, (uint32_t)h, img->format, (uintptr_t)base, res, 0};
+		fresh = true;
+	}
+	struct shadow *sh = &shadows[slot];
+	bool upload = fresh || sh->seed != seed;
+	sh->seed = seed;
+	sh->used = ++shadow_clock;
+	img->res = NULL;
+	pipe_resource_reference(&img->res, sh->res);
+	copy_forget(unit_held[active_unit()]);
+	while (glGetError() != GL_NO_ERROR) {
+	}
+	_mesa_EGLImageTargetTexture2DOES(target, (GLeglImageOES)img);
+	pipe_resource_reference(&img->res, NULL);
+	GLenum e = glGetError();
+	if (e == GL_NO_ERROR && upload) {
+		GLint row = 0, align = 4, skip_rows = 0, skip_pixels = 0;
+		glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row);
+		glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
+		glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skip_rows);
+		glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skip_pixels);
+		glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(pitch / bpe));
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+		glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+		glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+		glTexSubImage2D(target, 0, 0, 0, (GLsizei)w, (GLsizei)h, format, type, base);
+		e = glGetError();
+		glPixelStorei(GL_UNPACK_ROW_LENGTH, row);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, align);
+		glPixelStorei(GL_UNPACK_SKIP_ROWS, skip_rows);
+		glPixelStorei(GL_UNPACK_SKIP_PIXELS, skip_pixels);
+	}
+	tex_size_bound(target, 0, (GLsizei)w, (GLsizei)h);
+	GLint bt = 0;
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &bt);
+	if (bt > 0 && bt < TEXSZ_MAX) {
+		nat_tex[bt] = 0;
+	}
+	sgl_tex_note(bt, 'h', id, IOSurfaceGetPixelFormat(s), w, h, base, pitch, bpe);
+	static unsigned told;
+	bool small = w <= 64 && h <= 64;
+	if (e != GL_NO_ERROR || told < 30 || (small && told < 90)) {
+		told++;
+		sweet_drm_log("sweetgl: %s: surface %u %zux%zu pitch %zu fmt %#x/%#x -> GPU shadow %d (tex %d, %s)%s%s", why, id,
+		    w, h, pitch, format, type, slot, bt, fresh ? "new" : upload ? "re-uploaded" : "kept",
+		    e != GL_NO_ERROR ? ": GL error, copying instead" : "", strcmp(why, "attachImage") == 0 ? " RENDER TARGET" : "");
+	}
+	return e == GL_NO_ERROR;
+}
+
+/* The surface's pages as the storage of the texture bound to target. */
+static bool
+bind_surface(IOSurfaceRef s, GLenum target, GLenum format, GLenum type, uint32_t plane, const char *why)
+{'''),
+    ('''		if (format != 0) {
+			return copy_surface(s, target, format, type, w, h, pitch, why);
+		}''', '''		if (format != 0 && shadow_bind(s, target, &img, format, type, w, h, pitch, why)) {
+			return true;
+		}
+		if (format != 0) {
+			return copy_surface(s, target, format, type, w, h, pitch, why);
+		}'''),
+])

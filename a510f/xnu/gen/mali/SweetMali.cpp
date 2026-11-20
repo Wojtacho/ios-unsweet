@@ -604,6 +604,7 @@ extern "C" void thread_deallocate(thread_t);
 static IOLock *g_qlock;
 static struct { uint64_t jc; uint32_t req; uint64_t t; uint32_t fbd[2048]; bool fbd_ok; } g_q[MALI_QLEN];
 static uint32_t g_q_delay_us;                   /* sweetmali_qdelay: wait before each job (test) */
+static uint64_t g_q_empty_us, g_q_lockw_us;     /* worker: asleep on an empty queue, waiting for g_lock (round 102) */
 static uint32_t g_q_dumps;
 
 extern "C" uint64_t phystokv(uint64_t pa);       /* osfmk/arm/pmap.c */
@@ -684,8 +685,15 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 {
 	IOLockLock(g_qlock);
 	for (;;) {
+		uint64_t idle0 = mach_absolute_time();
 		while (g_q_done == g_q_submitted) {
 			IOLockSleep(g_qlock, &g_q_submitted, THREAD_UNINT);
+		}
+		{
+			/* round 102: the GPU's idle time, split: nothing queued vs. waiting for g_lock */
+			uint64_t ns = 0;
+			absolutetime_to_nanoseconds(mach_absolute_time() - idle0, &ns);
+			g_q_empty_us += ns / 1000;
 		}
 		uint64_t seq = g_q_done + 1;
 		uint64_t jc = g_q[seq % MALI_QLEN].jc;
@@ -700,7 +708,12 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 		IOLockUnlock(g_qlock);
 		uint32_t status = 0;
 		uint64_t us = 0;
-		IOLockLock(g_lock);
+		{
+			uint64_t l0 = mach_absolute_time(), ns = 0;
+			IOLockLock(g_lock);
+			absolutetime_to_nanoseconds(mach_absolute_time() - l0, &ns);
+			g_q_lockw_us += ns / 1000;
+		}
 		if (g_q_delay_us) {
 			IODelay(g_q_delay_us);
 		}
@@ -897,9 +910,10 @@ mali_queue_worker(__unused void *arg, __unused int wres)
 		}
 		absolutetime_to_nanoseconds(now - g_q_t0, &ns);
 		if (ns >= 2000000000ull) {
-			IOLog("SWEET MALI: queue %llu ms: %u jobs (%u fragment, %u failed), GPU busy %llu ms (max job %llu ms), deepest queue %u, waits %llu ms\n",
+			IOLog("SWEET MALI: queue %llu ms: %u jobs (%u fragment, %u failed), GPU busy %llu ms (max job %llu ms), deepest queue %u, waits %llu ms, queue empty %llu ms, g_lock wait %llu ms\n",
 			    ns / 1000000, g_q_n, g_q_frag, g_q_failed, g_q_busy_us / 1000, g_q_max_us / 1000,
-			    g_q_depth_max, g_q_wait_us / 1000);
+			    g_q_depth_max, g_q_wait_us / 1000, g_q_empty_us / 1000, g_q_lockw_us / 1000);
+			g_q_empty_us = g_q_lockw_us = 0;
 			g_q_t0 = 0;
 			g_q_n = g_q_frag = g_q_failed = g_q_depth_max = 0;
 			g_q_busy_us = g_q_max_us = g_q_wait_us = 0;
