@@ -2491,7 +2491,7 @@ sgl_bd_gl(GLenum mode, GLsizei count)
 		}
 		glGetShaderSource(sh[k], len + 1, NULL, src);
 		for (char *q = src; *q; q++) {
-			if (*q == '\n') {
+			if (*q == '\\n') {
 				*q = '|';       /* round 105: the log keeps one line per call */
 			}
 		}
