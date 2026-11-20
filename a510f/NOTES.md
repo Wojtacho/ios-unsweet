@@ -1766,3 +1766,31 @@ qcdis.py, psdis.py, bb.py, ...) copied to E:\Claude\twrp-write\ci-tools
 E:/ paths): adjust after the switch to Linux.
 Open: folder icon square, switcher background, SD card (block device +
 file system), Wi-Fi interrupts/DMA, remove a510fsbsql when no longer needed.
+
+## 2026-11-20: back on Linux (CachyOS), rounds 97-98
+
+- PC reinstalled (Windows -> CachyOS). E:\Claude is now /mnt/dane2/Claude.
+  twrp-write tools use plain `adb` (ADB env var overrides); auto.py restarts
+  the adb server when the phone seems gone. Needs python-pillow and
+  python-capstone.
+- Linux and TWRP: with MTP on, the phone offers USB config 1 (MTP only) and
+  refuses config 2 (MTP+ACM+ADB) with EPIPE, so there is no ADB. RECOVERY now
+  holds an ADB-only TWRP (user approved): init.recovery.usb.rc's mtp,adb
+  block sets `functions adb`. The original is in
+  twrp-write/recovery-backup-twrp.img (sha a27437f8...), the new one is
+  twrp-write/twrp-adbonly.img (sha fb1935f6...).
+- Round 97 (kernel run 44555108423, sweetgl round 94): SD probe, no card.
+  Stable: 0 SpringBoard exits, cleanup found nothing new. Wi-Fi connects (DHCP
+  192.168.0.70). Folder icon square missing; open folder panel missing (round
+  94 had a flat blue panel: timing-dependent); switcher background black.
+  RAM: free 19-49 MB, wired up to 531 MB. During swipes CalendarWidgetExtension
+  is the top CPU user.
+- Round 98 (sweetgl run 44782763652, region sha f619ea3a..., kernel still
+  r97): QuartzCore hooks at the BackdropLayer draw (render_subclass visitor,
+  0x1882f3798) and capture_backdrop (0x188318a64) log "sweetgl: BD draw|cap"
+  lines (layer size, group, pass ids, buffer, context, surface). capture only
+  runs when group+0x1b0 == the renderer's pass id ([R+8]+0xe0); guess: the
+  folder icon backdrop sits in a masked offscreen pass. Script
+  twrp-write/scripts/round98.txt (Safari types apple.com: no favourites).
+  Round 98 was running when the PC restarted: pull with
+  `python3 auto.py pull out/r98`.
