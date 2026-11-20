@@ -2265,18 +2265,24 @@ sgl_install_fmt_hook(void)
 	if (trace_left > 0) {'''),
 ])
 
-# Round 99: round 98 showed CA captures and draws every backdrop (folder icon
+# Round 99/100: round 98 showed CA captures and draws every backdrop (folder icon
 # 60x60, open folder panel 318x340: "capture", "ok"), yet nothing shows. So
 # look at the GL level: a small backdrop draw or capture (<= 400x400 pt) arms
 # a log of the next GL draws (draw: 4, capture: 10; each size and kind at most
 # 3 times, 5 s apart; 160 lines): target, program, blend, colour mask, and
 # pixels read back from the textures on units 0 and 1 ("sweetgl: BDGL ...").
+# Round 100: round 99's final folder draw sampled a 23x23 texture holding
+# ff000000 that no logged draw had written. Now: the whole capture chain (40
+# draws), draws sweetgl skips (0x26) included (logged from ring_note); copies
+# and blits into small textures ("BDCP", pixels before/after); and ring_note's
+# FBO attachment cache, which only re-reads when the FBO number changes while
+# CA re-attaches textures to the same FBO ("STALE att cache").
 edit('eagl.c', [
     ('''static unsigned char tex_rt[TEXSZ_MAX];         /* attached to a framebuffer (round 65 probe) */''',
      '''static unsigned char tex_rt[TEXSZ_MAX];         /* attached to a framebuffer (round 65 probe) */
 
 /* round 99 (adapt.py): GL draws right after a small backdrop draw/capture */
-static int bd_arm, bd_budget = 160, bd_w, bd_h;
+static int bd_arm, bd_budget = 400, bd_w, bd_h, bd_copies = 150;
 static char bd_what;
 
 static void
@@ -2303,7 +2309,7 @@ sgl_bd_arm_for(char what, int w, int h)
 	}
 	seen[i].n++;
 	seen[i].last = ts.tv_sec;
-	bd_arm = what == 'c' ? 10 : 4;
+	bd_arm = what == 'c' ? 40 : 4;
 	bd_what = what;
 	bd_w = w;
 	bd_h = h;
@@ -2367,20 +2373,94 @@ sgl_bd_gl(GLenum mode, GLsizei count)
 	char s0[64], s1[64];
 	sgl_bd_tex(t0, s0);
 	sgl_bd_tex(t1, s1);
-	sweet_drm_log("sweetgl: BDGL %s %dx%d: vp %d,%d %dx%d sc %d %d,%d %dx%d fb %d att %d (%dx%d%s) prog %d mode %#x n %d "
+	sweet_drm_log("sweetgl: BDGL %s %dx%d%s: vp %d,%d %dx%d sc %d %d,%d %dx%d fb %d att %d (%dx%d%s) prog %d mode %#x n %d "
 	    "blend %d %#x/%#x eq %#x mask %d%d%d%d | u0 %u %s last-draw %u | u1 %u %s",
-	    bd_what == 'c' ? "cap" : "draw", bd_w, bd_h, vp[0], vp[1], vp[2], vp[3], glIsEnabled(GL_SCISSOR_TEST), sc[0], sc[1],
+	    bd_what == 'c' ? "cap" : "draw", bd_w, bd_h, sgl_skip_draw ? " SKIPPED(0x26)" : "", vp[0], vp[1], vp[2], vp[3], glIsEnabled(GL_SCISSOR_TEST), sc[0], sc[1],
 	    sc[2], sc[3], fb, att, att > 0 && att < TEXSZ_MAX ? tex_w[att] : 0, att > 0 && att < TEXSZ_MAX ? tex_h[att] : 0,
 	    nat_fb(GL_DRAW_FRAMEBUFFER) ? " native" : "", prog, mode, count, glIsEnabled(GL_BLEND), bs, bdst, eq, cm[0], cm[1],
 	    cm[2], cm[3], t0, s0, t0 < 8192 ? tex_last_draw[t0] : 0, t1, s1);
+}
+
+/* round 100: a copy/blit into a small texture while a backdrop is captured or drawn */
+static void
+sgl_bd_copy(const char *what, GLint dest, GLint x, GLint y, GLsizei w, GLsizei h, int after)
+{
+	if (bd_arm <= 0 || bd_copies <= 0 || dest <= 0 || dest >= TEXSZ_MAX || tex_w[dest] > 400 || tex_h[dest] > 400) {
+		return;
+	}
+	bd_copies--;
+	char d[64];
+	sgl_bd_tex((GLuint)dest, d);
+	if (after) {
+		sweet_drm_log("sweetgl: BDCP %s %dx%d after: dest tex %d %s", what, bd_w, bd_h, dest, d);
+		return;
+	}
+	GLint rf = 0, ra = 0;
+	uint8_t px[4] = {0, 0, 0, 0};
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &rf);
+	if (rf != 0) {
+		glGetFramebufferAttachmentParameteriv(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &ra);
+		glReadPixels(x + w / 2, y + h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	}
+	sweet_drm_log("sweetgl: BDCP %s %dx%d: read fbo %d tex %d (%dx%d%s) rect %d,%d %dx%d centre %02x%02x%02x%02x -> dest tex %d "
+	    "before %s held-clear %d blur-s %d", what, bd_w, bd_h, rf, ra, ra > 0 && ra < TEXSZ_MAX ? tex_w[ra] : 0,
+	    ra > 0 && ra < TEXSZ_MAX ? tex_h[ra] : 0, nat_fb(GL_READ_FRAMEBUFFER) ? " native" : "", x, y, w, h, px[0], px[1],
+	    px[2], px[3], dest, d, pend_clear.on, dest < 8192 ? is_blur_s[dest] : 0);
 }'''),
     ('''	int w = b ? (int)b[2] : -1, h = b ? (int)b[3] : -1;''',
      '''	int w = b ? (int)b[2] : -1, h = b ? (int)b[3] : -1;
 	if (((id == 12 && why[0] == 'o') || (id == 13 && why[1] == 'a')) && w > 0 && w <= 400 && h > 0 && h <= 400) {
 		sgl_bd_arm_for(id == 12 ? 'd' : 'c', w, h);
 	}'''),
-    ('''	sgl_probe(mode, count, 0, NULL, first);''', '''	sgl_bd_gl(mode, count);
-	sgl_probe(mode, count, 0, NULL, first);'''),
-    ('''	sgl_probe(mode, count, type, indices, 0);''', '''	sgl_bd_gl(mode, count);
-	sgl_probe(mode, count, type, indices, 0);'''),
+    ('''static bool sgl_skip_draw;              /* ring_note: this draw is a 0x26 pass, skip it */''',
+     '''static bool sgl_skip_draw;              /* ring_note: this draw is a 0x26 pass, skip it */
+static void sgl_bd_gl(GLenum mode, GLsizei count);      /* round 99/100 (adapt.py) */
+static void sgl_bd_copy(const char *what, GLint dest, GLint x, GLint y, GLsizei w, GLsizei h, int after);'''),
+    ('''	sgl_skip_draw = vb == 1;''', '''	sgl_skip_draw = vb == 1;
+	sgl_bd_gl(r->mode, r->count);'''),
+    # FBO attachment cache: CA re-attaches other textures to the same FBO
+    ('''		static GLint att_fbo = -1, att_tex;
+		if (r->fbo != att_fbo) {''', '''		static GLint att_fbo = -1, att_tex;
+		static unsigned stale_told;
+		if (r->fbo == att_fbo && r->fbo != 0 && stale_told < 40) {
+			GLint t = 0, nm = 0;
+			glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+			    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &t);
+			if (t == GL_TEXTURE) {
+				glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+				    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &nm);
+			}
+			if (nm != att_tex) {
+				stale_told++;
+				sweet_drm_log("sweetgl: STALE att cache: draw %u fbo %d now tex %d, cache says tex %d (prog %d kind %d)",
+				    r->seq, r->fbo, nm, att_tex, prog, prog_texfn_kind(prog));
+			}
+		}
+		if (r->fbo != att_fbo) {'''),
+    # copies and blits while a backdrop is being captured/drawn
+    ('''	target = SGL_TGT(target);
+	{
+		GLint dt = 0;
+		glGetIntegerv(target == GL_TEXTURE_2D ? GL_TEXTURE_BINDING_2D : GL_TEXTURE_BINDING_CUBE_MAP, &dt);
+		pend_clear_before_copy(dt, "copy");
+	}''', '''	target = SGL_TGT(target);
+	GLint bd_dt = 0;
+	{
+		GLint dt = 0;
+		glGetIntegerv(target == GL_TEXTURE_2D ? GL_TEXTURE_BINDING_2D : GL_TEXTURE_BINDING_CUBE_MAP, &dt);
+		bd_dt = dt;
+		sgl_bd_copy("copy", dt, x, y, width, height, 0);
+		pend_clear_before_copy(dt, "copy");
+	}'''),
+    ('''		glCopyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height);
+		SGL_POST(56);
+		return;''', '''		glCopyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height);
+		sgl_bd_copy("copy", bd_dt, xoffset, yoffset, width, height, 1);
+		SGL_POST(56);
+		return;'''),
+    ('''		pend_clear_before_copy(nm, "blit");
+	}''', '''		sgl_bd_copy("blit", nm, srcX0, srcY0, srcX1 - srcX0, srcY1 - srcY0, 0);
+		pend_clear_before_copy(nm, "blit");
+	}'''),
 ])
