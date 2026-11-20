@@ -2127,3 +2127,140 @@ sweetgl_load(void)
 		}"""),
 ])
 
+
+# Round 98: why the folder icon's frosted square (and the open folder's panel)
+# draw nothing while the dock's material works. QuartzCore's GL renderer draws
+# a BackdropLayer only from its group's BackdropBuffer (render_subclass
+# visitor, 0x1882f3798 on the phone); capture_backdrop (0x188318a64) fills that
+# buffer only if the group was set up for the current render pass (group
+# +0x1b0 == pass id). Guess: the folder icon's backdrop sits in a masked
+# (offscreen) pass, so the ids never match. Two entry hooks log, once per
+# distinct case (max 400 lines), the layer size, group, pass ids, buffer,
+# context and surface: "sweetgl: BD draw|cap ...". Addresses below are
+# sailfish's (phone - 0x4000, added back by sgl_qc_delta).
+edit('eagl.c', [
+    ('#define SGL_HOOKS 12', '#define SGL_HOOKS 14'),
+    ('''"create_shader"},''', '''"create_shader"},
+	{0x1882ef798, {0x6db733ed, 0x6d012beb, 0x6d0223e9, 0xa9036ffc}, "backdrop_visit"},
+	{0x188314a64, {0x6db63bef, 0x6d0133ed, 0x6d022beb, 0x6d0323e9}, "capture_backdrop"},'''),
+    ('''void sgl_hook_log(uint64_t id, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t lr);''',
+     '''void sgl_hook_log(uint64_t id, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t lr);
+
+/* A510F round 98 (adapt.py): backdrop draw (12) and capture (13) state */
+static void
+sgl_bd_log(uint64_t id, uint64_t x0, uint64_t x1)
+{
+	static unsigned lines, calls[2];
+	static uint64_t seen[512];
+	static int nseen;
+	unsigned c = ++calls[id - 12];
+	uint64_t L = id == 12 ? *(const uint64_t *)(uintptr_t)(x0 + 0x10) : x1;       /* OGL::Layer */
+	uint64_t R = id == 12 ? *(const uint64_t *)(uintptr_t)(x0 + 8) : x0;          /* Renderer */
+	if (L == 0 || R == 0 || lines >= 400) {
+		return;
+	}
+	uint64_t C = *(const uint64_t *)(uintptr_t)R;                                  /* Context */
+	uint64_t P = *(const uint64_t *)(uintptr_t)(R + 8);
+	uint32_t pass = P ? *(const uint32_t *)(uintptr_t)(P + 0xe0) : 0;
+	uint32_t frame = P ? *(const uint32_t *)(uintptr_t)(P + 0xf0) : 0;
+	uint64_t RL = *(const uint64_t *)(uintptr_t)(L + 0x18);                        /* Render::Layer */
+	const double *b = RL ? (const double *)(uintptr_t)(RL + 0x40) : NULL;
+	uint64_t N = *(const uint64_t *)(uintptr_t)(L + 0x10);
+	uint64_t bd = N ? *(const uint64_t *)(uintptr_t)(N + 0xe8) : 0;
+	uint64_t g = bd ? *(const uint64_t *)(uintptr_t)(bd + 0x28) : 0;
+	uint64_t key = bd ? *(const uint64_t *)(uintptr_t)(bd + 0x18) : 0;
+	uint64_t buf = g ? *(const uint64_t *)(uintptr_t)(g + 0x30) : 0;
+	uint64_t bctx = buf ? *(const uint64_t *)(uintptr_t)(buf + 8) : 0;
+	uint64_t surf = buf ? *(const uint64_t *)(uintptr_t)(buf + 0x20) : 0;
+	uint32_t g1b0 = g ? *(const uint32_t *)(uintptr_t)(g + 0x1b0) : 0;
+	uint32_t g1b4 = g ? *(const uint32_t *)(uintptr_t)(g + 0x1b4) : 0;
+	uint64_t ib = g ? *(const uint64_t *)(uintptr_t)(g + 0x40) : 0;
+	uint64_t ie = g ? *(const uint64_t *)(uintptr_t)(g + 0x48) : 0;
+	int n = ib && ie > ib ? (int)((ie - ib) / 0xa8) : 0;
+	int mine = -1, last = -1;
+	char items[160] = "";
+	for (int i = 0; i < n; i++) {
+		const uint8_t *it = (const uint8_t *)(uintptr_t)(ib + 0xa8 * (uint64_t)i);
+		bool m = *(const uint64_t *)(const void *)it == key;
+		if (m) {
+			last = i;
+			if (mine < 0) {
+				mine = i;
+			}
+		}
+		if (i < 8) {
+			size_t l = strlen(items);
+			snprintf(items + l, sizeof(items) - l, " %s%u/%u", m ? "*" : "", it[0xa0],
+			    *(const uint32_t *)(const void *)(it + 0xa4));
+		}
+	}
+	const char *why = bd == 0 ? "no-bd" : g == 0 ? "no-group" : mine < 0 ? "not-in-group" : buf == 0 ? "no-buffer" :
+	    bctx != C ? "other-context" : surf == 0 ? "no-surface" : "ok";
+	if (id == 13) {
+		why = bd == 0 ? "no-bd" : g == 0 ? "no-group" : g1b0 != pass ? "group-pass-differs" :
+		    last < 0 ? "not-in-group" : last != n - 1 ? "not-last-item" : "capture";
+	}
+	int w = b ? (int)b[2] : -1, h = b ? (int)b[3] : -1;
+	uint64_t sig = (uint64_t)id << 60 ^ (uint64_t)(w & 0xfff) << 48 ^ (uint64_t)(h & 0xfff) << 36 ^
+	    (uint64_t)(n & 0xff) << 28 ^ (uint64_t)(why[0] ^ why[3] << 7) << 12 ^ (uint64_t)(g1b0 == pass) << 8 ^
+	    (uint64_t)(mine & 0xff);
+	for (int i = 0; i < nseen; i++) {
+		if (seen[i] == sig) {
+			return;
+		}
+	}
+	if (nseen < 512) {
+		seen[nseen++] = sig;
+	}
+	lines++;
+	sweet_drm_log("sweetgl: BD %s #%u %s: layer %dx%d at %g,%g pass %u frame %u | group %#llx set-up pass %u last %u/%u, "
+	    "%d items (mine %d, last %d):%s | buffer %#llx ctx %s surface %#llx last %u/%u | ctx+0x1a8 %#llx",
+	    id == 12 ? "draw" : "cap", c, why, w, h, b ? b[0] : 0.0, b ? b[1] : 0.0, pass, frame,
+	    (unsigned long long)g, g1b0, g1b4, g ? *(const uint32_t *)(uintptr_t)(g + 0x1b8) : 0, n, mine, last, items,
+	    (unsigned long long)buf, buf == 0 ? "-" : bctx == C ? "same" : "OTHER", (unsigned long long)surf,
+	    buf ? *(const uint32_t *)(uintptr_t)(buf + 0x34) : 0, buf ? *(const uint32_t *)(uintptr_t)(buf + 0x38) : 0,
+	    C ? (unsigned long long)*(const uint64_t *)(uintptr_t)(C + 0x1a8) : 0ull);
+}'''),
+    ('''	unsigned c = ++calls[id];''', '''	if (id >= 12) {
+		sgl_bd_log(id, x0, x1);
+		return;
+	}
+	unsigned c = ++calls[id];'''),
+    ('''SGL_HOOK_STUB(11, 0xa9ba6ffc, 0xa90167fa, 0xa9025ff8, 0xa90357f6)''',
+     '''SGL_HOOK_STUB(11, 0xa9ba6ffc, 0xa90167fa, 0xa9025ff8, 0xa90357f6)
+SGL_HOOK_STUB(12, 0x6db733ed, 0x6d012beb, 0x6d0223e9, 0xa9036ffc)
+SGL_HOOK_STUB(13, 0x6db63bef, 0x6d0133ed, 0x6d022beb, 0x6d0323e9)'''),
+    ('''    sgl_hook_stub11};''', '''    sgl_hook_stub11, sgl_hook_stub12, sgl_hook_stub13};'''),
+    ('''
+static void
+sgl_install_fmt_hook(void)
+''', '''
+/* round 98: only the two backdrop hooks, always on (SWEETGL_BD=0 off) */
+static void
+sgl_install_bd_hooks(void)
+{
+	const char *e = getenv("SWEETGL_BD");
+	size_t len = 0;
+	const void *cache = _dyld_get_shared_cache_range(&len);
+	if ((e != NULL && e[0] == '0') || cache == NULL) {
+		return;
+	}
+	if (sgl_cache_slide == 0) {
+		sgl_cache_slide = (uint64_t)(uintptr_t)cache - 0x180000000ull + sgl_qc_delta(cache);
+	}
+	for (int i = 12; i < SGL_HOOKS; i++) {
+		uint32_t *t = (uint32_t *)(uintptr_t)(sgl_hook_def[i].addr + sgl_cache_slide);
+		sgl_hook_cont[i] = (uint64_t)(uintptr_t)t + 16;
+		bool ok = sgl_patch(t, sgl_hook_def[i].code, sgl_hook_stub[i]);
+		sweet_drm_log("sweetgl: hook %s at %p: %s", sgl_hook_def[i].name, (void *)t, ok ? "installed" : "FAILED");
+	}
+}
+
+static void
+sgl_install_fmt_hook(void)
+'''),
+    ('''	sgl_install_texfns();
+	if (trace_left > 0) {''', '''	sgl_install_texfns();
+	sgl_install_bd_hooks();
+	if (trace_left > 0) {'''),
+])
