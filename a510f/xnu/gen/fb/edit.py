@@ -1192,3 +1192,68 @@ rep("""		uint64_t t3 = mach_absolute_time();
 			presentFit(s, src, bpe, sx, sy, dx, dy, w, h);""")
 open(p, 'w', encoding='utf-8', newline='\n').write(s)
 print('ok native 1080p present')
+
+# --- speed (round 101): a present waits only for its own frame's GPU jobs.
+# present() waited for every job queued so far, i.e. also the next frame's
+# jobs CoreAnimation queued after the swap, so the panel copy of frame N
+# finished only after frame N+1's rendering and the next swap waited for it
+# (round 98: GPU busy ~60% during swipes, frames ~14/s, swaps waited
+# ~500 ms/10 s). The swap now records the newest job number (the frame's
+# jobs were all submitted before it: CA flushes, then swaps); the present of
+# that frame waits for that number only. Redraws of the last frame (fade)
+# still wait for everything. Boot-arg sweetfb_allwait=1: the old wait.
+rep("""	void present(const uint8_t *rec);""", """	void present(const uint8_t *rec, uint64_t seq = 0);
+	uint64_t      fPendingSeq;    /* GPU job number at the pending swap */""")
+rep("""AppleCLCD::present(const uint8_t *rec)
+{
+	uint32_t mask = get32(rec, 0x104);
+	sweet_mali_wait_seq(sweet_mali_seq());          /* every GPU job queued so far is done */""", """AppleCLCD::present(const uint8_t *rec, uint64_t seq)
+{
+	uint32_t mask = get32(rec, 0x104);
+	/* the jobs of this frame (queued before its swap), or every job so far */
+	sweet_mali_wait_seq(seq != 0 && !sweet_fb_allwait ? seq : sweet_mali_seq());""")
+rep("""	uint64_t now = mach_absolute_time();
+	IOLockLock(fLock);
+	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+	if (fWakeSkip""", """	uint64_t now = mach_absolute_time();
+	uint64_t seq = sweet_mali_seq();                /* this frame's GPU jobs are all queued */
+	IOLockLock(fLock);
+	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+	fPendingSeq = seq;
+	if (fWakeSkip""")
+rep("""		memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);  /* the newest swap */""",
+    """		memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);  /* the newest swap */
+		fPendingSeq = seq;""")
+rep("""	if (due) {
+		present(rec);
+	}
+	if ((++sweet_fb_swap_count % 1000) == 0) {""", """	if (due) {
+		present(rec, seq);
+	}
+	if ((++sweet_fb_swap_count % 1000) == 0) {""")
+rep("""	uint8_t *rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+	IOLockLock(fb->fLock);
+	if (rec != NULL) {
+		memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
+		fb->fDirty = false;
+	}
+	IOLockUnlock(fb->fLock);
+	if (rec != NULL) {
+		fb->present(rec);""", """	uint8_t *rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+	uint64_t seq = 0;
+	IOLockLock(fb->fLock);
+	if (rec != NULL) {
+		memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
+		seq = fb->fPendingSeq;
+		fb->fDirty = false;
+	}
+	IOLockUnlock(fb->fLock);
+	if (rec != NULL) {
+		fb->present(rec, seq);""")
+rep("""static uint32_t             sweet_fb_async = 1;""", """static uint32_t             sweet_fb_async = 1;
+static uint32_t             sweet_fb_allwait;       /* 1: a present waits for every queued GPU job */""")
+rep("""	PE_parse_boot_argn("sweetfb_async", &sweet_fb_async, sizeof(sweet_fb_async));""",
+    """	PE_parse_boot_argn("sweetfb_async", &sweet_fb_async, sizeof(sweet_fb_async));
+	PE_parse_boot_argn("sweetfb_allwait", &sweet_fb_allwait, sizeof(sweet_fb_allwait));""")
+open(p, 'w', encoding='utf-8', newline='\n').write(s)
+print('ok present waits for its own frame')
