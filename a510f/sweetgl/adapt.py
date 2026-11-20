@@ -2290,6 +2290,11 @@ sgl_install_fmt_hook(void)
 # (program 61, screen -> 21x22) writes grey with alpha 0 (26262600) from a
 # screen holding the wallpaper: it samples nothing, then adds the material's
 # brightness. BDSH now also dumps the capture programs' samplers and shaders.
+# Round 105: round 104 named it: the program is CA's luminanceCurve(s0,
+# function_arg, color.a) (texture function 0x31, folderLight's luminance
+# curve) and it has no sampler, so s0 is zero: x = p.w (0x26 grey), alpha
+# s0.a = 0. Full fragment source (newlines as '|': the log cut each chunk at
+# its first newline).
 edit('eagl.c', [
     ('''static unsigned char tex_rt[TEXSZ_MAX];         /* attached to a framebuffer (round 65 probe) */''',
      '''static unsigned char tex_rt[TEXSZ_MAX];         /* attached to a framebuffer (round 65 probe) */
@@ -2485,7 +2490,12 @@ sgl_bd_gl(GLenum mode, GLsizei count)
 			continue;
 		}
 		glGetShaderSource(sh[k], len + 1, NULL, src);
-		for (GLint o = 0; o < len && o < 6000; o += 180) {
+		for (char *q = src; *q; q++) {
+			if (*q == '\n') {
+				*q = '|';       /* round 105: the log keeps one line per call */
+			}
+		}
+		for (GLint o = 0; o < len && o < 8000; o += 180) {
 			sweet_drm_log("sweetgl: BDSH prog %d fs %d: %.180s", prog, o, src + o);
 		}
 		free(src);
