@@ -2264,3 +2264,123 @@ sgl_install_fmt_hook(void)
 	sgl_install_bd_hooks();
 	if (trace_left > 0) {'''),
 ])
+
+# Round 99: round 98 showed CA captures and draws every backdrop (folder icon
+# 60x60, open folder panel 318x340: "capture", "ok"), yet nothing shows. So
+# look at the GL level: a small backdrop draw or capture (<= 400x400 pt) arms
+# a log of the next GL draws (draw: 4, capture: 10; each size and kind at most
+# 3 times, 5 s apart; 160 lines): target, program, blend, colour mask, and
+# pixels read back from the textures on units 0 and 1 ("sweetgl: BDGL ...").
+edit('eagl.c', [
+    ('''static unsigned char tex_rt[TEXSZ_MAX];         /* attached to a framebuffer (round 65 probe) */''',
+     '''static unsigned char tex_rt[TEXSZ_MAX];         /* attached to a framebuffer (round 65 probe) */
+
+/* round 99 (adapt.py): GL draws right after a small backdrop draw/capture */
+static int bd_arm, bd_budget = 160, bd_w, bd_h;
+static char bd_what;
+
+static void
+sgl_bd_arm_for(char what, int w, int h)
+{
+	static struct { char what; int w, h, n; time_t last; } seen[64];
+	static int nseen;
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	int i;
+	for (i = 0; i < nseen; i++) {
+		if (seen[i].what == what && seen[i].w == w && seen[i].h == h) {
+			break;
+		}
+	}
+	if (i == nseen) {
+		if (nseen == 64) {
+			return;
+		}
+		seen[nseen++] = (typeof(seen[0])){what, w, h, 0, 0};
+	}
+	if (seen[i].n >= 3 || (seen[i].n > 0 && ts.tv_sec - seen[i].last < 5) || bd_budget <= 0) {
+		return;
+	}
+	seen[i].n++;
+	seen[i].last = ts.tv_sec;
+	bd_arm = what == 'c' ? 10 : 4;
+	bd_what = what;
+	bd_w = w;
+	bd_h = h;
+}
+
+static void
+sgl_bd_tex(GLuint t, char out[64])
+{
+	uint8_t px[3][4];
+	memset(px, 0, sizeof(px));
+	out[0] = 0;
+	if (t == 0 || t >= TEXSZ_MAX || tex_w[t] == 0) {
+		snprintf(out, 64, "-");
+		return;
+	}
+	GLint keep = 0;
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &keep);
+	static GLuint rfb;
+	if (rfb == 0) {
+		glGenFramebuffers(1, &rfb);
+	}
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, rfb);
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t, 0);
+	GLenum st = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
+	GLint w = tex_w[t], h = tex_h[t];
+	if (st == GL_FRAMEBUFFER_COMPLETE) {
+		GLint pts[3][2] = {{w / 2, h / 2}, {w / 4, h / 4}, {3 * w / 4, 3 * h / 4}};
+		for (int i = 0; i < 3; i++) {
+			glReadPixels(pts[i][0], pts[i][1], 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[i]);
+		}
+	}
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)keep);
+	snprintf(out, 64, "%dx%d st %#x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x", w, h, st, px[0][0], px[0][1],
+	    px[0][2], px[0][3], px[1][0], px[1][1], px[1][2], px[1][3], px[2][0], px[2][1], px[2][2], px[2][3]);
+}
+
+static void
+sgl_bd_gl(GLenum mode, GLsizei count)
+{
+	if (bd_arm <= 0 || bd_budget <= 0) {
+		return;
+	}
+	bd_arm--;
+	bd_budget--;
+	GLint vp[4] = {0}, sc[4] = {0}, fb = 0, prog = 0, bs = 0, bdst = 0, eq = 0, att = 0;
+	GLboolean cm[4] = {1, 1, 1, 1};
+	glGetIntegerv(GL_VIEWPORT, vp);
+	glGetIntegerv(GL_SCISSOR_BOX, sc);
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fb);
+	glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+	glGetIntegerv(GL_BLEND_SRC_RGB, &bs);
+	glGetIntegerv(GL_BLEND_DST_RGB, &bdst);
+	glGetIntegerv(GL_BLEND_EQUATION_RGB, &eq);
+	glGetBooleanv(GL_COLOR_WRITEMASK, cm);
+	if (fb != 0) {
+		glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &att);
+	}
+	GLuint t0 = unit_held[0], t1 = unit_held[1];
+	char s0[64], s1[64];
+	sgl_bd_tex(t0, s0);
+	sgl_bd_tex(t1, s1);
+	sweet_drm_log("sweetgl: BDGL %s %dx%d: vp %d,%d %dx%d sc %d %d,%d %dx%d fb %d att %d (%dx%d%s) prog %d mode %#x n %d "
+	    "blend %d %#x/%#x eq %#x mask %d%d%d%d | u0 %u %s last-draw %u | u1 %u %s",
+	    bd_what == 'c' ? "cap" : "draw", bd_w, bd_h, vp[0], vp[1], vp[2], vp[3], glIsEnabled(GL_SCISSOR_TEST), sc[0], sc[1],
+	    sc[2], sc[3], fb, att, att > 0 && att < TEXSZ_MAX ? tex_w[att] : 0, att > 0 && att < TEXSZ_MAX ? tex_h[att] : 0,
+	    nat_fb(GL_DRAW_FRAMEBUFFER) ? " native" : "", prog, mode, count, glIsEnabled(GL_BLEND), bs, bdst, eq, cm[0], cm[1],
+	    cm[2], cm[3], t0, s0, t0 < 8192 ? tex_last_draw[t0] : 0, t1, s1);
+}'''),
+    ('''	int w = b ? (int)b[2] : -1, h = b ? (int)b[3] : -1;''',
+     '''	int w = b ? (int)b[2] : -1, h = b ? (int)b[3] : -1;
+	if (((id == 12 && why[0] == 'o') || (id == 13 && why[1] == 'a')) && w > 0 && w <= 400 && h > 0 && h <= 400) {
+		sgl_bd_arm_for(id == 12 ? 'd' : 'c', w, h);
+	}'''),
+    ('''	sgl_probe(mode, count, 0, NULL, first);''', '''	sgl_bd_gl(mode, count);
+	sgl_probe(mode, count, 0, NULL, first);'''),
+    ('''	sgl_probe(mode, count, type, indices, 0);''', '''	sgl_bd_gl(mode, count);
+	sgl_probe(mode, count, type, indices, 0);'''),
+])
