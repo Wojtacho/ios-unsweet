@@ -1794,3 +1794,34 @@ file system), Wi-Fi interrupts/DMA, remove a510fsbsql when no longer needed.
   twrp-write/scripts/round98.txt (Safari types apple.com: no favourites).
   Round 98 was running when the PC restarted: pull with
   `python3 auto.py pull out/r98`.
+
+## 2026-11-20 (evening): rounds 99-105 (folder square, switcher, speed)
+
+- Round 102 (sweetgl): surfaces whose pitch is not a multiple of 64 bytes were
+  copied from CPU memory into the bound texture on every bind, so GPU renders
+  into them were lost. Each such surface now has one GPU shadow resource shared
+  by every bind (SWEETGL_SHADOW=0 turns it off). Fixed the **app switcher
+  background** (was black). The folder square is still missing.
+- Folder square (rounds 99-105, BDGL/BDCP/BDSH logs): QuartzCore captures and
+  draws the folder backdrop ("ok"). The colour is lost in the first capture
+  step: the program is CA's luminanceCurve(s0, function_arg, color.a) (texture
+  function 0x31, folderLight's luminance curve) and it has no sampler, so s0 =
+  0 -> grey p.w (0x26) with alpha 0. CA's GLSL for it:
+  `x = dot(s0.rgb, (.2125,.7154,.0721)); x = clamp(((p.x*x+p.y)*x+p.z)*x+p.w);
+  vec4(mix(s0.rgb, vec3(x), a), s0.a)`. The tex_fragment_shaders table is read
+  from local dsc pieces at 0x1d5b48a10 (phone); 0x14/0x19/0x1c/0x26-0x28/0x2d/
+  0x33+ are NULL. Round 105 (sweetgl run 44808891411) dumps the program's full
+  source to find why s0 is not sampled. The first 105 build failed on a newline
+  escape; 44808891411 is the fixed one.
+- Speed: round 101 (kernel: a present waits only for its own frame) made no
+  difference (~150 frames/10 s). Round 102 kernel GPU idle split: idle =
+  "queue empty" (0.7-1 s per 2 s), g_lock wait ~0, so backboardd starves the
+  GPU. backboardd's samples are mostly in mach_msg2_trap (kernel, IOKit calls)
+  plus K 0xfffffff00743ec64 (top). The kernel symbol lookup workflow
+  (.github/workflows/a510f-ksym.yml) is committed on the local branch
+  `ksym-wip` only: pushing workflow files needs `gh auth refresh -s workflow`.
+- Screenshots of every round: /mnt/dane2/Claude/Screenshots/round N (auto.py
+  pull copies them). Round runner: twrp-write/ci-tools/glround.sh SWEETGL_RUN
+  ROUND [KERNEL_RUN] (kernel -> boot tar -> flash; sweetgl -> install; run).
+  On the phone now: kernel round 102 (a510f-ios-boot-r102.tar), sweetgl round
+  104.
