@@ -2282,6 +2282,10 @@ sgl_install_fmt_hook(void)
 # drew into (ff000000). For each material draw program (once): every
 # sampler's unit, its texture and contents, and the fragment shader source
 # ("BDSH").
+# Round 103: the folder's capture result is grey with alpha 0 (26262600):
+# the colour is lost in the downscale steps. Each logged draw into a texture
+# is followed by a readback of what it wrote ("BDGL   -> tex ... now"), at
+# the centre and quarter points of its scissor box.
 edit('eagl.c', [
     ('''static unsigned char tex_rt[TEXSZ_MAX];         /* attached to a framebuffer (round 65 probe) */''',
      '''static unsigned char tex_rt[TEXSZ_MAX];         /* attached to a framebuffer (round 65 probe) */
@@ -2314,7 +2318,7 @@ sgl_bd_arm_for(char what, int w, int h)
 	}
 	seen[i].n++;
 	seen[i].last = ts.tv_sec;
-	bd_arm = what == 'c' ? 40 : 4;
+	bd_arm = what == 'c' ? 40 : 6;
 	bd_what = what;
 	bd_w = w;
 	bd_h = h;
@@ -2352,9 +2356,51 @@ sgl_bd_tex(GLuint t, char out[64])
 	    px[0][2], px[0][3], px[1][0], px[1][1], px[1][2], px[1][3], px[2][0], px[2][1], px[2][2], px[2][3]);
 }
 
+/* round 103: what the previous logged draw wrote (its target at its scissor box's centre) */
+static GLint bd_prev_att = -1, bd_prev_sc[4];
+static void
+sgl_bd_after(void)
+{
+	if (bd_prev_att <= 0) {
+		bd_prev_att = -1;
+		return;
+	}
+	GLuint t = (GLuint)bd_prev_att;
+	bd_prev_att = -1;
+	if (t >= TEXSZ_MAX || tex_w[t] == 0) {
+		return;
+	}
+	GLint keep = 0;
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &keep);
+	static GLuint afb;
+	if (afb == 0) {
+		glGenFramebuffers(1, &afb);
+	}
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, afb);
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t, 0);
+	uint8_t px[3][4];
+	memset(px, 0, sizeof(px));
+	GLenum st = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
+	GLint x = bd_prev_sc[0], y = bd_prev_sc[1], w = bd_prev_sc[2], h = bd_prev_sc[3];
+	if (st == GL_FRAMEBUFFER_COMPLETE) {
+		GLint pts[3][2] = {{x + w / 2, y + h / 2}, {x + w / 4, y + h / 4}, {x + 3 * w / 4, y + 3 * h / 4}};
+		for (int i = 0; i < 3; i++) {
+			glReadPixels(pts[i][0], pts[i][1], 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[i]);
+		}
+	}
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)keep);
+	sweet_drm_log("sweetgl: BDGL   -> tex %u at %d,%d %dx%d now %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x (st %#x)", t,
+	    x, y, w, h, px[0][0], px[0][1], px[0][2], px[0][3], px[1][0], px[1][1], px[1][2], px[1][3], px[2][0], px[2][1],
+	    px[2][2], px[2][3], st);
+}
+
 static void
 sgl_bd_gl(GLenum mode, GLsizei count)
 {
+	if (bd_prev_att >= 0) {
+		sgl_bd_after();         /* the previous logged draw has been issued by now */
+	}
 	if (bd_arm <= 0 || bd_budget <= 0) {
 		return;
 	}
@@ -2376,6 +2422,14 @@ sgl_bd_gl(GLenum mode, GLsizei count)
 	}
 	GLuint t0 = unit_held[0], t1 = unit_held[1];
 	char s0[64], s1[64];
+	if (fb != 0 && att > 0 && !nat_fb(GL_DRAW_FRAMEBUFFER) && !sgl_skip_draw) {
+		bool scon = glIsEnabled(GL_SCISSOR_TEST);
+		bd_prev_att = att;
+		bd_prev_sc[0] = scon ? sc[0] : vp[0];
+		bd_prev_sc[1] = scon ? sc[1] : vp[1];
+		bd_prev_sc[2] = scon ? sc[2] : vp[2];
+		bd_prev_sc[3] = scon ? sc[3] : vp[3];
+	}
 	sgl_bd_tex(t0, s0);
 	sgl_bd_tex(t1, s1);
 	sweet_drm_log("sweetgl: BDGL %s %dx%d%s: vp %d,%d %dx%d sc %d %d,%d %dx%d fb %d att %d (%dx%d%s) prog %d mode %#x n %d "
