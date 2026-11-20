@@ -2277,6 +2277,11 @@ sgl_install_fmt_hook(void)
 # and blits into small textures ("BDCP", pixels before/after); and ring_note's
 # FBO attachment cache, which only re-reads when the FBO number changes while
 # CA re-attaches textures to the same FBO ("STALE att cache").
+# Round 101: round 100's capture wrote the folder's blurred backdrop into a
+# 24x25 texture, but the material draw's unit 0 holds a 23x23 texture nothing
+# drew into (ff000000). For each material draw program (once): every
+# sampler's unit, its texture and contents, and the fragment shader source
+# ("BDSH").
 edit('eagl.c', [
     ('''static unsigned char tex_rt[TEXSZ_MAX];         /* attached to a framebuffer (round 65 probe) */''',
      '''static unsigned char tex_rt[TEXSZ_MAX];         /* attached to a framebuffer (round 65 probe) */
@@ -2379,6 +2384,54 @@ sgl_bd_gl(GLenum mode, GLsizei count)
 	    sc[2], sc[3], fb, att, att > 0 && att < TEXSZ_MAX ? tex_w[att] : 0, att > 0 && att < TEXSZ_MAX ? tex_h[att] : 0,
 	    nat_fb(GL_DRAW_FRAMEBUFFER) ? " native" : "", prog, mode, count, glIsEnabled(GL_BLEND), bs, bdst, eq, cm[0], cm[1],
 	    cm[2], cm[3], t0, s0, t0 < 8192 ? tex_last_draw[t0] : 0, t1, s1);
+	/* round 101: for a material draw, each sampler's unit and texture, and the fragment shader (once per program) */
+	static GLint shown_prog[8];
+	static int nshown;
+	bool seen_prog = false;
+	for (int i = 0; i < nshown; i++) {
+		seen_prog |= shown_prog[i] == prog;
+	}
+	if (bd_what != 'd' || seen_prog || nshown >= 8 || prog <= 0) {
+		return;
+	}
+	shown_prog[nshown++] = prog;
+	GLint nu = 0;
+	glGetProgramiv((GLuint)prog, GL_ACTIVE_UNIFORMS, &nu);
+	for (GLint i = 0; i < nu && i < 32; i++) {
+		char name[64];
+		GLint size = 0, unit = -1;
+		GLenum type = 0;
+		glGetActiveUniform((GLuint)prog, (GLuint)i, sizeof(name), NULL, &size, &type, name);
+		if (type != GL_SAMPLER_2D && type != GL_SAMPLER_CUBE && type != GL_SAMPLER_2D_ARRAY && type != GL_SAMPLER_3D) {
+			continue;
+		}
+		glGetUniformiv((GLuint)prog, glGetUniformLocation((GLuint)prog, name), &unit);
+		GLuint t = unit >= 0 && unit < 16 ? unit_held[unit] : 0;
+		char st[64];
+		sgl_bd_tex(t, st);
+		sweet_drm_log("sweetgl: BDSH prog %d sampler %s type %#x unit %d tex %u %s kind %c surf %u", prog, name, type,
+		    unit, t, st, t > 0 && t < 8192 && tex_src[t].kind ? tex_src[t].kind : '-', t > 0 && t < 8192 ? tex_src[t].surf : 0);
+	}
+	GLuint sh[4];
+	GLsizei nsh = 0;
+	glGetAttachedShaders((GLuint)prog, 4, &nsh, sh);
+	for (GLsizei k = 0; k < nsh; k++) {
+		GLint type = 0, len = 0;
+		glGetShaderiv(sh[k], GL_SHADER_TYPE, &type);
+		glGetShaderiv(sh[k], GL_SHADER_SOURCE_LENGTH, &len);
+		if (type != GL_FRAGMENT_SHADER || len <= 0) {
+			continue;
+		}
+		char *src = malloc((size_t)len + 1);
+		if (src == NULL) {
+			continue;
+		}
+		glGetShaderSource(sh[k], len + 1, NULL, src);
+		for (GLint o = 0; o < len && o < 6000; o += 180) {
+			sweet_drm_log("sweetgl: BDSH prog %d fs %d: %.180s", prog, o, src + o);
+		}
+		free(src);
+	}
 }
 
 /* round 100: a copy/blit into a small texture while a backdrop is captured or drawn */
